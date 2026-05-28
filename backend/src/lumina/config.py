@@ -1,0 +1,40 @@
+from functools import lru_cache
+from urllib.parse import urlparse
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+    )
+
+    openai_api_key: str = ""
+    openai_base_url: str = "https://api.openai.com/v1"
+    openai_model: str = "gpt-4o"
+    llm_timeout_seconds: float = 60
+    llm_temperature: float = 0.2
+    llm_return_raw: bool = False
+    host: str = "127.0.0.1"
+    port: int = 18086
+    log_level: str = "INFO"
+    cors_allow_origins: str = "http://localhost:3000"
+
+    @property
+    def cors_origins_list(self) -> list[str]:
+        return [origin.strip() for origin in self.cors_allow_origins.split(",") if origin.strip()]
+
+
+def config_provider_ready(settings: Settings | None = None) -> bool:
+    cfg = settings or get_settings()
+    if not cfg.openai_api_key.strip():
+        return False
+    parsed = urlparse(cfg.openai_base_url.strip())
+    return bool(parsed.scheme and parsed.netloc)
+
+
+@lru_cache
+def get_settings() -> Settings:
+    return Settings()

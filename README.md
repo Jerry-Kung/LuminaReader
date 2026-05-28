@@ -343,3 +343,36 @@ V1.0 暂不重点实现：
 ## 11. 项目一句话总结
 
 **LuminaReader 是一个以 PDF 阅读为起点、以书籍 Project 为组织单位、以 AI Agent 为辅助能力的深度阅读助手。它的目标不是替用户读书，而是帮助用户更好地理解、追问、记录和整理自己的阅读过程。**
+
+---
+
+## 12. 本地启动（V0 阶段）
+
+V0 阶段的启动方式、配置项与故障速查由 `claude_docs/setup-and-run.md` 维护，本节仅给出最短路径。
+
+**前置依赖**：Node.js ≥ 20、Python 3.12、`uv` ≥ 0.4、npm、Git。
+
+**初始化**：
+
+```powershell
+# 后端
+cd backend
+uv sync
+Copy-Item .env.example .env   # 编辑 .env，填入 OPENAI_API_KEY / BASE_URL / MODEL
+cd ..
+
+# 前端
+cd frontend
+npm install
+Copy-Item .env.example .env
+cd ..
+```
+
+**启动**（两个独立终端）：
+
+```powershell
+.\scripts\dev-backend.ps1     # 后端，默认 http://127.0.0.1:18086
+.\scripts\dev-frontend.ps1    # 前端，默认 http://localhost:5173
+```
+
+完整流程、配置项语义、端口冲突应对、常见故障速查见 [`claude_docs/setup-and-run.md`](./claude_docs/setup-and-run.md)。

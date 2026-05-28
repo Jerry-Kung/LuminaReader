@@ -1,0 +1,104 @@
+import logging
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+
+import lumina
+from lumina.api.v0 import router as v0_router
+from lumina.config import Settings, get_settings
+from lumina.logging import get_logger, log_with_fields, setup_logging
+from lumina.providers import init_provider, reset_provider
+from lumina.request_id import generate_request_id
+from lumina.schemas.api import error_response
+
+
+def register_exception_handlers(app: FastAPI) -> None:
+    logger = get_logger("lumina.errors")
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_exception_handler(
+        request: Request, exc: RequestValidationError
+    ) -> JSONResponse:
+        request_id = generate_request_id()
+        log_with_fields(
+            logger,
+            logging.WARNING,
+            "request validation failed",
+            request_id=request_id,
+            path=str(request.url.path),
+            error_code="INVALID_REQUEST",
+        )
+        return JSONResponse(
+            status_code=400,
+            content=error_response(
+                code="INVALID_REQUEST",
+                message="Request validation failed.",
+                request_id=request_id,
+            ),
+        )
+
+    @app.exception_handler(Exception)
+    async def unhandled_exception_handler(request: Request, exc: Exception) -> JSONResponse:
+        request_id = generate_request_id()
+        log_with_fields(
+            logger,
+            logging.ERROR,
+            "unhandled exception",
+            request_id=request_id,
+            path=str(request.url.path),
+            error_code="INTERNAL_ERROR",
+            exception_type=type(exc).__name__,
+        )
+        return JSONResponse(
+            status_code=500,
+            content=error_response(
+                code="INTERNAL_ERROR",
+                message="An internal server error occurred.",
+                request_id=request_id,
+            ),
+        )
+
+
+def create_app(settings: Settings | None = None) -> FastAPI:
+    cfg = settings or get_settings()
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        setup_logging(cfg.log_level)
+        app.state.provider = init_provider(cfg)
+        logger = get_logger("lumina.startup")
+        log_with_fields(
+            logger,
+            logging.INFO,
+            "lumina-backend started",
+            service="lumina-backend",
+            version=lumina.__version__,
+            host=cfg.host,
+            port=cfg.port,
+        )
+        yield
+        reset_provider()
+
+    app = FastAPI(
+        title="lumina-backend",
+        version=lumina.__version__,
+        lifespan=lifespan,
+    )
+
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=cfg.cors_origins_list,
+        allow_credentials=True,
+        allow_methods=["*"],
+        allow_headers=["*"],
+    )
+
+    app.include_router(v0_router)
+    register_exception_handlers(app)
+    return app
+
+
+app = create_app()

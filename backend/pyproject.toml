@@ -1,0 +1,26 @@
+[project]
+name = "lumina"
+version = "0.1.0"
+description = "LuminaReader backend: PDF reading assistant API (FastAPI)"
+readme = "README.md"
+authors = [
+    { name = "Jerry-Kung", email = "jerrykung001@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.136.3",
+    "openai>=2.38.0",
+    "pydantic-settings>=2.14.1",
+    "uvicorn[standard]>=0.48.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.16,<0.12.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "httpx>=0.28.1",
+    "pytest>=9.0.3",
+    "pytest-asyncio>=1.4.0",
+]
