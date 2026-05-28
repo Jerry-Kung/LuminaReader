@@ -27,7 +27,7 @@ export function usePDF(): UsePDFReturn {
   const [pdfDoc, setPdfDoc] = useState<pdfjsLib.PDFDocumentProxy | null>(null);
   const [numPages, setNumPages] = useState(0);
   const [currentPage, setCurrentPage] = useState(1);
-  const [scale, setScale] = useState(1.2);
+  const [scale, setScale] = useState(1.0);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [fileName, setFileName] = useState('');
@@ -47,7 +47,7 @@ export function usePDF(): UsePDFReturn {
         setPdfDoc(doc);
         setNumPages(doc.numPages);
         setCurrentPage(1);
-        setScale(1.2);
+        setScale(1.0);
       } catch (err) {
         setError('Failed to load PDF. Please make sure it\'s a valid PDF file.');
         console.error('PDF load error:', err);
@@ -81,11 +81,11 @@ export function usePDF(): UsePDFReturn {
   }, [currentPage]);
 
   const zoomIn = useCallback(() => {
-    setScale((s) => Math.min(s + 0.2, 3.0));
+    setScale((s) => Math.min(s + 0.1, 3.0));
   }, []);
 
   const zoomOut = useCallback(() => {
-    setScale((s) => Math.max(s - 0.2, 0.4));
+    setScale((s) => Math.max(s - 0.1, 0.4));
   }, []);
 
   useEffect(() => {

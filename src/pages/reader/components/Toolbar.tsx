@@ -5,6 +5,7 @@ interface ToolbarProps {
   scale: number;
   hasSelection: boolean;
   isTranslating: boolean;
+  isSelecting: boolean;
   onOpenFile: () => void;
   onPrevPage: () => void;
   onNextPage: () => void;
@@ -12,6 +13,7 @@ interface ToolbarProps {
   onZoomIn: () => void;
   onZoomOut: () => void;
   onTranslate: () => void;
+  onToggleSelectionMode: () => void;
 }
 
 export default function Toolbar({
@@ -21,6 +23,7 @@ export default function Toolbar({
   scale,
   hasSelection,
   isTranslating,
+  isSelecting,
   onOpenFile,
   onPrevPage,
   onNextPage,
@@ -28,6 +31,7 @@ export default function Toolbar({
   onZoomIn,
   onZoomOut,
   onTranslate,
+  onToggleSelectionMode,
 }: ToolbarProps) {
   const handlePageInput = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') {
@@ -48,6 +52,20 @@ export default function Toolbar({
           <i className="ri-folder-open-line"></i>
           Open PDF
         </button>
+        {numPages > 0 && (
+          <button
+            onClick={onToggleSelectionMode}
+            className={`whitespace-nowrap flex items-center gap-2 px-3 py-2 text-sm font-medium rounded-md transition-colors cursor-pointer border ${
+              isSelecting
+                ? 'bg-amber-100 text-amber-700 border-amber-300'
+                : 'bg-stone-100 text-stone-700 hover:bg-stone-200 border-transparent'
+            }`}
+            title={isSelecting ? 'Press Esc to cancel' : 'Select an area on the PDF'}
+          >
+            <i className="ri-crop-line"></i>
+            {isSelecting ? 'Selecting...' : 'Select'}
+          </button>
+        )}
         {fileName && (
           <span className="text-sm text-stone-500 truncate max-w-[200px]" title={fileName}>
             {fileName}

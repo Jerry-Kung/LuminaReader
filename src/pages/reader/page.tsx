@@ -3,9 +3,12 @@ import { usePDF } from '@/hooks/usePDF';
 import { translateSelection } from '@/services/api';
 import Toolbar from './components/Toolbar';
 import PDFViewer from './components/PDFViewer';
-import TranslationPanel from './components/TranslationPanel';
+import AIAssistantPanel from './components/AIAssistantPanel';
 
-interface TranslationResult {
+interface AIResult {
+  id: number;
+  type: 'translate';
+  imageBase64: string;
   text: string;
   timestamp: number;
 }
@@ -34,8 +37,9 @@ export default function ReaderPage() {
     zoomOut,
   } = usePDF();
 
+  const [isSelecting, setIsSelecting] = useState(false);
   const [selectedArea, setSelectedArea] = useState<SelectedArea | null>(null);
-  const [translationResults, setTranslationResults] = useState<TranslationResult[]>([]);
+  const [aiResults, setAiResults] = useState<AIResult[]>([]);
   const [isTranslating, setIsTranslating] = useState(false);
   const [translationError, setTranslationError] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -50,10 +54,10 @@ export default function ReaderPage() {
       if (file && file.type === 'application/pdf') {
         loadPDF(file);
         setSelectedArea(null);
-        setTranslationResults([]);
+        setAiResults([]);
         setTranslationError(null);
+        setIsSelecting(false);
       } else if (file) {
-        // We don't have a good way to show error in the hook, but the hook handles it
         loadPDF(file);
       }
       if (fileInputRef.current) {
@@ -63,6 +67,18 @@ export default function ReaderPage() {
     [loadPDF],
   );
 
+  const handleToggleSelectionMode = useCallback(() => {
+    setIsSelecting((prev) => !prev);
+  }, []);
+
+  const handleSelectionModeExit = useCallback(() => {
+    setIsSelecting(false);
+  }, []);
+
+  const handleSelectionChange = useCallback((area: SelectedArea | null) => {
+    setSelectedArea(area);
+  }, []);
+
   const handleTranslate = useCallback(async () => {
     if (!selectedArea || !pdfDoc) return;
 
@@ -71,38 +87,49 @@ export default function ReaderPage() {
 
     try {
       const page = await pdfDoc.getPage(currentPage);
-      const viewport = page.getViewport({ scale });
+      const captureScale = 2.0;
+      const captureViewport = page.getViewport({ scale: captureScale });
 
       const canvas = document.createElement('canvas');
-      canvas.width = viewport.width;
-      canvas.height = viewport.height;
+      canvas.width = captureViewport.width;
+      canvas.height = captureViewport.height;
       const ctx = canvas.getContext('2d')!;
+      await page.render({ canvasContext: ctx, viewport: captureViewport }).promise;
 
-      await page.render({ canvasContext: ctx, viewport }).promise;
+      const captureX = selectedArea.x * captureViewport.width;
+      const captureY = selectedArea.y * captureViewport.height;
+      const captureWidth = selectedArea.width * captureViewport.width;
+      const captureHeight = selectedArea.height * captureViewport.height;
 
       const offCanvas = document.createElement('canvas');
-      offCanvas.width = selectedArea.width;
-      offCanvas.height = selectedArea.height;
+      offCanvas.width = Math.max(1, Math.round(captureWidth));
+      offCanvas.height = Math.max(1, Math.round(captureHeight));
       const offCtx = offCanvas.getContext('2d')!;
 
       offCtx.drawImage(
         canvas,
-        selectedArea.x,
-        selectedArea.y,
-        selectedArea.width,
-        selectedArea.height,
+        captureX,
+        captureY,
+        captureWidth,
+        captureHeight,
         0,
         0,
-        selectedArea.width,
-        selectedArea.height,
+        offCanvas.width,
+        offCanvas.height,
       );
 
       const imageBase64 = offCanvas.toDataURL('image/png');
 
       const result = await translateSelection(imageBase64, 'zh-CN');
 
-      setTranslationResults((prev) => [
-        { text: result.translated_text, timestamp: Date.now() },
+      setAiResults((prev) => [
+        {
+          id: Date.now(),
+          type: 'translate',
+          imageBase64,
+          text: result.translated_text,
+          timestamp: Date.now(),
+        },
         ...prev,
       ]);
     } catch (err: any) {
@@ -110,7 +137,7 @@ export default function ReaderPage() {
     } finally {
       setIsTranslating(false);
     }
-  }, [selectedArea, pdfDoc, currentPage, scale]);
+  }, [selectedArea, pdfDoc, currentPage]);
 
   return (
     <div className="h-screen flex flex-col bg-stone-50">
@@ -129,6 +156,7 @@ export default function ReaderPage() {
         scale={scale}
         hasSelection={!!selectedArea}
         isTranslating={isTranslating}
+        isSelecting={isSelecting}
         onOpenFile={handleOpenFile}
         onPrevPage={prevPage}
         onNextPage={nextPage}
@@ -136,6 +164,7 @@ export default function ReaderPage() {
         onZoomIn={zoomIn}
         onZoomOut={zoomOut}
         onTranslate={handleTranslate}
+        onToggleSelectionMode={handleToggleSelectionMode}
       />
 
       <div className="flex-1 flex overflow-hidden">
@@ -145,11 +174,17 @@ export default function ReaderPage() {
           scale={scale}
           isLoading={isLoading}
           error={pdfError}
-          onSelectionChange={setSelectedArea}
+          onSelectionChange={handleSelectionChange}
           selectedArea={selectedArea}
+          onNextPage={nextPage}
+          onPrevPage={prevPage}
+          onZoomIn={zoomIn}
+          onZoomOut={zoomOut}
+          isSelecting={isSelecting}
+          onSelectionModeExit={handleSelectionModeExit}
         />
-        <TranslationPanel
-          results={translationResults}
+        <AIAssistantPanel
+          results={aiResults}
           isTranslating={isTranslating}
           error={translationError}
         />
