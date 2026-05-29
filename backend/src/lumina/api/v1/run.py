@@ -6,11 +6,11 @@ from lumina.providers import get_provider
 from lumina.providers.base import Provider
 from lumina.schemas.api import TranslateRequest
 
-router = APIRouter(tags=["translate"])
+router = APIRouter(tags=["run"])
 
 
-@router.post("/translate", response_model=None)
-async def translate(
+@router.post("/run", response_model=None)
+async def run(
     request: Request,
     body: TranslateRequest,
     provider: Provider = Depends(get_provider),
@@ -21,6 +21,6 @@ async def translate(
         body=body,
         provider=provider,
         settings=settings,
-        api_version="v0",
-        allowed_task_types={"translate"},
+        api_version="v1",
+        allowed_task_types=None,
     )

@@ -2,7 +2,7 @@
 
 > 本地优先、以阅读为中心的 AI 辅助 PDF 阅读工具。
 
-LuminaReader 是一个纯前端 PDF 阅读器，核心闭环简单直接：打开本地 PDF → 框选区域 → 交给 AI 翻译成简体中文 → 侧边栏查看结果。不上传文件、不需要登录，打开即用。
+LuminaReader 是一个纯前端 PDF 阅读器，核心闭环简单直接：打开本地 PDF → 框选区域 → 选择 AI 任务（翻译 / 解释）→ 侧边栏查看结果。不上传文件、不需要登录，打开即用。
 
 ---
 
@@ -25,16 +25,16 @@ LuminaReader 是一个纯前端 PDF 阅读器，核心闭环简单直接：打�
 ```
 src/
 ├── services/
-│   └── api.ts                       # API 调用层，封装翻译请求与模拟回退
+│   └── api.ts                       # API 调用层：封装 /api/v1/run 调用、错误信封、taskType 路由、mock 回退
 ├── hooks/
 │   └── usePDF.ts                    # PDF 加载、翻页、缩放等状态管理的自定义 Hook
 ├── pages/
 │   └── reader/
-│       ├── page.tsx                 # 主阅读页面，组合所有子组件 & 管理全局状态
+│       ├── page.tsx                 # 主阅读页面，组合所有子组件 & 管理全局状态（含 activeTaskType）
 │       └── components/
-│           ├── Toolbar.tsx           # 顶部工具栏：打开文件、翻页、缩放、翻译触发
+│           ├── Toolbar.tsx           # 顶部工具栏：打开文件、翻页、缩放、Translate/Explain 段控件、Run 触发
 │           ├── PDFViewer.tsx         # PDF 渲染与鼠标拖拽选区交互
-│           └── TranslationPanel.tsx  # 右侧翻译结果面板，支持复制
+│           └── AIAssistantPanel.tsx  # 右侧 AI 助手面板：按 task 类型显示标签色，支持复制
 ├── router/
 │   ├── index.ts                     # 路由入口（已封装 AppRoutes）
 │   └── config.tsx                   # 路由配置表
@@ -65,19 +65,19 @@ src/
 - 最小选区阈值 10px × 10px，防止误触
 - 选中区域在右侧以百分比定位 overlay 展示
 
-### 4. AI 翻译
+### 4. AI 任务（翻译 / 解释）
 
-- 选中区域后点击「Translate」按钮
-- 前端将选中区域对应的 canvas 部分裁剪、导出为 base64 PNG
-- 调用 API service 层 `translateSelection()` 发送到后端接口
-- 返回译文后在右侧面板顶部追加展示
+- 选中区域后，先在工具栏的段控件中选择 **Translate** 或 **Explain**（默认 Translate）
+- 点击 **Run** 按钮触发；前端将选中区域对应的 canvas 部分裁剪、导出为 base64 PNG
+- 调用 service 层 `translateSelection(selection, image, { targetLang, taskType })`，发送到后端 `/api/v1/run`
+- 返回结果在右侧 AI 助手面板顶部追加展示
 
-### 5. 翻译结果展示
+### 5. AI 结果展示
 
-- 右侧 340px 宽固定面板，显示所有历史翻译结果
-- 每条结果以卡片形式展示，hover 时出现复制按钮
-- 支持一键复制到剪贴板
-- 多轮翻译结果按时间倒序排列
+- 右侧 340px 宽固定面板，显示所有历史 AI 卡片
+- 每张卡片含截图缩略图 + 任务类型标签（Translate 琥珀色 / Explain teal）+ 输出文本 + 复制按钮
+- hover 时显示复制按钮，一键复制到剪贴板
+- 多轮结果按时间倒序排列
 
 ### 6. 状态覆盖
 
@@ -86,9 +86,9 @@ src/
 | 无文件     | PDF 区域显示空状态提示，指引用户打开文件                      |
 | 加载中     | PDF 区域显示 spinner + "Loading PDF..." 文案                  |
 | 加载错误   | 显示红色错误信息（如无效 PDF 文件）                           |
-| 翻译中     | 翻译按钮变为 loading 态，侧边栏显示 spinner                   |
-| 翻译错误   | 侧边栏显示红色错误卡片                                       |
-| 无翻译结果 | 侧边栏显示空状态占位                                         |
+| AI 工作中  | Run 按钮变为 loading 态（文案随 task 切换），侧边栏显示 spinner |
+| AI 错误    | 侧边栏显示红色错误卡片（含错误码格式 `[CODE] message`）         |
+| 无 AI 结果 | 侧边栏显示空状态占位                                         |
 
 ---
 
@@ -109,50 +109,79 @@ src/
 └──────────┘    └─────────────────────┘    └──────────────────┘
 
 ┌──────────┐    ┌─────────────────────┐    ┌──────────────────┐
-│ 点击翻译  │───▶│ ReaderPage           │───▶│ api.ts           │
-│          │    │ handleTranslate()    │    │ translateSelect() │
-│          │    │ → canvas 截图        │    │ → fetch/mock     │
-│          │    │ → 更新 results[]     │    │ → translated_text │
+│ 选择任务  │───▶│ ReaderPage           │───▶│ api.ts           │
+│ + Run    │    │ handleAIRequest(t)   │    │ translateSelect()│
+│          │    │ → canvas 截图        │    │ → /api/v1/run    │
+│          │    │ → 更新 results[]     │    │   或 mock 回退   │
 └──────────┘    └─────────────────────┘    └──────────────────┘
 ```
 
 ### 组件层级
 
 ```
-<ReaderPage>                         ← 状态管理中心
-├── <Toolbar />                      ← 纯展示组件，通过 props 接收回调
+<ReaderPage>                         ← 状态管理中心（含 activeTaskType）
+├── <Toolbar />                      ← 纯展示组件，提供 task 段控件与 Run 触发
 ├── <PDFViewer />                    ← PDF 渲染 + 鼠标选区交互
-└── <TranslationPanel />             ← 翻译结果列表展示
+└── <AIAssistantPanel />             ← AI 卡片列表（按 task 类型上色）
 ```
 
-所有业务逻辑集中在 `ReaderPage`（page.tsx），子组件保持纯粹无状态。PDF 相关状态通过 `usePDF` 自定义 Hook 封装，翻译 API 调用通过 `src/services/api.ts` 封装。
+所有业务逻辑集中在 `ReaderPage`（page.tsx），子组件保持纯粹无状态。PDF 相关状态通过 `usePDF` 自定义 Hook 封装，AI API 调用通过 `src/services/api.ts` 封装。
 
 ---
 
 ## API 接口设计
 
-### 翻译接口
+### 调用入口
 
 当配置了 `VITE_API_BASE_URL` 时，前端调用：
 
 ```
-POST {VITE_API_BASE_URL}/api/translate
+POST {VITE_API_BASE_URL}/api/v1/run
 Content-Type: application/json
 
 {
-  "image": "data:image/png;base64,...",   // 选区截图 base64
-  "target_language": "zh-CN"              // 目标语言
+  "task_type": "translate" | "explain",
+  "selection": {
+    "pdf_id": null,
+    "page": 1,
+    "x": 0, "y": 0, "w": 100, "h": 80,
+    "dpi": 144
+  },
+  "image": {
+    "mime": "image/png",
+    "data": "<base64 不含 data: 前缀>",
+    "width": 200, "height": 160
+  },
+  "options": { "target_lang": "zh-CN" }
 }
 
-Response:
+Response（成功）:
 {
-  "translated_text": "翻译后的中文文本"
+  "ok": true,
+  "data": {
+    "text": "AI 输出文本",
+    "meta": {
+      "request_id": "req_...",
+      "model": "gpt-4o",
+      "latency_ms": 1234,
+      "task_type": "translate",
+      "usage": { "prompt_tokens": ..., "completion_tokens": ..., "total_tokens": ... }
+    }
+  }
+}
+
+Response（错误）:
+{
+  "ok": false,
+  "error": { "code": "UNSUPPORTED_TASK", "message": "...", "request_id": "req_..." }
 }
 ```
 
+完整契约见 `../claude_docs/api-contract.md §4`。错误码映射后由 `TranslateApiError`（含 `code` / `requestId` / `httpStatus`）抛出，UI 以 `[CODE] message` 形式呈现。
+
 ### 模拟模式
 
-未配置 `VITE_API_BASE_URL` 时自动启用模拟模式，返回预设中文文本并模拟 0.8~1.5 秒网络延迟，方便本地原型演示。
+未配置 `VITE_API_BASE_URL` 时自动启用模拟模式，按 `taskType` 返回不同预设中文文案，并模拟 0.8~1.5 秒网络延迟，方便本地原型演示。
 
 ---
 
@@ -188,23 +217,23 @@ npm run preview
 
 ---
 
-## V0 阶段边界
+## 当前阶段边界（V1.0.1）
 
-当前版本（V0）是技术验证原型，明确不做以下内容：
+当前阶段已交付：翻译 + 解释两类 AI 任务。明确不做以下内容（参见 `../claude_docs/v1/v1.0.1/requirements.md`）：
 
 - 账号登录、多用户、权限
 - 书库 / 项目管理 / 多 PDF 管理
-- 笔记、标注、历史记录保存
-- 多轮对话 / 追问
-- 翻译以外的 AI 能力（解释、问答、总结等）
+- 笔记、标注、历史记录持久化（关闭页面历史会丢失）
+- 多轮对话 / 追问（卡片仍是一问一答）
+- 第三种及以上 AI 任务（问答、总结等）
 - 模型配置界面
 
 ---
 
 ## 开发路线图
 
-| 阶段   | 目标                               | 状态 |
-| ------ | ---------------------------------- | ---- |
-| Phase 1 | 核心 UI 框架：布局、工具栏、PDF 渲染 | ✅    |
-| Phase 2 | 选区拖拽 + 翻译功能 + 结果展示      | ✅    |
-| Phase 3 | 体验打磨：状态覆盖、复制、缩放优化   | ✅    |
+| 阶段    | 目标                                                            | 状态 |
+| ------- | --------------------------------------------------------------- | ---- |
+| V0      | 核心 UI 框架：布局、工具栏、PDF 渲染、选区拖拽、翻译闭环         | ✅    |
+| V1.0.0  | 阅读器交互打磨（滚轮翻页、Ctrl 缩放、Select 模式、Esc 退出）       | ✅    |
+| V1.0.1  | AI 多任务：Translate / Explain 段控件、AI 助手面板类型标签       | ✅（前端） |

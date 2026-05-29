@@ -5,6 +5,7 @@ claude_docs/
 # Node.js / frontend
 node_modules/
 dist/
+out/
 .vite/
 *.local
 

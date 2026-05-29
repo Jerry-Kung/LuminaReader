@@ -5,9 +5,11 @@ import Toolbar from './components/Toolbar';
 import PDFViewer from './components/PDFViewer';
 import AIAssistantPanel from './components/AIAssistantPanel';
 
+type TaskType = 'translate' | 'explain';
+
 interface AIResult {
   id: number;
-  type: 'translate';
+  type: TaskType;
   imageBase64: string;
   text: string;
   timestamp: number;
@@ -40,8 +42,9 @@ export default function ReaderPage() {
   const [isSelecting, setIsSelecting] = useState(false);
   const [selectedArea, setSelectedArea] = useState<SelectedArea | null>(null);
   const [aiResults, setAiResults] = useState<AIResult[]>([]);
-  const [isTranslating, setIsTranslating] = useState(false);
-  const [translationError, setTranslationError] = useState<string | null>(null);
+  const [isAIWorking, setIsAIWorking] = useState(false);
+  const [aiError, setAiError] = useState<string | null>(null);
+  const [activeTaskType, setActiveTaskType] = useState<TaskType>('translate');
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const handleOpenFile = useCallback(() => {
@@ -55,7 +58,7 @@ export default function ReaderPage() {
         loadPDF(file);
         setSelectedArea(null);
         setAiResults([]);
-        setTranslationError(null);
+        setAiError(null);
         setIsSelecting(false);
       } else if (file) {
         loadPDF(file);
@@ -79,86 +82,89 @@ export default function ReaderPage() {
     setSelectedArea(area);
   }, []);
 
-  const handleTranslate = useCallback(async () => {
-    if (!selectedArea || !pdfDoc) return;
+  const handleAIRequest = useCallback(
+    async (taskType: TaskType) => {
+      if (!selectedArea || !pdfDoc) return;
 
-    setIsTranslating(true);
-    setTranslationError(null);
+      setIsAIWorking(true);
+      setAiError(null);
 
-    try {
-      const page = await pdfDoc.getPage(currentPage);
-      const captureScale = 2.0;
-      const captureViewport = page.getViewport({ scale: captureScale });
-      const baseViewport = page.getViewport({ scale: 1 });
+      try {
+        const page = await pdfDoc.getPage(currentPage);
+        const captureScale = 2.0;
+        const captureViewport = page.getViewport({ scale: captureScale });
+        const baseViewport = page.getViewport({ scale: 1 });
 
-      const canvas = document.createElement('canvas');
-      canvas.width = captureViewport.width;
-      canvas.height = captureViewport.height;
-      const ctx = canvas.getContext('2d')!;
-      await page.render({ canvasContext: ctx, viewport: captureViewport }).promise;
+        const canvas = document.createElement('canvas');
+        canvas.width = captureViewport.width;
+        canvas.height = captureViewport.height;
+        const ctx = canvas.getContext('2d')!;
+        await page.render({ canvasContext: ctx, viewport: captureViewport }).promise;
 
-      const captureX = selectedArea.x * captureViewport.width;
-      const captureY = selectedArea.y * captureViewport.height;
-      const captureWidth = selectedArea.width * captureViewport.width;
-      const captureHeight = selectedArea.height * captureViewport.height;
+        const captureX = selectedArea.x * captureViewport.width;
+        const captureY = selectedArea.y * captureViewport.height;
+        const captureWidth = selectedArea.width * captureViewport.width;
+        const captureHeight = selectedArea.height * captureViewport.height;
 
-      const offCanvas = document.createElement('canvas');
-      offCanvas.width = Math.max(1, Math.round(captureWidth));
-      offCanvas.height = Math.max(1, Math.round(captureHeight));
-      const offCtx = offCanvas.getContext('2d')!;
+        const offCanvas = document.createElement('canvas');
+        offCanvas.width = Math.max(1, Math.round(captureWidth));
+        offCanvas.height = Math.max(1, Math.round(captureHeight));
+        const offCtx = offCanvas.getContext('2d')!;
 
-      offCtx.drawImage(
-        canvas,
-        captureX,
-        captureY,
-        captureWidth,
-        captureHeight,
-        0,
-        0,
-        offCanvas.width,
-        offCanvas.height,
-      );
+        offCtx.drawImage(
+          canvas,
+          captureX,
+          captureY,
+          captureWidth,
+          captureHeight,
+          0,
+          0,
+          offCanvas.width,
+          offCanvas.height,
+        );
 
-      const imageDataUrl = offCanvas.toDataURL('image/png');
-      const imageBase64 = imageDataUrl.replace(/^data:image\/png;base64,/, '');
+        const imageDataUrl = offCanvas.toDataURL('image/png');
+        const imageBase64 = imageDataUrl.replace(/^data:image\/png;base64,/, '');
 
-      const result = await translateSelection(
-        {
-          page: currentPage,
-          x: selectedArea.x * baseViewport.width,
-          y: selectedArea.y * baseViewport.height,
-          w: selectedArea.width * baseViewport.width,
-          h: selectedArea.height * baseViewport.height,
-          dpi: 72 * captureScale,
-        },
-        {
-          data: imageBase64,
-          width: offCanvas.width,
-          height: offCanvas.height,
-        },
-        { targetLang: 'zh-CN' },
-      );
+        const result = await translateSelection(
+          {
+            page: currentPage,
+            x: selectedArea.x * baseViewport.width,
+            y: selectedArea.y * baseViewport.height,
+            w: selectedArea.width * baseViewport.width,
+            h: selectedArea.height * baseViewport.height,
+            dpi: 72 * captureScale,
+          },
+          {
+            data: imageBase64,
+            width: offCanvas.width,
+            height: offCanvas.height,
+          },
+          { targetLang: 'zh-CN', taskType },
+        );
 
-      setAiResults((prev) => [
-        {
-          id: Date.now(),
-          type: 'translate',
-          imageBase64: imageDataUrl,
-          text: result.text,
-          timestamp: Date.now(),
-        },
-        ...prev,
-      ]);
-    } catch (err: any) {
-      const msg =
-        err instanceof TranslateApiError
-          ? `[${err.code}] ${err.message}`
-          : err?.message || 'Translation failed. Please try again.';
-      setTranslationError(msg);
-    } finally {
-      setIsTranslating(false);
-    }
-  }, [selectedArea, pdfDoc, currentPage]);
+        setAiResults((prev) => [
+          {
+            id: Date.now(),
+            type: taskType,
+            imageBase64: imageDataUrl,
+            text: result.text,
+            timestamp: Date.now(),
+          },
+          ...prev,
+        ]);
+      } catch (err: any) {
+        const msg =
+          err instanceof TranslateApiError
+            ? `[${err.code}] ${err.message}`
+            : err?.message || 'AI request failed. Please try again.';
+        setAiError(msg);
+      } finally {
+        setIsAIWorking(false);
+      }
+    },
+    [selectedArea, pdfDoc, currentPage],
+  );
 
   return (
     <div className="h-screen flex flex-col bg-stone-50">
@@ -176,16 +182,18 @@ export default function ReaderPage() {
         currentPage={currentPage}
         scale={scale}
         hasSelection={!!selectedArea}
-        isTranslating={isTranslating}
+        isAIWorking={isAIWorking}
         isSelecting={isSelecting}
+        activeTaskType={activeTaskType}
         onOpenFile={handleOpenFile}
         onPrevPage={prevPage}
         onNextPage={nextPage}
         onGoToPage={goToPage}
         onZoomIn={zoomIn}
         onZoomOut={zoomOut}
-        onTranslate={handleTranslate}
+        onAIRequest={handleAIRequest}
         onToggleSelectionMode={handleToggleSelectionMode}
+        onTaskTypeChange={setActiveTaskType}
       />
 
       <div className="flex-1 flex overflow-hidden">
@@ -206,8 +214,8 @@ export default function ReaderPage() {
         />
         <AIAssistantPanel
           results={aiResults}
-          isTranslating={isTranslating}
-          error={translationError}
+          isAIWorking={isAIWorking}
+          error={aiError}
         />
       </div>
     </div>

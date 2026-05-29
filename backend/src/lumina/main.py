@@ -8,6 +8,7 @@ from fastapi.responses import JSONResponse
 
 import lumina
 from lumina.api.v0 import router as v0_router
+from lumina.api.v1 import router as v1_router
 from lumina.config import Settings, get_settings
 from lumina.logging import get_logger, log_with_fields, setup_logging
 from lumina.providers import init_provider, reset_provider
@@ -79,6 +80,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             host=cfg.host,
             port=cfg.port,
         )
+        log_with_fields(
+            logger,
+            logging.WARNING,
+            "v0 endpoint is in compatibility mode and will be removed in V1.0.3",
+            event="v0_deprecated",
+            deprecated_path="/api/v0/translate",
+            replacement_path="/api/v1/run",
+        )
         yield
         reset_provider()
 
@@ -97,6 +106,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     )
 
     app.include_router(v0_router)
+    app.include_router(v1_router)
     register_exception_handlers(app)
     return app
 

@@ -1,5 +1,7 @@
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '';
 
+export type TaskType = 'translate' | 'explain';
+
 export interface TranslateSelection {
   page: number;
   x: number;
@@ -19,6 +21,7 @@ export interface TranslateMeta {
   request_id?: string;
   model?: string;
   latency_ms?: number;
+  task_type?: TaskType;
   usage?: {
     prompt_tokens?: number;
     completion_tokens?: number;
@@ -33,6 +36,7 @@ export interface TranslateResult {
 
 export interface TranslateOptions {
   targetLang?: string;
+  taskType?: TaskType;
 }
 
 interface SuccessEnvelope<T> {
@@ -64,16 +68,20 @@ export class TranslateApiError extends Error {
   }
 }
 
-function mockTranslate(): Promise<TranslateResult> {
-  const text =
-    '这是模拟的翻译结果。\n\n当您配置了后端 API 地址后（在 .env 文件中设置 VITE_API_BASE_URL），这里将显示 AI 翻译的实际内容。\n\n您可以框选 PDF 中的英文段落，点击翻译按钮，AI 将为您把选区内容翻译为简体中文。';
+const MOCK_TEXTS: Record<TaskType, string> = {
+  translate:
+    '这是模拟的翻译结果。\n\n当您配置了后端 API 地址后（在 .env 文件中设置 VITE_API_BASE_URL），这里将显示 AI 翻译的实际内容。\n\n您可以框选 PDF 中的英文段落，点击 Run 按钮，AI 将为您把选区内容翻译为简体中文。',
+  explain:
+    '这是模拟的解释结果。\n\n当您配置了后端 API 地址后（在 .env 文件中设置 VITE_API_BASE_URL），这里将显示 AI 对所选内容的深度解读，包括：核心观点、术语说明、必要的背景知识。',
+};
 
+function mockTranslate(taskType: TaskType): Promise<TranslateResult> {
   return new Promise((resolve) => {
     setTimeout(
       () =>
         resolve({
-          text,
-          meta: { model: 'mock', latency_ms: 0 },
+          text: MOCK_TEXTS[taskType],
+          meta: { model: 'mock', latency_ms: 0, task_type: taskType },
         }),
       800 + Math.random() * 700,
     );
@@ -85,14 +93,16 @@ export async function translateSelection(
   image: TranslateImage,
   options: TranslateOptions = {},
 ): Promise<TranslateResult> {
+  const taskType: TaskType = options.taskType ?? 'translate';
+
   if (!API_BASE) {
-    return mockTranslate();
+    return mockTranslate(taskType);
   }
 
-  const url = `${API_BASE}/api/v0/translate`;
+  const url = `${API_BASE}/api/v1/run`;
 
   const body = {
-    task_type: 'translate',
+    task_type: taskType,
     selection: {
       pdf_id: null,
       page: selection.page,
@@ -139,14 +149,15 @@ export async function translateSelection(
     );
   }
 
-  if (envelope.ok) {
+  if (envelope.ok === true) {
     return envelope.data;
   }
 
+  const errorBody = envelope.error;
   throw new TranslateApiError(
-    envelope.error?.code || 'INTERNAL_ERROR',
-    envelope.error?.message || 'Unknown backend error.',
-    envelope.error?.request_id,
+    errorBody?.code || 'INTERNAL_ERROR',
+    errorBody?.message || 'Unknown backend error.',
+    errorBody?.request_id,
     response.status,
   );
 }

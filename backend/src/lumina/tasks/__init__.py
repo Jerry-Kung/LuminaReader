@@ -1,8 +1,10 @@
 from lumina.tasks.base import Task, TaskContext, TaskResult, UnsupportedTaskError
+from lumina.tasks.explain import ExplainTask
 from lumina.tasks.translate import TranslateTask
 
 TASK_REGISTRY: dict[str, Task] = {
     "translate": TranslateTask(),
+    "explain": ExplainTask(),
 }
 
 
@@ -14,6 +16,7 @@ def get_task(task_type: str) -> Task:
 
 __all__ = [
     "TASK_REGISTRY",
+    "ExplainTask",
     "Task",
     "TaskContext",
     "TaskResult",

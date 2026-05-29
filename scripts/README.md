@@ -21,8 +21,9 @@
 
 | 脚本 | 用途 | 状态 |
 |---|---|---|
-| `dev-frontend.{ps1,sh}` | 启动前端 Vite 开发服务器 | ✅ 可用 |
-| `dev-backend.{ps1,sh}` | 启动后端 FastAPI（uvicorn + reload） | ✅ 可用 |
+| `dev.{ps1,sh}` | **一键启动前后端**（合流输出，Ctrl+C 同时停） | ✅ 可用 |
+| `dev-frontend.{ps1,sh}` | 单独启动前端 Vite 开发服务器 | ✅ 可用 |
+| `dev-backend.{ps1,sh}` | 单独启动后端 FastAPI（uvicorn + reload） | ✅ 可用 |
 | `test-backend.{ps1,sh}` | 运行后端测试（pytest） | ✅ 可用 |
 
 所有脚本均通过脚本自身位置推导仓库根，不依赖当前工作目录，可从任意位置调用。
@@ -51,7 +52,27 @@ Bash 用户把 `Copy-Item` 替换为 `cp` 即可。
 
 ---
 
-## 启动（两个独立终端）
+## 启动
+
+### 一键启动（推荐，单窗口）
+
+**Windows PowerShell**：
+```powershell
+.\scripts\dev.ps1
+```
+
+**Bash / macOS / Linux**：
+```bash
+./scripts/dev.sh
+```
+
+前后端在同一窗口启动，日志带 `[backend ]` / `[frontend]` 前缀合流输出；按一次 Ctrl+C 同时停掉两者（脚本会递归回收 uvicorn / node 子进程，避免残留占用端口）。
+
+启动成功后，浏览器访问 **http://localhost:3000**，在阅读器中框选区域即可调用后端 `/api/v1/run`。
+
+### 分窗口启动（备用）
+
+需要把前后端日志分窗口观察、或只想拉起其中一个时使用：
 
 **Windows PowerShell**：
 ```powershell
@@ -65,15 +86,13 @@ Bash 用户把 `Copy-Item` 替换为 `cp` 即可。
 ./scripts/dev-frontend.sh
 ```
 
-启动成功后，浏览器访问 **http://localhost:3000**，在阅读器中框选区域即可调用后端 `/api/v0/translate`。
-
 ### 后端冒烟验证
 
 ```powershell
-curl http://127.0.0.1:18086/api/v0/health
+curl http://127.0.0.1:18086/api/v1/health
 ```
 
-预期返回 `{"ok":true,"data":{"status":"ok","provider_ready":true,...}}`。
+预期返回 `{"ok":true,"data":{"service":"lumina-backend","provider_ready":true,...}}`。
 
 ---
 

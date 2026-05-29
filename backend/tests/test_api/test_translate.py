@@ -1,7 +1,7 @@
 import pytest
 from fastapi.testclient import TestClient
 
-from lumina.api.v0.translate import is_payload_too_large
+from lumina.api._run_core import is_payload_too_large
 from lumina.config import Settings, get_settings
 from lumina.main import create_app
 from lumina.providers import get_provider
@@ -101,6 +101,7 @@ def test_translate_success(translate_client: TestClient) -> None:
 
 
 def test_translate_unsupported_task(translate_client: TestClient) -> None:
+    # v0 must reject explain even after it is registered in TASK_REGISTRY
     response = translate_client.post(
         "/api/v0/translate",
         json=valid_translate_payload(task_type="explain"),
@@ -171,3 +172,49 @@ def test_translate_payload_too_large(translate_client: TestClient) -> None:
     response = translate_client.post("/api/v0/translate", json=payload)
     assert response.status_code == 413
     assert response.json()["error"]["code"] == "PAYLOAD_TOO_LARGE"
+
+
+def test_v0_translate_matches_v1_run_for_translate(translate_client: TestClient) -> None:
+    provider = MockTranslateProvider()
+    translate_client.app.dependency_overrides[get_provider] = lambda: provider
+
+    v0_response = translate_client.post("/api/v0/translate", json=valid_translate_payload())
+    v1_response = translate_client.post(
+        "/api/v1/run",
+        json=valid_translate_payload(task_type="translate"),
+    )
+
+    assert v0_response.status_code == 200
+    assert v1_response.status_code == 200
+
+    v0_body = v0_response.json()
+    v1_body = v1_response.json()
+
+    assert v0_body["data"]["text"] == v1_body["data"]["text"]
+    assert "error" not in v0_body
+    assert "error" not in v1_body
+    assert v0_body["data"]["meta"]["model"] == v1_body["data"]["meta"]["model"]
+    assert v1_body["data"]["meta"]["task_type"] == "translate"
+
+
+def test_v0_deprecation_warning_emitted_once(capsys: pytest.CaptureFixture[str]) -> None:
+    settings = Settings(
+        openai_api_key="test-key-not-real",
+        openai_base_url="https://api.openai.com/v1",
+        openai_model="gpt-4o",
+    )
+    get_settings.cache_clear()
+    reset_provider()
+    app = create_app(settings)
+    app.dependency_overrides[get_settings] = lambda: settings
+    app.dependency_overrides[get_provider] = lambda: MockTranslateProvider()
+
+    with TestClient(app, raise_server_exceptions=False) as client:
+        client.get("/api/v0/health")
+
+    captured = capsys.readouterr().out
+    assert captured.count("event=v0_deprecated") == 1
+
+    app.dependency_overrides.clear()
+    get_settings.cache_clear()
+    reset_provider()

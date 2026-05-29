@@ -4,6 +4,7 @@ from lumina.providers.base import ImagePart, TextPart
 from lumina.schemas.selection import ImagePayload, Selection
 from lumina.tasks import get_task
 from lumina.tasks.base import TaskContext, UnsupportedTaskError
+from lumina.tasks.explain import ExplainTask
 from lumina.tasks.translate import TranslateTask
 
 MINIMAL_PNG_B64 = (
@@ -38,7 +39,7 @@ def _context(*, target_lang: str | None = None, temperature: float | None = None
 
 
 def test_build_request_contains_system_user_and_image() -> None:
-    task = TranslateTask()
+    task = ExplainTask()
     req = task.build_request(_context())
 
     assert len(req.messages) == 2
@@ -55,7 +56,7 @@ def test_build_request_contains_system_user_and_image() -> None:
 
 
 def test_build_request_default_target_lang_is_zh_cn() -> None:
-    task = TranslateTask()
+    task = ExplainTask()
     req = task.build_request(_context())
 
     user_text = req.messages[1].content[0].text
@@ -63,7 +64,7 @@ def test_build_request_default_target_lang_is_zh_cn() -> None:
 
 
 def test_build_request_explicit_target_lang() -> None:
-    task = TranslateTask()
+    task = ExplainTask()
     req = task.build_request(_context(target_lang="en"))
 
     user_text = req.messages[1].content[0].text
@@ -71,18 +72,24 @@ def test_build_request_explicit_target_lang() -> None:
 
 
 def test_build_request_default_temperature() -> None:
-    task = TranslateTask(default_temperature=0.2)
+    task = ExplainTask(default_temperature=0.2)
     req = task.build_request(_context())
     assert req.temperature == 0.2
 
 
 def test_build_request_respects_temperature_override() -> None:
-    task = TranslateTask(default_temperature=0.2)
+    task = ExplainTask(default_temperature=0.2)
     req = task.build_request(_context(temperature=0.7))
     assert req.temperature == 0.7
 
 
-def test_get_task_translate() -> None:
+def test_get_task_explain() -> None:
+    task = get_task("explain")
+    assert isinstance(task, ExplainTask)
+    assert task.task_type == "explain"
+
+
+def test_get_task_translate_still_registered() -> None:
     task = get_task("translate")
     assert isinstance(task, TranslateTask)
     assert task.task_type == "translate"

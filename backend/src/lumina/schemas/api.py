@@ -35,6 +35,7 @@ class TranslateMeta(BaseModel):
     model: str
     latency_ms: int
     usage: TranslateUsage | None = None
+    task_type: str | None = None
 
 
 class TranslateData(BaseModel):
