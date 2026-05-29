@@ -143,14 +143,18 @@ export default function PDFViewer({
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && isSelecting) {
-        onSelectionModeExit();
-        setSelection((prev) => ({ ...prev, isDragging: false }));
+      if (e.key === 'Escape') {
+        if (isSelecting) {
+          onSelectionModeExit();
+          setSelection((prev) => ({ ...prev, isDragging: false }));
+        } else if (selectedArea) {
+          onSelectionChange(null);
+        }
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [isSelecting, onSelectionModeExit]);
+  }, [isSelecting, selectedArea, onSelectionModeExit, onSelectionChange]);
 
   const getRelativeCoords = useCallback(
     (clientX: number, clientY: number) => {

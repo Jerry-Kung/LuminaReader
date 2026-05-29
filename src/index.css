@@ -1,3 +1,113 @@
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+/* Markdown renderer styles */
+.markdown-prose {
+  word-break: break-word;
+}
+
+.markdown-prose .katex-display {
+  margin: 0.5em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+}
+
+.markdown-prose .katex {
+  font-size: 0.95em;
+}
+
+.markdown-prose .katex-display .katex {
+  font-size: 1em;
+}
+
+.markdown-prose p:last-child {
+  margin-bottom: 0;
+}
+
+.markdown-prose ul:last-child,
+.markdown-prose ol:last-child {
+  margin-bottom: 0;
+}
+
+.markdown-prose table {
+  border-collapse: collapse;
+}
+
+.markdown-prose table th,
+.markdown-prose table td {
+  border: 1px solid #e7e5e4;
+  padding: 4px 8px;
+}
+
+.markdown-prose table th {
+  background-color: #f5f5f4;
+}
+
+.markdown-prose blockquote {
+  margin: 0;
+}
+
+.markdown-prose code {
+  font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Fira Code', monospace;
+}
+
+.markdown-prose pre code {
+  display: block;
+  padding: 0.75rem;
+  overflow-x: auto;
+}
+
+.markdown-prose hr {
+  border: none;
+  border-top: 1px solid #e7e5e4;
+}
+
+/* Animation for bounce dots */
+@keyframes bounce {
+  0%, 80%, 100% {
+    transform: translateY(0);
+  }
+  40% {
+    transform: translateY(-4px);
+  }
+}
+
+.animate-bounce {
+  animation: bounce 1s infinite;
+}
+
+/* Custom scrollbar for AI panel */
+.overflow-y-auto::-webkit-scrollbar {
+  width: 4px;
+}
+
+.overflow-y-auto::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.overflow-y-auto::-webkit-scrollbar-thumb {
+  background: #d6d3d1;
+  border-radius: 4px;
+}
+
+.overflow-y-auto::-webkit-scrollbar-thumb:hover {
+  background: #a8a29e;
+}
+
+/* Base scrollbar hide for PDF viewer */
+.overflow-hidden::-webkit-scrollbar {
+  display: none;
+}
+
+/* Font smoothing */
+body {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Selection color */
+::selection {
+  background-color: #fbbf24;
+  color: #292524;
+}

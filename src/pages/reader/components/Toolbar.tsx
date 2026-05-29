@@ -3,19 +3,14 @@ interface ToolbarProps {
   numPages: number;
   currentPage: number;
   scale: number;
-  hasSelection: boolean;
-  isAIWorking: boolean;
   isSelecting: boolean;
-  activeTaskType: 'translate' | 'explain';
   onOpenFile: () => void;
   onPrevPage: () => void;
   onNextPage: () => void;
   onGoToPage: (page: number) => void;
   onZoomIn: () => void;
   onZoomOut: () => void;
-  onAIRequest: (taskType: 'translate' | 'explain') => void;
   onToggleSelectionMode: () => void;
-  onTaskTypeChange: (type: 'translate' | 'explain') => void;
 }
 
 export default function Toolbar({
@@ -23,19 +18,14 @@ export default function Toolbar({
   numPages,
   currentPage,
   scale,
-  hasSelection,
-  isAIWorking,
   isSelecting,
-  activeTaskType,
   onOpenFile,
   onPrevPage,
   onNextPage,
   onGoToPage,
   onZoomIn,
   onZoomOut,
-  onAIRequest,
   onToggleSelectionMode,
-  onTaskTypeChange,
 }: ToolbarProps) {
   const handlePageInput = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') {
@@ -127,50 +117,6 @@ export default function Toolbar({
               <i className="ri-zoom-in-line"></i>
             </button>
           </div>
-
-          <div className="w-px h-5 bg-stone-200" />
-
-          {/* Task type selector */}
-          <div className="flex items-center bg-stone-100 rounded-md p-0.5">
-            <button
-              onClick={() => onTaskTypeChange('translate')}
-              className={`whitespace-nowrap px-3 py-1.5 text-xs font-medium rounded-md transition-colors cursor-pointer ${
-                activeTaskType === 'translate'
-                  ? 'bg-white text-amber-700 shadow-sm'
-                  : 'text-stone-500 hover:text-stone-700'
-              }`}
-            >
-              Translate
-            </button>
-            <button
-              onClick={() => onTaskTypeChange('explain')}
-              className={`whitespace-nowrap px-3 py-1.5 text-xs font-medium rounded-md transition-colors cursor-pointer ${
-                activeTaskType === 'explain'
-                  ? 'bg-white text-teal-700 shadow-sm'
-                  : 'text-stone-500 hover:text-stone-700'
-              }`}
-            >
-              Explain
-            </button>
-          </div>
-
-          <button
-            onClick={() => onAIRequest(activeTaskType)}
-            disabled={!hasSelection || isAIWorking}
-            className="whitespace-nowrap flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-amber-600 rounded-md hover:bg-amber-700 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
-          >
-            {isAIWorking ? (
-              <>
-                <i className="ri-loader-4-line animate-spin"></i>
-                {activeTaskType === 'translate' ? 'Translating...' : 'Explaining...'}
-              </>
-            ) : (
-              <>
-                <i className="ri-sparkling-line"></i>
-                Run
-              </>
-            )}
-          </button>
         </div>
       )}
     </div>
