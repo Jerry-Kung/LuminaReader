@@ -70,7 +70,7 @@ def test_validation_error_returns_envelope() -> None:
 
     app.include_router(router)
     with TestClient(app, raise_server_exceptions=False) as test_client:
-        response = test_client.post("/api/v0/_test/validate", json={"task_type": "translate"})
+        response = test_client.post("/api/v0/_test/validate", json={"task_type": 123})
     assert response.status_code == 400
     body = response.json()
     assert body["ok"] is False

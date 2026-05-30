@@ -14,6 +14,7 @@ from lumina.providers.base import (
     ProviderTimeout,
 )
 from lumina.providers import reset_provider
+from lumina.sessions import reset_session_store
 
 MINIMAL_PNG_B64 = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAD0lEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=="
@@ -55,8 +56,10 @@ class MockTranslateProvider(Provider):
     ) -> None:
         self.response_text = response_text
         self.invoke_error = invoke_error
+        self.last_request: LLMRequest | None = None
 
     async def invoke(self, req: LLMRequest) -> LLMResponse:
+        self.last_request = req
         if self.invoke_error is not None:
             raise self.invoke_error
         return LLMResponse(
@@ -78,6 +81,7 @@ def translate_client() -> TestClient:
     )
     get_settings.cache_clear()
     reset_provider()
+    reset_session_store()
     app = create_app(settings)
     app.dependency_overrides[get_settings] = lambda: settings
     app.dependency_overrides[get_provider] = lambda: MockTranslateProvider()
@@ -86,6 +90,7 @@ def translate_client() -> TestClient:
     app.dependency_overrides.clear()
     get_settings.cache_clear()
     reset_provider()
+    reset_session_store()
 
 
 def test_translate_success(translate_client: TestClient) -> None:
@@ -195,6 +200,37 @@ def test_v0_translate_matches_v1_run_for_translate(translate_client: TestClient)
     assert "error" not in v1_body
     assert v0_body["data"]["meta"]["model"] == v1_body["data"]["meta"]["model"]
     assert v1_body["data"]["meta"]["task_type"] == "translate"
+    assert "session_id" not in v0_body["data"]
+    assert "turn_index" not in v0_body["data"]["meta"]
+    assert v1_body["data"]["session_id"]
+    assert v1_body["data"]["meta"]["turn_index"] == 0
+
+
+def test_v0_translate_rejects_session_id(translate_client: TestClient) -> None:
+    response = translate_client.post(
+        "/api/v0/translate",
+        json=valid_translate_payload(session_id="sess_abc"),
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "INVALID_REQUEST"
+
+
+def test_v0_translate_ignores_user_question(translate_client: TestClient) -> None:
+    provider = MockTranslateProvider()
+    translate_client.app.dependency_overrides[get_provider] = lambda: provider
+    response = translate_client.post(
+        "/api/v0/translate",
+        json=valid_translate_payload(options={"target_lang": "zh-CN", "user_question": "ignored"}),
+    )
+    assert response.status_code == 200
+    assert provider.last_request is not None
+    combined = "".join(
+        part.text
+        for message in provider.last_request.messages
+        for part in message.content
+        if part.type == "text"
+    )
+    assert "ignored" not in combined
 
 
 def test_v0_deprecation_warning_emitted_once(capsys: pytest.CaptureFixture[str]) -> None:

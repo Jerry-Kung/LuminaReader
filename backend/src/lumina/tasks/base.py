@@ -1,15 +1,18 @@
 from abc import ABC, abstractmethod
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from lumina.providers.base import LLMRequest, LLMResponse, Provider
+from lumina.providers.base import LLMMessage, LLMRequest, LLMResponse, Provider
 from lumina.schemas.selection import ImagePayload, Selection
 
 
 class TaskContext(BaseModel):
-    selection: Selection
-    image: ImagePayload
-    options: dict
+    selection: Selection | None = None
+    image: ImagePayload | None = None
+    options: dict = Field(default_factory=dict)
+    history: list[LLMMessage] = Field(default_factory=list)
+    user_question: str | None = None
+    extracted_text: str | None = None
 
 
 class TaskResult(BaseModel):

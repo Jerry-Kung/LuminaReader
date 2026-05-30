@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 
@@ -12,6 +13,7 @@ from lumina.api.v1 import router as v1_router
 from lumina.config import Settings, get_settings
 from lumina.logging import get_logger, log_with_fields, setup_logging
 from lumina.providers import init_provider, reset_provider
+from lumina.sessions import cleanup_loop, init_session_store, reset_session_store
 from lumina.request_id import generate_request_id
 from lumina.schemas.api import error_response
 
@@ -70,6 +72,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         setup_logging(cfg.log_level)
         app.state.provider = init_provider(cfg)
+        store = init_session_store(
+            max_entries=cfg.session_max_entries,
+            ttl_seconds=cfg.session_ttl_seconds,
+        )
+        cleanup_task = asyncio.create_task(cleanup_loop(store))
         logger = get_logger("lumina.startup")
         log_with_fields(
             logger,
@@ -88,8 +95,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             deprecated_path="/api/v0/translate",
             replacement_path="/api/v1/run",
         )
-        yield
-        reset_provider()
+        try:
+            yield
+        finally:
+            cleanup_task.cancel()
+            try:
+                await cleanup_task
+            except (asyncio.CancelledError, Exception):
+                pass
+            reset_session_store()
+            reset_provider()
 
     app = FastAPI(
         title="lumina-backend",

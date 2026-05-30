@@ -9,12 +9,14 @@ DataT = TypeVar("DataT")
 
 class TranslateOptions(BaseModel):
     target_lang: str = "zh-CN"
+    user_question: str | None = None
 
 
 class TranslateRequest(BaseModel):
     task_type: str
-    selection: Selection
-    image: ImagePayload
+    session_id: str | None = None
+    selection: Selection | None = None
+    image: ImagePayload | None = None
     options: TranslateOptions = Field(default_factory=TranslateOptions)
 
 
@@ -36,10 +38,12 @@ class TranslateMeta(BaseModel):
     latency_ms: int
     usage: TranslateUsage | None = None
     task_type: str | None = None
+    turn_index: int | None = None
 
 
 class TranslateData(BaseModel):
     text: str
+    session_id: str | None = None
     meta: TranslateMeta
 
 
@@ -61,7 +65,7 @@ class ErrorEnvelope(BaseModel):
 
 def ok_response(data: DataT) -> dict[str, Any]:
     if isinstance(data, BaseModel):
-        payload = data.model_dump()
+        payload = data.model_dump(exclude_none=True)
     else:
         payload = data
     return {"ok": True, "data": payload}

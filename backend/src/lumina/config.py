@@ -21,6 +21,9 @@ class Settings(BaseSettings):
     port: int = 18086
     log_level: str = "INFO"
     cors_allow_origins: str = "http://localhost:3000"
+    session_max_entries: int = 100
+    session_ttl_seconds: float = 3600.0
+    session_log_extracted_text: bool = False
 
     @property
     def cors_origins_list(self) -> list[str]:

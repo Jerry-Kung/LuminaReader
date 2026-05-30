@@ -91,3 +91,104 @@ def test_get_task_translate() -> None:
 def test_get_task_unsupported_raises() -> None:
     with pytest.raises(UnsupportedTaskError):
         get_task("qa")
+
+
+def _context_extracted(**kwargs: object) -> TaskContext:
+    options = kwargs.pop("options", {})
+    return TaskContext(
+        selection=None,
+        image=None,
+        extracted_text=kwargs.pop("extracted_text", "# Hello\n\nWorld."),
+        user_question=kwargs.pop("user_question", None),
+        history=kwargs.pop("history", []),
+        options=options if isinstance(options, dict) else {},
+    )
+
+
+def test_build_request_uses_extracted_text_when_provided() -> None:
+    task = TranslateTask()
+    req = task.build_request(
+        _context_extracted(options={"target_lang": "zh-CN"}, extracted_text="# Hello\n\nWorld.")
+    )
+
+    assert len(req.messages) == 2
+    assert req.messages[1].role == "user"
+    assert all(part.type != "image" for part in req.messages[1].content)
+    combined = "".join(part.text for part in req.messages[1].content if part.type == "text")
+    assert "Hello" in combined
+    assert "World" in combined
+
+
+def test_build_request_prefers_extracted_text_over_image_when_both_present() -> None:
+    task = TranslateTask()
+    ctx = _context()
+    ctx = ctx.model_copy(update={"extracted_text": "abc"})
+    req = task.build_request(ctx)
+    assert all(part.type != "image" for part in req.messages[1].content)
+
+
+def test_build_request_falls_back_to_image_when_extracted_text_is_none() -> None:
+    task = TranslateTask()
+    req = task.build_request(_context())
+    assert any(part.type == "image" for part in req.messages[1].content)
+
+
+def test_build_request_raises_when_both_image_and_extracted_text_missing() -> None:
+    with pytest.raises(ValueError):
+        TranslateTask().build_request(TaskContext(image=None, extracted_text=None))
+
+
+def test_build_request_appends_user_question_in_first_turn() -> None:
+    task = TranslateTask()
+    req = task.build_request(
+        _context_extracted(user_question="为什么 V=8？", options={"target_lang": "zh-CN"})
+    )
+    combined = "".join(part.text for part in req.messages[1].content if part.type == "text")
+    assert "为什么 V=8？" in combined
+
+
+def test_build_request_includes_history_in_follow_up_turn() -> None:
+    from lumina.providers.base import LLMMessage, TextPart
+
+    history = [
+        LLMMessage(role="user", content=[TextPart(text="prev q")]),
+        LLMMessage(role="assistant", content=[TextPart(text="prev a")]),
+    ]
+    task = TranslateTask()
+    messages = task.build_request(
+        _context_extracted(
+            user_question="next q",
+            history=history,
+            options={"target_lang": "zh-CN"},
+        )
+    ).messages
+
+    assert messages[0].role == "system"
+    assert messages[1].role == "user"
+    assert messages[2].role == "assistant"
+    assert messages[3].role == "user"
+    current_text = "".join(part.text for part in messages[3].content if part.type == "text")
+    assert "next q" in current_text
+
+
+def test_build_request_follow_up_does_not_include_image_part() -> None:
+    from lumina.providers.base import LLMMessage, TextPart
+
+    history = [
+        LLMMessage(role="user", content=[TextPart(text="prev q")]),
+        LLMMessage(role="assistant", content=[TextPart(text="prev a")]),
+    ]
+    task = TranslateTask()
+    messages = task.build_request(
+        _context_extracted(user_question="next q", history=history, options={"target_lang": "zh-CN"})
+    ).messages
+    for message in messages:
+        assert all(part.type != "image" for part in message.content)
+
+
+def test_build_request_follow_up_raises_when_user_question_missing() -> None:
+    from lumina.providers.base import LLMMessage, TextPart
+
+    history = [LLMMessage(role="user", content=[TextPart(text="prev q")])]
+    with pytest.raises(ValueError):
+        TranslateTask().build_request(_context_extracted(history=history, user_question=None))
