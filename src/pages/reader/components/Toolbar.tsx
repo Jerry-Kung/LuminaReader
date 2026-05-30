@@ -13,6 +13,12 @@ interface ToolbarProps {
   onToggleSelectionMode: () => void;
 }
 
+function navigateTo(path: string) {
+  if (typeof window !== 'undefined' && window.REACT_APP_NAVIGATE) {
+    window.REACT_APP_NAVIGATE(path);
+  }
+}
+
 export default function Toolbar({
   fileName,
   numPages,
@@ -39,6 +45,13 @@ export default function Toolbar({
   return (
     <div className="flex items-center justify-between px-5 py-3 bg-white border-b border-stone-200">
       <div className="flex items-center gap-3">
+        <button
+          onClick={() => navigateTo('/')}
+          className="w-8 h-8 flex items-center justify-center rounded-md text-stone-500 hover:bg-stone-100 hover:text-stone-700 transition-colors cursor-pointer"
+          title="Back to bookshelf"
+        >
+          <i className="ri-arrow-left-line"></i>
+        </button>
         <button
           onClick={onOpenFile}
           className="whitespace-nowrap flex items-center gap-2 px-4 py-2 text-sm font-medium text-stone-700 bg-stone-100 rounded-md hover:bg-stone-200 transition-colors cursor-pointer"

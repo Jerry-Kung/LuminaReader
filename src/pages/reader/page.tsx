@@ -1,6 +1,7 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
+import { useParams } from 'react-router-dom';
 import { usePDF } from '@/hooks/usePDF';
-import { translateSelection, type TaskType, type ConversationMessage } from '@/services/api';
+import { translateSelection, type TaskType, type ConversationMessage, getBook } from '@/services/api';
 import Toolbar from './components/Toolbar';
 import PDFViewer from './components/PDFViewer';
 import AIAssistantPanel from './components/AIAssistantPanel';
@@ -31,6 +32,7 @@ interface SelectedArea {
 }
 
 export default function ReaderPage() {
+  const { pdf_id } = useParams<{ pdf_id: string }>();
   const {
     pdfDoc,
     numPages,
@@ -40,6 +42,7 @@ export default function ReaderPage() {
     error: pdfError,
     fileName,
     loadPDF,
+    setFileName,
     goToPage,
     nextPage,
     prevPage,
@@ -57,6 +60,17 @@ export default function ReaderPage() {
   const [panelMode, setPanelMode] = useState<'narrow' | 'wide' | 'overlay'>('narrow');
   const fileInputRef = useRef<HTMLInputElement>(null);
   const activeCardIdRef = useRef<number | null>(null);
+
+  // Load book info from URL param
+  useEffect(() => {
+    if (pdf_id) {
+      getBook(pdf_id).then((book) => {
+        if (book) {
+          setFileName(book.file_name);
+        }
+      });
+    }
+  }, [pdf_id, setFileName]);
 
   const handleOpenFile = useCallback(() => {
     fileInputRef.current?.click();

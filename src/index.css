@@ -111,3 +111,32 @@ body {
   background-color: #fbbf24;
   color: #292524;
 }
+
+/* Toast fade-in-up animation */
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translate(-50%, 12px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, 0);
+  }
+}
+
+/* Card skeleton animation */
+@keyframes skeleton {
+  0% {
+    background-color: #e7e5e4;
+  }
+  50% {
+    background-color: #d6d3d1;
+  }
+  100% {
+    background-color: #e7e5e4;
+  }
+}
+
+.animate-skeleton {
+  animation: skeleton 1.5s ease-in-out infinite;
+}

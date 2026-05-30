@@ -7,6 +7,23 @@ export interface ConversationMessage {
   content: string;
 }
 
+export interface Book {
+  id: string;
+  title: string;
+  file_name: string;
+  file_size: number;
+  cover_url: string;
+  created_at: string;
+  updated_at: string;
+  page_count: number;
+}
+
+export interface UploadProgress {
+  loaded: number;
+  total: number;
+  percentage: number;
+}
+
 interface AIRequest {
   image: string;
   target_language: string;
@@ -116,4 +133,94 @@ export async function translateSelection(
   }
 
   return response.json();
+}
+
+// Bookshelf API
+
+export async function listBooks(): Promise<Book[]> {
+  if (!API_BASE) {
+    const { fetchBooks } = await import('@/mocks/bookshelf');
+    return fetchBooks();
+  }
+
+  const response = await fetch(`${API_BASE}/api/books`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch books (${response.status})`);
+  }
+  return response.json();
+}
+
+export async function getBook(id: string): Promise<Book | null> {
+  if (!API_BASE) {
+    const { fetchBookById } = await import('@/mocks/bookshelf');
+    return fetchBookById(id);
+  }
+
+  const response = await fetch(`${API_BASE}/api/books/${id}`);
+  if (!response.ok) {
+    if (response.status === 404) return null;
+    throw new Error(`Failed to fetch book (${response.status})`);
+  }
+  return response.json();
+}
+
+export async function uploadBook(
+  file: File,
+  onProgress?: (progress: UploadProgress) => void,
+  forceNew?: boolean,
+): Promise<{ book: Book; isDuplicate: false } | { existingBook: Book; isDuplicate: true }> {
+  if (!API_BASE) {
+    const { simulateUpload } = await import('@/mocks/bookshelf');
+    return simulateUpload(file, onProgress || (() => {}), forceNew);
+  }
+
+  const formData = new FormData();
+  formData.append('file', file);
+  if (forceNew) {
+    formData.append('force_new', 'true');
+  }
+
+  // For real API with progress, we'd use XMLHttpRequest
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+
+    xhr.upload.addEventListener('progress', (e) => {
+      if (e.lengthComputable && onProgress) {
+        onProgress({
+          loaded: e.loaded,
+          total: e.total,
+          percentage: Math.round((e.loaded / e.total) * 100),
+        });
+      }
+    });
+
+    xhr.addEventListener('load', () => {
+      if (xhr.status === 200 || xhr.status === 201) {
+        resolve(JSON.parse(xhr.responseText));
+      } else if (xhr.status === 409) {
+        const data = JSON.parse(xhr.responseText);
+        resolve({ existingBook: data.existing_book, isDuplicate: true });
+      } else {
+        reject(new Error(`Upload failed (${xhr.status}): ${xhr.statusText}`));
+      }
+    });
+
+    xhr.addEventListener('error', () => reject(new Error('Upload failed')));
+    xhr.open('POST', `${API_BASE}/api/books/upload`);
+    xhr.send(formData);
+  });
+}
+
+export async function deleteBook(id: string): Promise<void> {
+  if (!API_BASE) {
+    const { deleteBookById } = await import('@/mocks/bookshelf');
+    return deleteBookById(id);
+  }
+
+  const response = await fetch(`${API_BASE}/api/books/${id}`, {
+    method: 'DELETE',
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to delete book (${response.status})`);
+  }
 }

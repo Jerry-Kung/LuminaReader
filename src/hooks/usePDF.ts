@@ -15,6 +15,7 @@ interface UsePDFReturn {
   error: string | null;
   fileName: string;
   loadPDF: (file: File) => void;
+  setFileName: (name: string) => void;
   goToPage: (page: number) => void;
   nextPage: () => void;
   prevPage: () => void;
@@ -62,6 +63,10 @@ export function usePDF(): UsePDFReturn {
     reader.readAsArrayBuffer(file);
   }, []);
 
+  const setFileNameFn = useCallback((name: string) => {
+    setFileName(name);
+  }, []);
+
   const goToPage = useCallback((page: number) => {
     if (page >= 1 && page <= numPages) {
       setCurrentPage(page);
@@ -106,6 +111,7 @@ export function usePDF(): UsePDFReturn {
     error,
     fileName,
     loadPDF,
+    setFileName: setFileNameFn,
     goToPage,
     nextPage,
     prevPage,
