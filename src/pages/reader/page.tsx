@@ -3,6 +3,7 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { usePDF } from '@/hooks/usePDF';
 import { translateSelection, type TaskType, type ConversationMessage, type HistoryConversation, getBook, listHistoryConversations } from '@/services/api';
 import Toolbar from './components/Toolbar';
+import ThumbnailPanel from './components/ThumbnailPanel';
 import PDFViewer from './components/PDFViewer';
 import AIAssistantPanel from './components/AIAssistantPanel';
 
@@ -492,6 +493,13 @@ export default function ReaderPage() {
       />
 
       <div className="flex-1 flex overflow-hidden relative">
+        <ThumbnailPanel
+          pdfDoc={pdfDoc}
+          numPages={numPages}
+          currentPage={currentPage}
+          onPageClick={goToPage}
+          isLoading={isLoading}
+        />
         <PDFViewer
           pdfDoc={pdfDoc}
           currentPage={currentPage}

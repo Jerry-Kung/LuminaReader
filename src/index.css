@@ -140,3 +140,29 @@ body {
 .animate-skeleton {
   animation: skeleton 1.5s ease-in-out infinite;
 }
+
+/* Thumbnail panel skeleton diagonal pattern */
+.skeleton-diagonal {
+  background: repeating-linear-gradient(
+    45deg,
+    #e7e5e4,
+    #e7e5e4 8px,
+    #d6d3d1 8px,
+    #d6d3d1 16px
+  );
+}
+
+/* Thin scrollbar for thumbnail panel */
+.scrollbar-thin::-webkit-scrollbar {
+  width: 3px;
+}
+.scrollbar-thin::-webkit-scrollbar-track {
+  background: transparent;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb {
+  background-color: #d6d3d1;
+  border-radius: 3px;
+}
+.scrollbar-thin::-webkit-scrollbar-thumb:hover {
+  background-color: #a8a29e;
+}
