@@ -7,6 +7,27 @@ export interface ConversationMessage {
   content: string;
 }
 
+export interface HistoryMessage {
+  id: number;
+  role: 'user' | 'ai';
+  text: string;
+  timestamp: number;
+  isLoading?: boolean;
+  isError?: boolean;
+  errorText?: string;
+}
+
+export interface HistoryConversation {
+  id: number;
+  book_id: string;
+  type: TaskType;
+  thumbnail: string;
+  first_question: string;
+  created_at: string;
+  updated_at: string;
+  messages: HistoryMessage[];
+}
+
 export interface Book {
   id: string;
   title: string;
@@ -223,4 +244,31 @@ export async function deleteBook(id: string): Promise<void> {
   if (!response.ok) {
     throw new Error(`Failed to delete book (${response.status})`);
   }
+}
+
+export async function listHistoryConversations(bookId: string): Promise<HistoryConversation[]> {
+  if (!API_BASE) {
+    const { fetchHistoryConversations } = await import('@/mocks/history');
+    return fetchHistoryConversations(bookId);
+  }
+
+  const response = await fetch(`${API_BASE}/api/books/${bookId}/history`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch history (${response.status})`);
+  }
+  return response.json();
+}
+
+export async function getHistoryConversation(id: number): Promise<HistoryConversation | null> {
+  if (!API_BASE) {
+    const { fetchHistoryConversationById } = await import('@/mocks/history');
+    return fetchHistoryConversationById(id);
+  }
+
+  const response = await fetch(`${API_BASE}/api/history/${id}`);
+  if (!response.ok) {
+    if (response.status === 404) return null;
+    throw new Error(`Failed to fetch history conversation (${response.status})`);
+  }
+  return response.json();
 }
