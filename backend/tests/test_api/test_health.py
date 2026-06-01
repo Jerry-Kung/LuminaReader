@@ -7,7 +7,7 @@ from lumina.schemas.api import TranslateRequest
 
 
 def test_health_with_valid_config(client: TestClient) -> None:
-    response = client.get("/api/v0/health")
+    response = client.get("/api/v1/health")
     assert response.status_code == 200
     body = response.json()
     assert body["ok"] is True
@@ -16,8 +16,16 @@ def test_health_with_valid_config(client: TestClient) -> None:
     assert body["data"]["provider_ready"] is True
 
 
+def test_v0_health_returns_gone(client: TestClient) -> None:
+    response = client.get("/api/v0/health")
+    assert response.status_code == 410
+    body = response.json()
+    assert body["ok"] is False
+    assert body["error"]["code"] == "GONE"
+
+
 def test_health_without_api_key(client_no_key: TestClient) -> None:
-    response = client_no_key.get("/api/v0/health")
+    response = client_no_key.get("/api/v1/health")
     assert response.status_code == 200
     body = response.json()
     assert body["ok"] is True
@@ -26,7 +34,7 @@ def test_health_without_api_key(client_no_key: TestClient) -> None:
 
 def test_cors_allows_localhost_3000(client: TestClient) -> None:
     response = client.options(
-        "/api/v0/health",
+        "/api/v1/health",
         headers={
             "Origin": "http://localhost:3000",
             "Access-Control-Request-Method": "GET",

@@ -24,6 +24,9 @@ class Settings(BaseSettings):
     session_max_entries: int = 100
     session_ttl_seconds: float = 3600.0
     session_log_extracted_text: bool = False
+    lumina_data_root: str = ""
+    lumina_sqlite_busy_timeout_ms: int = 5000
+    lumina_pdf_max_size_mb: int = 100
 
     @property
     def cors_origins_list(self) -> list[str]:

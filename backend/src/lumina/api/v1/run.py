@@ -21,6 +21,5 @@ async def run(
         body=body,
         provider=provider,
         settings=settings,
-        api_version="v1",
         allowed_task_types=None,
     )

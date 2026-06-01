@@ -1,6 +1,18 @@
-import { useState, useRef, useCallback } from 'react';
+import { useState, useRef, useCallback, useEffect } from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
 import { usePDF } from '@/hooks/usePDF';
-import { runTask, runFollowUp, clearSession, TranslateApiError, type TaskType } from '@/services/api';
+import {
+  runTask,
+  runFollowUp,
+  clearSession,
+  fetchLibrary,
+  getPdfRawUrl,
+  listConversations,
+  listMessages,
+  TranslateApiError,
+  type TaskType,
+  type ConversationSummary,
+} from '@/services/api';
 import Toolbar from './components/Toolbar';
 import PDFViewer from './components/PDFViewer';
 import AIAssistantPanel from './components/AIAssistantPanel';
@@ -25,6 +37,17 @@ export interface AIResult {
   collapsed: boolean;
 }
 
+export interface HistoryEntry {
+  conversationId: string;
+  taskType: TaskType;
+  summary: string;
+  lastUsedAt: number;
+  loaded: boolean;
+  loading: boolean;
+  loadError?: string;
+  messages: Message[];
+}
+
 interface SelectedArea {
   x: number;
   y: number;
@@ -41,12 +64,8 @@ interface CaptureResult {
 }
 
 function formatError(err: unknown): string {
-  if (err instanceof TranslateApiError) {
-    return `[${err.code}] ${err.message}`;
-  }
-  if (err instanceof Error) {
-    return err.message;
-  }
+  if (err instanceof TranslateApiError) return `[${err.code}] ${err.message}`;
+  if (err instanceof Error) return err.message;
   return 'AI request failed. Please try again.';
 }
 
@@ -55,7 +74,22 @@ function nextMsgId(): number {
   return Date.now() * 1000 + (msgSeq++ % 1000);
 }
 
+function summaryFromConversation(c: ConversationSummary): string {
+  const candidate = c.first_assistant_summary?.trim();
+  if (candidate) return candidate;
+  return `第 ${c.selection?.page ?? '?'} 页选区`;
+}
+
+function summaryFromMessages(messages: Message[], fallback: string): string {
+  const firstAi = messages.find((m) => m.role === 'ai' && !m.isLoading && !m.isError);
+  const candidate = firstAi?.text?.trim();
+  if (candidate) return candidate.slice(0, 200);
+  return fallback;
+}
+
 export default function ReaderPage() {
+  const { pdf_id: pdfId } = useParams<{ pdf_id: string }>();
+  const navigate = useNavigate();
   const {
     pdfDoc,
     numPages,
@@ -65,6 +99,8 @@ export default function ReaderPage() {
     error: pdfError,
     fileName,
     loadPDF,
+    loadPDFFromUrl,
+    setFileName,
     goToPage,
     nextPage,
     prevPage,
@@ -80,12 +116,71 @@ export default function ReaderPage() {
   const [activeTaskType, setActiveTaskType] = useState<TaskType>('translate');
   const [userInput, setUserInput] = useState('');
   const [panelMode, setPanelMode] = useState<'narrow' | 'wide' | 'overlay'>('narrow');
+  const [history, setHistory] = useState<HistoryEntry[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [expandedHistoryId, setExpandedHistoryId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+
+  // Load PDF bytes from backend when pdfId changes.
+  useEffect(() => {
+    if (!pdfId) return;
+    loadPDFFromUrl(getPdfRawUrl(pdfId));
+  }, [pdfId, loadPDFFromUrl]);
+
+  // Resolve display name from library list (single-shot — the library endpoint is the source of truth for names).
+  useEffect(() => {
+    if (!pdfId) return;
+    let cancelled = false;
+    fetchLibrary().then((items) => {
+      if (cancelled) return;
+      const match = items.find((item) => item.pdf_id === pdfId);
+      if (match) setFileName(match.primary_pdf_filename || match.name);
+    }).catch(() => { /* silent */ });
+    return () => { cancelled = true; };
+  }, [pdfId, setFileName]);
+
+  // Load history conversations for this PDF.
+  useEffect(() => {
+    if (!pdfId) {
+      setHistory([]);
+      return;
+    }
+    setHistoryLoading(true);
+    let cancelled = false;
+    listConversations(pdfId)
+      .then((items) => {
+        if (cancelled) return;
+        const entries: HistoryEntry[] = items.map((c) => ({
+          conversationId: c.conversation_id,
+          taskType: c.task_type,
+          summary: summaryFromConversation(c),
+          lastUsedAt: c.last_used_at,
+          loaded: false,
+          loading: false,
+          messages: [],
+        }));
+        // Newest first by last_used_at desc.
+        entries.sort((a, b) => b.lastUsedAt - a.lastUsedAt);
+        setHistory(entries);
+      })
+      .catch(() => {
+        if (!cancelled) setHistory([]);
+      })
+      .finally(() => {
+        if (!cancelled) setHistoryLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, [pdfId]);
+
+  const handleBackToLibrary = useCallback(() => {
+    navigate('/');
+  }, [navigate]);
 
   const handleOpenFile = useCallback(() => {
     fileInputRef.current?.click();
   }, []);
 
+  // Fallback path: drop a local PDF (kept for development; book uploads happen from bookshelf).
   const handleFileChange = useCallback(
     (e: React.ChangeEvent<HTMLInputElement>) => {
       const file = e.target.files?.[0];
@@ -118,7 +213,6 @@ export default function ReaderPage() {
     setSelectedArea(area);
   }, []);
 
-  // Render the selected region to a PNG and compute the PDF user-space selection metadata.
   const captureImage = useCallback(async (): Promise<CaptureResult | null> => {
     if (!selectedArea || !pdfDoc) return null;
     const page = await pdfDoc.getPage(currentPage);
@@ -171,7 +265,6 @@ export default function ReaderPage() {
     };
   }, [selectedArea, pdfDoc, currentPage]);
 
-  // First turn: send the screenshot; backend extracts text into a new session and runs the task.
   const handleAIRequest = useCallback(
     async (taskType: TaskType, inputText?: string) => {
       if (!selectedArea || !pdfDoc) return;
@@ -221,7 +314,7 @@ export default function ReaderPage() {
           data: capture.base64,
           width: capture.width,
           height: capture.height,
-        }, { targetLang: 'zh-CN', userQuestion: trimmedInput });
+        }, { targetLang: 'zh-CN', userQuestion: trimmedInput, pdfId });
 
         setAiResults((prev) => {
           const idx = prev.findIndex((r) => r.id === cardId);
@@ -266,10 +359,9 @@ export default function ReaderPage() {
         setIsAIWorking(false);
       }
     },
-    [selectedArea, pdfDoc, captureImage],
+    [selectedArea, pdfDoc, captureImage, pdfId],
   );
 
-  // Follow-up turn: text-driven only — send sessionId + question, no image (Scheme D).
   const handleFollowUp = useCallback(
     async (cardId: number, text: string) => {
       const trimmed = text.trim();
@@ -340,7 +432,6 @@ export default function ReaderPage() {
     [aiResults],
   );
 
-  // Clear conversation: release the backend session first, then drop the card (R-V102-7).
   const handleClearCard = useCallback(
     async (cardId: number) => {
       const card = aiResults.find((r) => r.id === cardId);
@@ -350,10 +441,13 @@ export default function ReaderPage() {
         } catch {
           // Session release failed (network/server); still clear the local card.
         }
+        // If this card was promoted from history, drop it from the history list too.
+        setHistory((prev) => prev.filter((h) => h.conversationId !== card.sessionId));
+        if (expandedHistoryId === card.sessionId) setExpandedHistoryId(null);
       }
       setAiResults((prev) => prev.filter((r) => r.id !== cardId));
     },
-    [aiResults],
+    [aiResults, expandedHistoryId],
   );
 
   const handleToggleCollapse = useCallback((cardId: number) => {
@@ -361,6 +455,127 @@ export default function ReaderPage() {
       prev.map((r) => (r.id === cardId ? { ...r, collapsed: !r.collapsed } : r)),
     );
   }, []);
+
+  // Lazy-load full messages for a history conversation on first expand.
+  const ensureHistoryLoaded = useCallback(
+    async (conversationId: string) => {
+      const target = history.find((h) => h.conversationId === conversationId);
+      if (!target || target.loaded || target.loading) return;
+
+      setHistory((prev) =>
+        prev.map((h) => (h.conversationId === conversationId ? { ...h, loading: true, loadError: undefined } : h)),
+      );
+
+      try {
+        const detail = await listMessages(conversationId);
+        const messages: Message[] = detail.messages.map((m) => ({
+          id: nextMsgId(),
+          role: m.role === 'user' ? 'user' : 'ai',
+          text: m.content,
+          timestamp: (m.created_at || 0) * 1000,
+        }));
+        setHistory((prev) =>
+          prev.map((h) =>
+            h.conversationId === conversationId
+              ? {
+                  ...h,
+                  loaded: true,
+                  loading: false,
+                  messages,
+                  summary: summaryFromMessages(messages, h.summary),
+                }
+              : h,
+          ),
+        );
+      } catch (err) {
+        const msg = formatError(err);
+        setHistory((prev) =>
+          prev.map((h) =>
+            h.conversationId === conversationId ? { ...h, loading: false, loadError: msg } : h,
+          ),
+        );
+      }
+    },
+    [history],
+  );
+
+  const handleToggleHistory = useCallback(
+    (conversationId: string) => {
+      setExpandedHistoryId((prev) => (prev === conversationId ? null : conversationId));
+      ensureHistoryLoaded(conversationId);
+    },
+    [ensureHistoryLoaded],
+  );
+
+  // Continue a history conversation: append user/loading turns locally, then runFollowUp(conversation_id).
+  const handleHistoryFollowUp = useCallback(
+    async (conversationId: string, text: string) => {
+      const trimmed = text.trim();
+      if (!trimmed) return;
+      const entry = history.find((h) => h.conversationId === conversationId);
+      if (!entry) return;
+
+      const loadingId = nextMsgId();
+
+      setHistory((prev) =>
+        prev.map((h) =>
+          h.conversationId === conversationId
+            ? {
+                ...h,
+                messages: [
+                  ...h.messages,
+                  { id: nextMsgId(), role: 'user', text: trimmed, timestamp: Date.now() },
+                  { id: loadingId, role: 'ai', text: '', timestamp: Date.now(), isLoading: true },
+                ],
+              }
+            : h,
+        ),
+      );
+
+      try {
+        const result = await runFollowUp(entry.taskType, conversationId, trimmed, { targetLang: 'zh-CN' });
+        setHistory((prev) =>
+          prev.map((h) => {
+            if (h.conversationId !== conversationId) return h;
+            const filtered = h.messages.filter((m) => m.id !== loadingId);
+            return {
+              ...h,
+              lastUsedAt: Math.floor(Date.now() / 1000),
+              messages: [
+                ...filtered,
+                { id: nextMsgId(), role: 'ai', text: result.text, timestamp: Date.now() },
+              ],
+            };
+          }),
+        );
+      } catch (err) {
+        const msg = formatError(err);
+        setHistory((prev) =>
+          prev.map((h) => {
+            if (h.conversationId !== conversationId) return h;
+            const filtered = h.messages.filter((m) => m.id !== loadingId);
+            return {
+              ...h,
+              messages: [
+                ...filtered,
+                {
+                  id: nextMsgId(),
+                  role: 'ai',
+                  text: 'Request failed',
+                  timestamp: Date.now(),
+                  isError: true,
+                  errorText: msg,
+                },
+              ],
+            };
+          }),
+        );
+      }
+    },
+    [history],
+  );
+
+  const displayName = fileName ? fileName.replace(/\.pdf$/i, '') : '';
 
   return (
     <div className="h-screen flex flex-col bg-stone-50">
@@ -371,6 +586,21 @@ export default function ReaderPage() {
         onChange={handleFileChange}
         className="hidden"
       />
+
+      {/* Breadcrumb */}
+      <div className="flex items-center gap-2 px-5 py-2 bg-white border-b border-stone-100">
+        <button
+          onClick={handleBackToLibrary}
+          className="flex items-center gap-1 text-sm text-stone-500 hover:text-stone-700 hover:underline transition-colors cursor-pointer"
+        >
+          <i className="ri-arrow-left-line text-xs"></i>
+          我的书架
+        </button>
+        <span className="text-stone-300 text-xs">›</span>
+        <span className="text-sm text-stone-700 truncate max-w-[420px]" title={displayName}>
+          {displayName || '未命名'}
+        </span>
+      </div>
 
       <Toolbar
         fileName={fileName}
@@ -405,6 +635,11 @@ export default function ReaderPage() {
         />
         <AIAssistantPanel
           results={aiResults}
+          history={history}
+          historyLoading={historyLoading}
+          expandedHistoryId={expandedHistoryId}
+          onToggleHistory={handleToggleHistory}
+          onHistoryFollowUp={handleHistoryFollowUp}
           isAIWorking={isAIWorking}
           error={aiError}
           hasSelection={!!selectedArea}

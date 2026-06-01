@@ -13,6 +13,8 @@ class TaskContext(BaseModel):
     history: list[LLMMessage] = Field(default_factory=list)
     user_question: str | None = None
     extracted_text: str | None = None
+    project_id: str | None = None
+    pdf_id: str | None = None
 
 
 class TaskResult(BaseModel):

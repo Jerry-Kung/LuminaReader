@@ -1,26 +1,36 @@
-from fastapi import APIRouter, Depends, Request
+import logging
 
-from lumina.api._run_core import execute_run
-from lumina.config import Settings, get_settings
-from lumina.providers import get_provider
-from lumina.providers.base import Provider
-from lumina.schemas.api import TranslateRequest
+from fastapi import APIRouter, Request
+from fastapi.responses import JSONResponse
 
-router = APIRouter(tags=["translate"])
+from lumina.logging import get_logger, log_with_fields
+from lumina.request_id import generate_request_id
+
+router = APIRouter(prefix="/translate", tags=["v0-gone"])
+logger = get_logger("lumina.v0")
 
 
-@router.post("/translate", response_model=None)
-async def translate(
-    request: Request,
-    body: TranslateRequest,
-    provider: Provider = Depends(get_provider),
-    settings: Settings = Depends(get_settings),
-):
-    return await execute_run(
-        request=request,
-        body=body,
-        provider=provider,
-        settings=settings,
-        api_version="v0",
-        allowed_task_types={"translate"},
+@router.post("")
+async def v0_translate_gone(request: Request) -> JSONResponse:
+    request_id = generate_request_id()
+    log_with_fields(
+        logger,
+        logging.WARNING,
+        "v0 endpoint gone",
+        request_id=request_id,
+        api_version="gone",
+        http_status=410,
+        error_code="GONE",
+        path=str(request.url.path),
+    )
+    return JSONResponse(
+        status_code=410,
+        content={
+            "ok": False,
+            "error": {
+                "code": "GONE",
+                "message": "Endpoint removed in V1.0.3. Use POST /api/v1/run instead.",
+                "request_id": request_id,
+            },
+        },
     )

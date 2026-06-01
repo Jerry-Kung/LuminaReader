@@ -1,6 +1,7 @@
 chat_docs/
 claude_docs/
 .claude/
+user_data/
 
 # Node.js / frontend
 node_modules/

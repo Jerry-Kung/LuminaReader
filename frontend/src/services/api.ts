@@ -40,6 +40,7 @@ export interface RunResult {
 export interface RunOptions {
   targetLang?: string;
   userQuestion?: string;
+  pdfId?: string;
 }
 
 interface SuccessEnvelope<T> {
@@ -53,6 +54,7 @@ interface ErrorEnvelope {
     code: string;
     message: string;
     request_id?: string;
+    [key: string]: unknown;
   };
 }
 
@@ -61,6 +63,7 @@ type Envelope<T> = SuccessEnvelope<T> | ErrorEnvelope;
 interface RunData {
   text: string;
   session_id: string;
+  conversation_id?: string;
   meta: TranslateMeta & { turn_index?: number };
 }
 
@@ -84,7 +87,7 @@ const MOCK_TEXTS: Record<TaskType, string> = {
     '这是模拟的解释结果。\n\n当您配置了后端 API 地址后（在 .env 文件中设置 VITE_API_BASE_URL），这里将显示 AI 对所选内容的深度解读，包括：核心观点、术语说明、必要的背景知识。',
 };
 
-let mockTurnCounter: Record<string, number> = {};
+const mockTurnCounter: Record<string, number> = {};
 
 function mockRun(
   taskType: TaskType,
@@ -119,8 +122,9 @@ async function postRun(body: Record<string, unknown>): Promise<RunResult> {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     });
-  } catch (err: any) {
-    throw new TranslateApiError('NETWORK_ERROR', err?.message || 'Failed to reach backend.');
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to reach backend.';
+    throw new TranslateApiError('NETWORK_ERROR', msg);
   }
 
   let envelope: Envelope<RunData>;
@@ -154,7 +158,8 @@ async function postRun(body: Record<string, unknown>): Promise<RunResult> {
   );
 }
 
-// First turn: image + selection required; optional user_question; backend creates the session.
+// First turn: image + selection required; backend creates the session.
+// V1.0.3: pdfId required so backend can resolve project context.
 export async function runTask(
   taskType: TaskType,
   selection: TranslateSelection,
@@ -168,8 +173,9 @@ export async function runTask(
   return postRun({
     task_type: taskType,
     session_id: null,
+    pdf_id: options.pdfId ?? null,
     selection: {
-      pdf_id: null,
+      pdf_id: options.pdfId ?? null,
       page: selection.page,
       x: selection.x,
       y: selection.y,
@@ -224,8 +230,9 @@ export async function clearSession(sessionId: string): Promise<void> {
   let response: Response;
   try {
     response = await fetch(url, { method: 'DELETE' });
-  } catch (err: any) {
-    throw new TranslateApiError('NETWORK_ERROR', err?.message || 'Failed to reach backend.');
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to reach backend.';
+    throw new TranslateApiError('NETWORK_ERROR', msg);
   }
 
   if (response.status === 204 || response.status === 404) return;
@@ -244,14 +251,283 @@ export async function clearSession(sessionId: string): Promise<void> {
   );
 }
 
-// v0 compatibility wrapper — delegates to runTask (first turn). Kept per design.
-export async function translateSelection(
-  selection: TranslateSelection,
-  image: TranslateImage,
-  options: { targetLang?: string; taskType?: TaskType; userQuestion?: string } = {},
-): Promise<RunResult> {
-  return runTask(options.taskType ?? 'translate', selection, image, {
-    targetLang: options.targetLang,
-    userQuestion: options.userQuestion,
+// =====================================================================
+// V1.0.3 library / pdfs / conversations endpoints
+// =====================================================================
+
+export interface LibraryItem {
+  pdf_id: string;
+  name: string;
+  primary_pdf_filename: string;
+  primary_pdf_size: number;
+  created_at: number;
+  last_opened_at: number;
+  thumbnail_url: string | null;
+}
+
+export interface PdfUploadResult {
+  pdf_id: string;
+  project_id: string;
+  name: string;
+  primary_pdf_filename: string;
+  primary_pdf_size: number;
+  created_at: number;
+}
+
+export interface ConflictExisting {
+  pdf_id: string;
+  name: string;
+  primary_pdf_filename: string;
+  primary_pdf_size: number;
+  created_at: number;
+  last_opened_at: number;
+}
+
+export class PdfConflictError extends TranslateApiError {
+  existing: ConflictExisting;
+  forceCreateNewHint?: string;
+
+  constructor(
+    message: string,
+    existing: ConflictExisting,
+    forceCreateNewHint: string | undefined,
+    requestId?: string,
+  ) {
+    super('PROJECT_NAME_CONFLICT', message, requestId, 409);
+    this.existing = existing;
+    this.forceCreateNewHint = forceCreateNewHint;
+  }
+}
+
+export interface UploadProgress {
+  loaded: number;
+  total: number;
+  percentage: number;
+}
+
+export interface SelectionCoord {
+  page: number;
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+export interface ConversationSummary {
+  conversation_id: string;
+  task_type: TaskType;
+  selection: SelectionCoord;
+  thumbnail_url: string | null;
+  first_assistant_summary: string;
+  status: string;
+  created_at: number;
+  last_used_at: number;
+  message_count: number;
+}
+
+export interface MessageItem {
+  message_id: string;
+  turn_index: number;
+  role: 'user' | 'assistant';
+  content: string;
+  created_at: number;
+  user_question?: string;
+  model?: string;
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  latency_ms?: number;
+}
+
+export interface ConversationDetail {
+  conversation_id: string;
+  task_type: TaskType;
+  extracted_text: string;
+  messages: MessageItem[];
+}
+
+async function parseEnvelope<T>(response: Response): Promise<T> {
+  let envelope: Envelope<T>;
+  try {
+    envelope = await response.json();
+  } catch {
+    throw new TranslateApiError(
+      'INVALID_RESPONSE',
+      `Backend returned non-JSON response (HTTP ${response.status}).`,
+      undefined,
+      response.status,
+    );
+  }
+  if (envelope.ok === true) return envelope.data;
+  throw new TranslateApiError(
+    envelope.error?.code || 'INTERNAL_ERROR',
+    envelope.error?.message || `Request failed (HTTP ${response.status}).`,
+    envelope.error?.request_id,
+    response.status,
+  );
+}
+
+export type LibrarySort = 'last_opened_at_desc' | 'created_at_desc' | 'name_asc';
+
+export async function fetchLibrary(sort: LibrarySort = 'last_opened_at_desc'): Promise<LibraryItem[]> {
+  if (!API_BASE) return [];
+  const url = `${API_BASE}/api/v1/library?sort=${encodeURIComponent(sort)}`;
+  let response: Response;
+  try {
+    response = await fetch(url);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to reach backend.';
+    throw new TranslateApiError('NETWORK_ERROR', msg);
+  }
+  const data = await parseEnvelope<{ items: LibraryItem[] }>(response);
+  return data.items;
+}
+
+// Upload a PDF (multipart). Throws PdfConflictError on 409.
+// Use XHR for upload progress events.
+export async function uploadPdf(
+  file: File,
+  options: {
+    forceCreateNew?: boolean;
+    onProgress?: (progress: UploadProgress) => void;
+  } = {},
+): Promise<PdfUploadResult> {
+  if (!API_BASE) {
+    throw new TranslateApiError(
+      'NO_BACKEND',
+      'Upload requires VITE_API_BASE_URL to be configured.',
+    );
+  }
+
+  return new Promise((resolve, reject) => {
+    const formData = new FormData();
+    formData.append('file', file);
+    if (options.forceCreateNew) {
+      formData.append('force_create_new', 'true');
+    }
+
+    const xhr = new XMLHttpRequest();
+    xhr.upload.addEventListener('progress', (e) => {
+      if (e.lengthComputable && options.onProgress) {
+        options.onProgress({
+          loaded: e.loaded,
+          total: e.total,
+          percentage: Math.round((e.loaded / e.total) * 100),
+        });
+      }
+    });
+
+    xhr.addEventListener('load', () => {
+      let envelope: Envelope<PdfUploadResult> | null = null;
+      try {
+        envelope = JSON.parse(xhr.responseText);
+      } catch {
+        reject(
+          new TranslateApiError(
+            'INVALID_RESPONSE',
+            `Upload returned non-JSON response (HTTP ${xhr.status}).`,
+            undefined,
+            xhr.status,
+          ),
+        );
+        return;
+      }
+
+      if (envelope && envelope.ok === true) {
+        resolve(envelope.data);
+        return;
+      }
+
+      const errorBody = envelope && envelope.ok === false ? envelope.error : null;
+      if (xhr.status === 409 && errorBody && errorBody.code === 'PROJECT_NAME_CONFLICT') {
+        const existing = errorBody.existing as ConflictExisting | undefined;
+        if (existing) {
+          reject(
+            new PdfConflictError(
+              errorBody.message || '已存在同名书',
+              existing,
+              errorBody.force_create_new_hint as string | undefined,
+              errorBody.request_id,
+            ),
+          );
+          return;
+        }
+      }
+      reject(
+        new TranslateApiError(
+          errorBody?.code || 'INTERNAL_ERROR',
+          errorBody?.message || `Upload failed (HTTP ${xhr.status}).`,
+          errorBody?.request_id,
+          xhr.status,
+        ),
+      );
+    });
+
+    xhr.addEventListener('error', () => {
+      reject(new TranslateApiError('NETWORK_ERROR', 'Upload network error.'));
+    });
+    xhr.addEventListener('abort', () => {
+      reject(new TranslateApiError('UPLOAD_ABORTED', 'Upload aborted.'));
+    });
+
+    xhr.open('POST', `${API_BASE}/api/v1/pdfs`);
+    xhr.send(formData);
   });
+}
+
+export async function deletePdf(pdfId: string): Promise<void> {
+  if (!API_BASE) return;
+  const url = `${API_BASE}/api/v1/pdfs/${encodeURIComponent(pdfId)}`;
+  let response: Response;
+  try {
+    response = await fetch(url, { method: 'DELETE' });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to reach backend.';
+    throw new TranslateApiError('NETWORK_ERROR', msg);
+  }
+  if (response.status === 204 || response.status === 404) return;
+  let envelope: ErrorEnvelope | null = null;
+  try {
+    envelope = await response.json();
+  } catch {
+    envelope = null;
+  }
+  throw new TranslateApiError(
+    envelope?.error?.code || 'INTERNAL_ERROR',
+    envelope?.error?.message || `Failed to delete pdf (HTTP ${response.status}).`,
+    envelope?.error?.request_id,
+    response.status,
+  );
+}
+
+export function getPdfRawUrl(pdfId: string): string {
+  return `${API_BASE}/api/v1/pdfs/${encodeURIComponent(pdfId)}/raw`;
+}
+
+export async function listConversations(pdfId: string): Promise<ConversationSummary[]> {
+  if (!API_BASE) return [];
+  const url = `${API_BASE}/api/v1/pdfs/${encodeURIComponent(pdfId)}/conversations`;
+  let response: Response;
+  try {
+    response = await fetch(url);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to reach backend.';
+    throw new TranslateApiError('NETWORK_ERROR', msg);
+  }
+  const data = await parseEnvelope<{ items: ConversationSummary[] }>(response);
+  return data.items.filter((c) => c.status === 'active');
+}
+
+export async function listMessages(conversationId: string): Promise<ConversationDetail> {
+  if (!API_BASE) {
+    return { conversation_id: conversationId, task_type: 'translate', extracted_text: '', messages: [] };
+  }
+  const url = `${API_BASE}/api/v1/conversations/${encodeURIComponent(conversationId)}/messages`;
+  let response: Response;
+  try {
+    response = await fetch(url);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to reach backend.';
+    throw new TranslateApiError('NETWORK_ERROR', msg);
+  }
+  return parseEnvelope<ConversationDetail>(response);
 }

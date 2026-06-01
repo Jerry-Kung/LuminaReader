@@ -1,10 +1,15 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
-import type { AIResult, Message } from '../page';
+import type { AIResult, Message, HistoryEntry } from '../page';
 import type { TaskType } from '@/services/api';
 import MarkdownRenderer from './MarkdownRenderer';
 
 interface AIAssistantPanelProps {
   results: AIResult[];
+  history: HistoryEntry[];
+  historyLoading: boolean;
+  expandedHistoryId: string | null;
+  onToggleHistory: (conversationId: string) => void;
+  onHistoryFollowUp: (conversationId: string, text: string) => void;
   isAIWorking: boolean;
   error: string | null;
   hasSelection: boolean;
@@ -34,6 +39,19 @@ const taskLabelConfig = {
     textClass: 'text-teal-700',
   },
 };
+
+function formatRelativeFromEpochSec(epochSec: number): string {
+  if (!epochSec) return '';
+  const nowSec = Math.floor(Date.now() / 1000);
+  const diff = Math.max(0, nowSec - epochSec);
+  if (diff < 60) return '刚刚';
+  if (diff < 3600) return `${Math.floor(diff / 60)} 分钟前`;
+  if (diff < 86400) return `${Math.floor(diff / 3600)} 小时前`;
+  if (diff < 86400 * 2) return '昨天';
+  if (diff < 86400 * 7) return `${Math.floor(diff / 86400)} 天前`;
+  if (diff < 86400 * 30) return `${Math.floor(diff / 86400 / 7)} 周前`;
+  return `${Math.floor(diff / 86400 / 30)} 个月前`;
+}
 
 function MessageBubble({ message }: { message: Message }) {
   if (message.role === 'user') {
@@ -136,6 +154,75 @@ function FollowUpInput({ onSend, disabled }: { onSend: (text: string) => void; d
       >
         <i className="ri-send-plane-fill text-xs"></i>
       </button>
+    </div>
+  );
+}
+
+function HistoryItem({
+  entry,
+  isExpanded,
+  onToggle,
+  onFollowUp,
+  isAIWorking,
+}: {
+  entry: HistoryEntry;
+  isExpanded: boolean;
+  onToggle: () => void;
+  onFollowUp: (text: string) => void;
+  isAIWorking: boolean;
+}) {
+  const config = taskLabelConfig[entry.taskType];
+  const placeholder = (entry.summary || '历史对话').slice(0, 60);
+  const firstLetter = (entry.summary || '?').trim().charAt(0).toUpperCase() || '？';
+  const hasLoading = entry.messages.some((m) => m.isLoading);
+
+  return (
+    <div className="rounded-lg border border-stone-200 bg-white overflow-hidden">
+      <button
+        onClick={onToggle}
+        className="flex items-center gap-3 w-full px-3 py-2.5 text-left cursor-pointer hover:bg-stone-50/50 transition-colors"
+      >
+        <div className="w-10 h-8 rounded border border-stone-200 flex-shrink-0 flex items-center justify-center bg-stone-100 text-stone-400">
+          <span className="text-sm font-serif">{firstLetter}</span>
+        </div>
+        <div className="flex-1 min-w-0">
+          <p className="text-sm text-stone-700 truncate leading-snug">{placeholder}</p>
+          <div className="flex items-center gap-2 mt-0.5">
+            <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium rounded-full ${config.bgClass} ${config.textClass}`}>
+              <i className={`${config.icon} text-[10px]`}></i>
+              {config.label}
+            </span>
+            <span className="text-xs text-stone-400">{formatRelativeFromEpochSec(entry.lastUsedAt)}</span>
+          </div>
+        </div>
+        <i
+          className={`ri-arrow-down-s-line text-stone-400 flex-shrink-0 transition-transform duration-200 ${isExpanded ? 'rotate-180' : ''}`}
+        ></i>
+      </button>
+
+      <div
+        className={`transition-all duration-300 ease-out overflow-hidden ${isExpanded ? 'max-h-[3000px] opacity-100' : 'max-h-0 opacity-0'}`}
+      >
+        <div className="px-3 pb-3 pt-2 border-t border-stone-100">
+          {entry.loading && entry.messages.length === 0 ? (
+            <div className="flex items-center gap-2 text-xs text-stone-400 py-2">
+              <i className="ri-loader-4-line animate-spin"></i>
+              加载历史对话…
+            </div>
+          ) : entry.loadError ? (
+            <div className="text-xs text-red-500 py-2">{entry.loadError}</div>
+          ) : (
+            <>
+              {entry.messages.map((message) => (
+                <MessageBubble key={message.id} message={message} />
+              ))}
+              {!hasLoading && (
+                <FollowUpInput onSend={onFollowUp} disabled={isAIWorking} />
+              )}
+            </>
+          )}
+        </div>
+      </div>
     </div>
   );
 }
@@ -259,6 +346,11 @@ function getNextMode(mode: 'narrow' | 'wide' | 'overlay'): 'narrow' | 'wide' | '
 
 export default function AIAssistantPanel({
   results,
+  history,
+  historyLoading,
+  expandedHistoryId,
+  onToggleHistory,
+  onHistoryFollowUp,
   isAIWorking,
   error,
   hasSelection,
@@ -294,7 +386,6 @@ export default function AIAssistantPanel({
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const latestCardId = results.length > 0 ? results[results.length - 1].id : null;
 
-  // Scroll to bottom whenever a new card is appended (cards are ordered old-on-top, new-on-bottom).
   useEffect(() => {
     if (latestCardId === null) return;
     const node = scrollContainerRef.current;
@@ -303,10 +394,10 @@ export default function AIAssistantPanel({
   }, [latestCardId]);
 
   const hasAnyCard = results.length > 0;
+  const hasHistory = history.length > 0;
 
   const isOverlay = panelMode === 'overlay';
   const isWide = panelMode === 'wide';
-  const isNarrow = panelMode === 'narrow';
 
   const widthClasses = isOverlay
     ? 'absolute right-0 top-0 bottom-0 z-20 shadow-2xl w-[85%]'
@@ -316,7 +407,6 @@ export default function AIAssistantPanel({
 
   return (
     <>
-      {/* Overlay backdrop */}
       {isOverlay && (
         <div
           className="fixed inset-0 bg-black/15 z-10 transition-opacity duration-300"
@@ -345,8 +435,39 @@ export default function AIAssistantPanel({
         </div>
 
         <div ref={scrollContainerRef} className="flex-1 overflow-y-auto p-4">
+          {/* History Section */}
+          <div className="mb-4">
+            <div className="flex items-center gap-2 mb-2">
+              <i className="ri-history-line text-stone-400 text-xs"></i>
+              <span className="text-xs font-medium text-stone-400">历史对话</span>
+              {historyLoading && (
+                <i className="ri-loader-4-line animate-spin text-stone-300 text-xs"></i>
+              )}
+            </div>
+
+            {hasHistory ? (
+              <div className="space-y-2">
+                {history.map((entry) => (
+                  <HistoryItem
+                    key={entry.conversationId}
+                    entry={entry}
+                    isExpanded={expandedHistoryId === entry.conversationId}
+                    onToggle={() => onToggleHistory(entry.conversationId)}
+                    onFollowUp={(text) => onHistoryFollowUp(entry.conversationId, text)}
+                    isAIWorking={isAIWorking}
+                  />
+                ))}
+              </div>
+            ) : (
+              <p className="text-xs text-stone-300 py-2">
+                {historyLoading ? '加载中…' : '还没有对话历史，框选 PDF 上的文字试试'}
+              </p>
+            )}
+          </div>
+
+          {/* Current session */}
           {isAIWorking && !hasAnyCard && (
-            <div className="flex flex-col items-center justify-center h-full gap-3 text-stone-400">
+            <div className="flex flex-col items-center justify-center gap-3 text-stone-400 py-6">
               <i className="ri-loader-4-line animate-spin text-2xl"></i>
               <p className="text-sm">AI is working...</p>
             </div>
@@ -359,8 +480,8 @@ export default function AIAssistantPanel({
             </div>
           )}
 
-          {!isAIWorking && !hasAnyCard && (
-            <div className="flex flex-col items-center justify-center h-full gap-3 text-stone-300">
+          {!isAIWorking && !hasAnyCard && !hasHistory && (
+            <div className="flex flex-col items-center justify-center gap-3 text-stone-300 py-6">
               <div className="w-14 h-14 flex items-center justify-center rounded-xl bg-stone-100">
                 <i className="ri-robot-2-line text-2xl"></i>
               </div>
@@ -386,7 +507,6 @@ export default function AIAssistantPanel({
                     key={result.id}
                     className="group rounded-lg border border-stone-200 bg-stone-50/50 overflow-hidden"
                   >
-                    {/* Card header */}
                     <div className="flex items-center justify-between px-3 py-2 bg-stone-100/70">
                       <div className="flex items-center gap-2">
                         <span
@@ -432,7 +552,6 @@ export default function AIAssistantPanel({
 
                     {!result.collapsed && (
                       <>
-                        {/* Screenshot thumbnail */}
                         <div className="px-3 pt-2">
                           <img
                             src={result.imageBase64}
@@ -441,14 +560,12 @@ export default function AIAssistantPanel({
                           />
                         </div>
 
-                        {/* Message bubbles */}
                         <div className="px-2 py-2">
                           {result.messages.map((message) => (
                             <MessageBubble key={message.id} message={message} />
                           ))}
                         </div>
 
-                        {/* Follow-up input */}
                         {!hasLoading && (
                           <div className="px-3 pb-3">
                             <FollowUpInput
@@ -466,7 +583,6 @@ export default function AIAssistantPanel({
           )}
         </div>
 
-        {/* Bottom launch area */}
         <div className="flex-shrink-0">
           <LaunchInputArea
             hasSelection={hasSelection}

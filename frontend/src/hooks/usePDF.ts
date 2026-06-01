@@ -15,6 +15,8 @@ interface UsePDFReturn {
   error: string | null;
   fileName: string;
   loadPDF: (file: File) => void;
+  loadPDFFromUrl: (url: string, fileName?: string) => Promise<void>;
+  setFileName: (name: string) => void;
   goToPage: (page: number) => void;
   nextPage: () => void;
   prevPage: () => void;
@@ -33,6 +35,19 @@ export function usePDF(): UsePDFReturn {
   const [fileName, setFileName] = useState('');
   const pdfDocRef = useRef<pdfjsLib.PDFDocumentProxy | null>(null);
 
+  const ingestPdfBytes = useCallback(async (bytes: Uint8Array) => {
+    if (pdfDocRef.current) {
+      try { pdfDocRef.current.destroy(); } catch { /* ignore */ }
+      pdfDocRef.current = null;
+    }
+    const doc = await pdfjsLib.getDocument({ data: bytes }).promise;
+    pdfDocRef.current = doc;
+    setPdfDoc(doc);
+    setNumPages(doc.numPages);
+    setCurrentPage(1);
+    setScale(1.0);
+  }, []);
+
   const loadPDF = useCallback((file: File) => {
     setIsLoading(true);
     setError(null);
@@ -42,12 +57,7 @@ export function usePDF(): UsePDFReturn {
     reader.onload = async (e) => {
       try {
         const typedArray = new Uint8Array(e.target!.result as ArrayBuffer);
-        const doc = await pdfjsLib.getDocument({ data: typedArray }).promise;
-        pdfDocRef.current = doc;
-        setPdfDoc(doc);
-        setNumPages(doc.numPages);
-        setCurrentPage(1);
-        setScale(1.0);
+        await ingestPdfBytes(typedArray);
       } catch (err) {
         setError('Failed to load PDF. Please make sure it\'s a valid PDF file.');
         console.error('PDF load error:', err);
@@ -60,7 +70,26 @@ export function usePDF(): UsePDFReturn {
       setIsLoading(false);
     };
     reader.readAsArrayBuffer(file);
-  }, []);
+  }, [ingestPdfBytes]);
+
+  const loadPDFFromUrl = useCallback(async (url: string, name?: string) => {
+    setIsLoading(true);
+    setError(null);
+    if (name) setFileName(name);
+    try {
+      const response = await fetch(url);
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+      const buffer = await response.arrayBuffer();
+      await ingestPdfBytes(new Uint8Array(buffer));
+    } catch (err) {
+      setError('Failed to load PDF from server.');
+      console.error('PDF fetch error:', err);
+    } finally {
+      setIsLoading(false);
+    }
+  }, [ingestPdfBytes]);
 
   const goToPage = useCallback((page: number) => {
     if (page >= 1 && page <= numPages) {
@@ -106,6 +135,8 @@ export function usePDF(): UsePDFReturn {
     error,
     fileName,
     loadPDF,
+    loadPDFFromUrl,
+    setFileName,
     goToPage,
     nextPage,
     prevPage,

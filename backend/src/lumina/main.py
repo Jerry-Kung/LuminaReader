@@ -11,7 +11,10 @@ import lumina
 from lumina.api.v0 import router as v0_router
 from lumina.api.v1 import router as v1_router
 from lumina.config import Settings, get_settings
+from lumina.db.engine import close_all
 from lumina.logging import get_logger, log_with_fields, setup_logging
+from lumina.projects.catalog import load_catalog
+from lumina.projects.paths import resolve_data_root
 from lumina.providers import init_provider, reset_provider
 from lumina.sessions import cleanup_loop, init_session_store, reset_session_store
 from lumina.request_id import generate_request_id
@@ -71,6 +74,9 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         setup_logging(cfg.log_level)
+        data_root = resolve_data_root()
+        data_root.mkdir(parents=True, exist_ok=True)
+        load_catalog()
         app.state.provider = init_provider(cfg)
         store = init_session_store(
             max_entries=cfg.session_max_entries,
@@ -86,14 +92,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             version=lumina.__version__,
             host=cfg.host,
             port=cfg.port,
+            data_root=str(data_root),
         )
         log_with_fields(
             logger,
             logging.WARNING,
-            "v0 endpoint is in compatibility mode and will be removed in V1.0.3",
-            event="v0_deprecated",
-            deprecated_path="/api/v0/translate",
-            replacement_path="/api/v1/run",
+            "/api/v0/* endpoints are gone; clients must migrate to /api/v1/run",
+            event="v0_gone",
         )
         try:
             yield
@@ -103,6 +108,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 await cleanup_task
             except (asyncio.CancelledError, Exception):
                 pass
+            close_all()
             reset_session_store()
             reset_provider()
 

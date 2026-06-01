@@ -5,7 +5,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 from lumina.config import Settings, get_settings
+from lumina.db.engine import close_all
 from lumina.main import create_app
+from lumina.projects.manager import auto_create_project
 from lumina.providers import get_provider, reset_provider
 from lumina.providers.base import (
     LLMRequest,
@@ -22,9 +24,10 @@ MINIMAL_PNG_B64 = (
 )
 
 
-def valid_run_payload(task_type: str = "translate", **overrides: object) -> dict:
+def valid_run_payload(task_type: str = "translate", pdf_id: str | None = None, **overrides: object) -> dict:
     payload = {
         "task_type": task_type,
+        "pdf_id": pdf_id,
         "selection": {
             "pdf_id": None,
             "page": 1,
@@ -83,8 +86,16 @@ class MockRunProvider(Provider):
         return True
 
 
+PDF_BYTES = b"%PDF-1.4 run test"
+
+
 @pytest.fixture
-def run_client() -> TestClient:
+def default_pdf_id(data_root):
+    return auto_create_project(PDF_BYTES, "runtest.pdf").pdf_id
+
+
+@pytest.fixture
+def run_client(data_root, default_pdf_id) -> TestClient:
     settings = Settings(
         openai_api_key="test-key-not-real",
         openai_base_url="https://api.openai.com/v1",
@@ -97,11 +108,17 @@ def run_client() -> TestClient:
     app.dependency_overrides[get_settings] = lambda: settings
     app.dependency_overrides[get_provider] = lambda: MockRunProvider()
     with TestClient(app, raise_server_exceptions=False) as client:
+        client.default_pdf_id = default_pdf_id
         yield client
     app.dependency_overrides.clear()
     get_settings.cache_clear()
+    close_all()
     reset_provider()
     reset_session_store()
+
+
+def run_payload(client: TestClient, **overrides: object) -> dict:
+    return valid_run_payload(pdf_id=client.default_pdf_id, **overrides)
 
 
 def follow_up_payload(session_id: str, **overrides: object) -> dict:
@@ -117,7 +134,7 @@ def follow_up_payload(session_id: str, **overrides: object) -> dict:
 
 
 def test_run_translate_success(run_client: TestClient) -> None:
-    response = run_client.post("/api/v1/run", json=valid_run_payload(task_type="translate"))
+    response = run_client.post("/api/v1/run", json=run_payload(run_client, task_type="translate"))
     assert response.status_code == 200
     body = response.json()
     assert body["ok"] is True
@@ -131,7 +148,7 @@ def test_run_translate_success(run_client: TestClient) -> None:
 def test_run_explain_success(run_client: TestClient) -> None:
     provider = MockRunProvider()
     run_client.app.dependency_overrides[get_provider] = lambda: provider
-    response = run_client.post("/api/v1/run", json=valid_run_payload(task_type="explain"))
+    response = run_client.post("/api/v1/run", json=run_payload(run_client, task_type="explain"))
     assert response.status_code == 200
     body = response.json()
     assert body["ok"] is True
@@ -144,7 +161,7 @@ def test_run_explain_success(run_client: TestClient) -> None:
 
 
 def test_run_unsupported_task(run_client: TestClient) -> None:
-    response = run_client.post("/api/v1/run", json=valid_run_payload(task_type="qa"))
+    response = run_client.post("/api/v1/run", json=run_payload(run_client, task_type="qa"))
     assert response.status_code == 400
     body = response.json()
     assert body["ok"] is False
@@ -152,7 +169,7 @@ def test_run_unsupported_task(run_client: TestClient) -> None:
 
 
 def test_run_invalid_mime(run_client: TestClient) -> None:
-    payload = valid_run_payload()
+    payload = run_payload(run_client)
     payload["image"] = {**payload["image"], "mime": "image/jpeg"}
     response = run_client.post("/api/v1/run", json=payload)
     assert response.status_code == 400
@@ -160,7 +177,7 @@ def test_run_invalid_mime(run_client: TestClient) -> None:
 
 
 def test_run_invalid_base64(run_client: TestClient) -> None:
-    payload = valid_run_payload()
+    payload = run_payload(run_client)
     payload["image"] = {**payload["image"], "data": "not-valid-base64!!!"}
     response = run_client.post("/api/v1/run", json=payload)
     assert response.status_code == 400
@@ -168,7 +185,7 @@ def test_run_invalid_base64(run_client: TestClient) -> None:
 
 
 def test_run_missing_selection(run_client: TestClient) -> None:
-    payload = valid_run_payload()
+    payload = run_payload(run_client)
     payload["selection"] = None
     response = run_client.post("/api/v1/run", json=payload)
     assert response.status_code == 400
@@ -176,7 +193,7 @@ def test_run_missing_selection(run_client: TestClient) -> None:
 
 
 def test_run_payload_too_large(run_client: TestClient) -> None:
-    payload = valid_run_payload()
+    payload = run_payload(run_client)
     payload["image"] = {**payload["image"], "data": "A" * (8 * 1024 * 1024)}
     response = run_client.post("/api/v1/run", json=payload)
     assert response.status_code == 413
@@ -187,7 +204,7 @@ def test_run_provider_timeout(run_client: TestClient) -> None:
     run_client.app.dependency_overrides[get_provider] = lambda: MockRunProvider(
         invoke_error=ProviderTimeout("timed out")
     )
-    response = run_client.post("/api/v1/run", json=valid_run_payload())
+    response = run_client.post("/api/v1/run", json=run_payload(run_client))
     assert response.status_code == 504
     body = response.json()
     assert body["error"]["code"] == "PROVIDER_TIMEOUT"
@@ -198,7 +215,7 @@ def test_run_provider_auth_error(run_client: TestClient) -> None:
     run_client.app.dependency_overrides[get_provider] = lambda: MockRunProvider(
         invoke_error=ProviderAuthError("auth failed")
     )
-    response = run_client.post("/api/v1/run", json=valid_run_payload())
+    response = run_client.post("/api/v1/run", json=run_payload(run_client))
     assert response.status_code == 502
     assert response.json()["error"]["code"] == "PROVIDER_ERROR"
     assert "auth failed" not in response.text
@@ -216,7 +233,7 @@ def test_run_health(run_client: TestClient) -> None:
 def test_run_first_turn_invokes_extract_then_driving_task(run_client: TestClient) -> None:
     provider = MockRunProvider()
     run_client.app.dependency_overrides[get_provider] = lambda: provider
-    response = run_client.post("/api/v1/run", json=valid_run_payload(task_type="translate"))
+    response = run_client.post("/api/v1/run", json=run_payload(run_client, task_type="translate"))
     assert response.status_code == 200
     assert len(provider.all_requests) == 2
     extract_system = provider.all_requests[0].messages[0].content[0].text.lower()
@@ -232,7 +249,7 @@ def test_run_first_turn_invokes_extract_then_driving_task(run_client: TestClient
 def test_run_first_turn_response_contains_session_id_and_turn_index_zero(
     run_client: TestClient,
 ) -> None:
-    response = run_client.post("/api/v1/run", json=valid_run_payload())
+    response = run_client.post("/api/v1/run", json=run_payload(run_client))
     body = response.json()
     assert body["data"]["session_id"]
     assert body["data"]["meta"]["turn_index"] == 0
@@ -241,7 +258,7 @@ def test_run_first_turn_response_contains_session_id_and_turn_index_zero(
 def test_run_first_turn_with_user_question(run_client: TestClient) -> None:
     provider = MockRunProvider()
     run_client.app.dependency_overrides[get_provider] = lambda: provider
-    payload = valid_run_payload(
+    payload = run_payload(run_client,
         options={"target_lang": "zh-CN", "user_question": "为什么 V=8?"},
     )
     response = run_client.post("/api/v1/run", json=payload)
@@ -252,7 +269,7 @@ def test_run_first_turn_with_user_question(run_client: TestClient) -> None:
 
 
 def test_run_first_turn_missing_image(run_client: TestClient) -> None:
-    payload = valid_run_payload()
+    payload = run_payload(run_client)
     payload["image"] = None
     response = run_client.post("/api/v1/run", json=payload)
     assert response.status_code == 400
@@ -264,7 +281,7 @@ def test_run_first_turn_extract_task_failure_does_not_create_session(
 ) -> None:
     provider = MockRunProvider(invoke_errors=[ProviderTimeout("timed out")])
     run_client.app.dependency_overrides[get_provider] = lambda: provider
-    response = run_client.post("/api/v1/run", json=valid_run_payload())
+    response = run_client.post("/api/v1/run", json=run_payload(run_client))
     assert response.status_code == 504
     assert response.json()["error"]["code"] == "PROVIDER_TIMEOUT"
     assert len(get_session_store()) == 0
@@ -273,7 +290,7 @@ def test_run_first_turn_extract_task_failure_does_not_create_session(
 def test_run_follow_up_success(run_client: TestClient) -> None:
     provider = MockRunProvider()
     run_client.app.dependency_overrides[get_provider] = lambda: provider
-    first = run_client.post("/api/v1/run", json=valid_run_payload())
+    first = run_client.post("/api/v1/run", json=run_payload(run_client))
     session_id = first.json()["data"]["session_id"]
     provider.all_requests.clear()
     provider.invoke_count = 0
@@ -295,14 +312,14 @@ def test_run_follow_up_success(run_client: TestClient) -> None:
 def test_run_follow_up_session_not_found(run_client: TestClient) -> None:
     response = run_client.post(
         "/api/v1/run",
-        json=follow_up_payload("sess_does_not_exist"),
+        json=follow_up_payload("conv_does_not_exist"),
     )
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "SESSION_NOT_FOUND"
 
 
 def test_run_follow_up_task_type_mismatch(run_client: TestClient) -> None:
-    first = run_client.post("/api/v1/run", json=valid_run_payload(task_type="translate"))
+    first = run_client.post("/api/v1/run", json=run_payload(run_client, task_type="translate"))
     session_id = first.json()["data"]["session_id"]
     response = run_client.post(
         "/api/v1/run",
@@ -313,17 +330,17 @@ def test_run_follow_up_task_type_mismatch(run_client: TestClient) -> None:
 
 
 def test_run_follow_up_rejects_image(run_client: TestClient) -> None:
-    first = run_client.post("/api/v1/run", json=valid_run_payload())
+    first = run_client.post("/api/v1/run", json=run_payload(run_client))
     session_id = first.json()["data"]["session_id"]
     payload = follow_up_payload(session_id)
-    payload["image"] = valid_run_payload()["image"]
+    payload["image"] = run_payload(run_client)["image"]
     response = run_client.post("/api/v1/run", json=payload)
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "INVALID_REQUEST"
 
 
 def test_run_follow_up_requires_user_question(run_client: TestClient) -> None:
-    first = run_client.post("/api/v1/run", json=valid_run_payload())
+    first = run_client.post("/api/v1/run", json=run_payload(run_client))
     session_id = first.json()["data"]["session_id"]
     payload = follow_up_payload(session_id)
     payload["options"] = {"target_lang": "zh-CN"}
@@ -333,7 +350,7 @@ def test_run_follow_up_requires_user_question(run_client: TestClient) -> None:
 
 
 def test_run_follow_up_turn_index_increments(run_client: TestClient) -> None:
-    first = run_client.post("/api/v1/run", json=valid_run_payload())
+    first = run_client.post("/api/v1/run", json=run_payload(run_client))
     session_id = first.json()["data"]["session_id"]
     assert first.json()["data"]["meta"]["turn_index"] == 0
 
@@ -344,7 +361,7 @@ def test_run_follow_up_turn_index_increments(run_client: TestClient) -> None:
 
 
 def test_run_follow_up_appends_to_session_messages(run_client: TestClient) -> None:
-    first = run_client.post("/api/v1/run", json=valid_run_payload())
+    first = run_client.post("/api/v1/run", json=run_payload(run_client))
     session_id = first.json()["data"]["session_id"]
     run_client.post("/api/v1/run", json=follow_up_payload(session_id))
     store = get_session_store()
@@ -354,7 +371,7 @@ def test_run_follow_up_appends_to_session_messages(run_client: TestClient) -> No
 
 
 def test_run_follow_up_session_survives_driving_task_failure(run_client: TestClient) -> None:
-    first = run_client.post("/api/v1/run", json=valid_run_payload())
+    first = run_client.post("/api/v1/run", json=run_payload(run_client))
     session_id = first.json()["data"]["session_id"]
     run_client.app.dependency_overrides[get_provider] = lambda: MockRunProvider(
         invoke_error=ProviderTimeout("timed out")
@@ -371,7 +388,7 @@ def test_run_first_turn_log_includes_session_and_extract_fields(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     caplog.set_level(logging.INFO, logger="lumina.run")
-    response = run_client.post("/api/v1/run", json=valid_run_payload())
+    response = run_client.post("/api/v1/run", json=run_payload(run_client))
     assert response.status_code == 200
     run_logs = [
         getattr(record, "extra_fields", {})
@@ -380,7 +397,7 @@ def test_run_first_turn_log_includes_session_and_extract_fields(
     ]
     assert run_logs
     fields = run_logs[-1]
-    assert fields["session_id"].startswith("sess_")
+    assert fields["session_id"].startswith("conv_")
     assert fields["turn_index"] == 0
     assert isinstance(fields["extract_latency_ms"], int)
     assert isinstance(fields["extracted_text_chars"], int)
@@ -390,7 +407,7 @@ def test_run_follow_up_log_omits_extract_fields(
     run_client: TestClient,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
-    first = run_client.post("/api/v1/run", json=valid_run_payload())
+    first = run_client.post("/api/v1/run", json=run_payload(run_client))
     session_id = first.json()["data"]["session_id"]
     caplog.clear()
     caplog.set_level(logging.INFO, logger="lumina.run")
@@ -405,3 +422,43 @@ def test_run_follow_up_log_omits_extract_fields(
     assert follow_up_log["session_id"] == session_id
     assert follow_up_log["extract_latency_ms"] == ""
     assert follow_up_log["extracted_text_chars"] == ""
+
+
+def test_first_turn_thumbnail_written(run_client: TestClient) -> None:
+    from lumina.db.engine import get_connection
+    from lumina.projects.manager import lookup_project_by_pdf_id
+
+    response = run_client.post("/api/v1/run", json=run_payload(run_client))
+    assert response.status_code == 200
+    pdf_id = run_client.default_pdf_id
+    entry = lookup_project_by_pdf_id(pdf_id)
+    conn = get_connection(entry.id)
+    row = conn.execute(
+        "SELECT thumbnail_png FROM selections ORDER BY created_at DESC LIMIT 1"
+    ).fetchone()
+    assert row is not None
+    assert row[0] is not None
+    assert len(row[0]) <= 200 * 1024
+
+
+def test_first_turn_thumbnail_none_on_failure_does_not_block(
+    run_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from lumina.db.engine import get_connection
+    from lumina.projects.manager import lookup_project_by_pdf_id
+
+    def boom(_: str):
+        raise RuntimeError("thumbnail failed")
+
+    monkeypatch.setattr("lumina.api._run_core.render_thumbnail", boom)
+    response = run_client.post("/api/v1/run", json=run_payload(run_client))
+    assert response.status_code == 200
+    pdf_id = run_client.default_pdf_id
+    entry = lookup_project_by_pdf_id(pdf_id)
+    conn = get_connection(entry.id)
+    row = conn.execute(
+        "SELECT thumbnail_png FROM selections ORDER BY created_at DESC LIMIT 1"
+    ).fetchone()
+    assert row is not None
+    assert row[0] is None

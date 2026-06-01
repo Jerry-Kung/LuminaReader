@@ -2,10 +2,14 @@ import pytest
 from fastapi.testclient import TestClient
 
 from lumina.config import Settings, get_settings
+from lumina.db.engine import close_all
 from lumina.main import create_app
+from lumina.projects.manager import auto_create_project
 from lumina.providers import get_provider, reset_provider
 from lumina.sessions import reset_session_store
 from lumina.providers.base import LLMRequest, LLMResponse, Provider
+
+PDF_BYTES = b"%PDF-1.4 test fixture"
 
 
 class FakeProvider(Provider):
@@ -40,7 +44,21 @@ def settings_without_key() -> Settings:
 
 
 @pytest.fixture
-def client(settings_with_key: Settings) -> TestClient:
+def data_root(tmp_path, monkeypatch):
+    monkeypatch.setenv("LUMINA_DATA_ROOT", str(tmp_path))
+    get_settings.cache_clear()
+    yield tmp_path
+    close_all()
+    get_settings.cache_clear()
+
+
+@pytest.fixture
+def pdf_project(data_root):
+    return auto_create_project(PDF_BYTES, "testbook.pdf")
+
+
+@pytest.fixture
+def client(settings_with_key: Settings, data_root) -> TestClient:
     get_settings.cache_clear()
     reset_provider()
     reset_session_store()
@@ -57,7 +75,7 @@ def client(settings_with_key: Settings) -> TestClient:
 
 
 @pytest.fixture
-def client_no_key(settings_without_key: Settings) -> TestClient:
+def client_no_key(settings_without_key: Settings, data_root) -> TestClient:
     get_settings.cache_clear()
     reset_provider()
     reset_session_store()
