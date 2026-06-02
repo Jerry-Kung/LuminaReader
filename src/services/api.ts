@@ -45,6 +45,19 @@ export interface UploadProgress {
   percentage: number;
 }
 
+export interface Settings {
+  service_url: string;
+  api_key: string;
+  api_key_mask: string | null;
+  default_model: string;
+  timeout_seconds: number;
+  ocr_model: string;
+  translate_model: string;
+  explain_model: string;
+  config_source: 'environment' | 'local';
+  is_ready: boolean;
+}
+
 interface AIRequest {
   image: string;
   target_language: string;
@@ -271,4 +284,42 @@ export async function getHistoryConversation(id: number): Promise<HistoryConvers
     throw new Error(`Failed to fetch history conversation (${response.status})`);
   }
   return response.json();
+}
+
+// Settings API
+
+export async function getSettings(): Promise<Settings> {
+  if (!API_BASE) {
+    const { fetchSettings } = await import('@/mocks/settings');
+    return fetchSettings();
+  }
+
+  const response = await fetch(`${API_BASE}/api/settings`);
+  if (!response.ok) {
+    throw new Error(`Failed to fetch settings (${response.status})`);
+  }
+  return response.json();
+}
+
+export async function saveSettings(
+  settings: Omit<Settings, 'api_key_mask' | 'config_source' | 'is_ready'>,
+): Promise<{ success: boolean; error?: string }> {
+  if (!API_BASE) {
+    const { saveSettingsToMock } = await import('@/mocks/settings');
+    return saveSettingsToMock(settings);
+  }
+
+  const response = await fetch(`${API_BASE}/api/settings`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(settings),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text().catch(() => 'Unknown error');
+    return { success: false, error: errorText };
+  }
+
+  const result = await response.json();
+  return { success: true };
 }

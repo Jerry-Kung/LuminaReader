@@ -1,3 +1,5 @@
+import { useNavigate } from 'react-router-dom';
+
 interface ToolbarProps {
   fileName: string;
   numPages: number;
@@ -11,12 +13,6 @@ interface ToolbarProps {
   onZoomIn: () => void;
   onZoomOut: () => void;
   onToggleSelectionMode: () => void;
-}
-
-function navigateTo(path: string) {
-  if (typeof window !== 'undefined' && window.REACT_APP_NAVIGATE) {
-    window.REACT_APP_NAVIGATE(path);
-  }
 }
 
 export default function Toolbar({
@@ -33,6 +29,7 @@ export default function Toolbar({
   onZoomOut,
   onToggleSelectionMode,
 }: ToolbarProps) {
+  const navigate = useNavigate();
   const handlePageInput = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') {
       const val = parseInt((e.target as HTMLInputElement).value, 10);
@@ -46,7 +43,14 @@ export default function Toolbar({
     <div className="flex items-center justify-between px-5 py-3 bg-white border-b border-stone-200">
       <div className="flex items-center gap-3">
         <button
-          onClick={() => navigateTo('/')}
+          onClick={() => navigate('/settings', { state: { from: `/reader/${currentPage}` } })}
+          className="w-8 h-8 flex items-center justify-center rounded-md text-stone-400 hover:bg-stone-100 hover:text-stone-700 transition-colors cursor-pointer"
+          title="Settings"
+        >
+          <i className="ri-settings-3-line"></i>
+        </button>
+        <button
+          onClick={() => navigate('/')}
           className="w-8 h-8 flex items-center justify-center rounded-md text-stone-500 hover:bg-stone-100 hover:text-stone-700 transition-colors cursor-pointer"
           title="Back to bookshelf"
         >

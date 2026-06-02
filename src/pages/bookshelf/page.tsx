@@ -1,4 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { listBooks, uploadBook, deleteBook } from '@/services/api';
 import type { Book, UploadProgress } from '@/services/api';
 import BookCard from './components/BookCard';
@@ -8,13 +9,8 @@ import SortSelector from './components/SortSelector';
 import DeleteConfirmDialog from './components/DeleteConfirmDialog';
 import DuplicateReminder from './components/DuplicateReminder';
 
-function navigateTo(path: string) {
-  if (typeof window !== 'undefined' && window.REACT_APP_NAVIGATE) {
-    window.REACT_APP_NAVIGATE(path);
-  }
-}
-
 export default function BookshelfPage() {
+  const navigate = useNavigate();
   const [books, setBooks] = useState<Book[]>([]);
   const [loading, setLoading] = useState(true);
   const [sortBy, setSortBy] = useState<'last_opened' | 'upload_time' | 'title'>('last_opened');
@@ -61,8 +57,8 @@ export default function BookshelfPage() {
   });
 
   const handleOpenBook = useCallback((book: Book) => {
-    navigateTo(`/reader/${book.id}`);
-  }, []);
+    navigate(`/reader/${book.id}`);
+  }, [navigate]);
 
   const handleUpload = useCallback(async (file: File) => {
     if (isUploading) return;
@@ -99,7 +95,7 @@ export default function BookshelfPage() {
       showToast('Book uploaded successfully');
       // Auto open the new book
       setTimeout(() => {
-        navigateTo(`/reader/${result.book.id}`);
+        navigate(`/reader/${result.book.id}`);
       }, 600);
     } catch (err: any) {
       if (!abortRef.current) {
@@ -124,11 +120,11 @@ export default function BookshelfPage() {
 
   const handleDuplicateOpenExisting = useCallback(() => {
     if (duplicateBook) {
-      navigateTo(`/reader/${duplicateBook.id}`);
+      navigate(`/reader/${duplicateBook.id}`);
     }
     setDuplicateBook(null);
     setPendingUploadFile(null);
-  }, [duplicateBook]);
+  }, [duplicateBook, navigate]);
 
   const handleDuplicateCreateNew = useCallback(async () => {
     if (!pendingUploadFile) return;
@@ -154,7 +150,7 @@ export default function BookshelfPage() {
       setUploadProgress(null);
       showToast('Book uploaded successfully');
       setTimeout(() => {
-        navigateTo(`/reader/${result.book.id}`);
+        navigate(`/reader/${result.book.id}`);
       }, 600);
     } catch (err: any) {
       if (!abortRef.current) {
@@ -215,6 +211,13 @@ export default function BookshelfPage() {
           </div>
           <div className="flex items-center gap-2">
             <span className="text-xs text-stone-400">{books.length} {books.length === 1 ? 'book' : 'books'}</span>
+            <button
+              onClick={() => navigate('/settings', { state: { from: '/' } })}
+              className="w-8 h-8 flex items-center justify-center rounded-md text-stone-400 hover:text-stone-600 hover:bg-stone-100 cursor-pointer transition-colors"
+              title="Settings"
+            >
+              <i className="ri-settings-3-line text-sm"></i>
+            </button>
           </div>
         </div>
       </div>
