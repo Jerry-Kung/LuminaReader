@@ -14,7 +14,9 @@ from lumina.db.models import SelectionRow
 from lumina.logging import get_logger, log_with_fields
 from lumina.projects.manager import PdfNotFoundError, lookup_project_by_pdf_id
 from lumina.request_id import generate_request_id
+from lumina import settings_store
 from lumina.providers.base import (
+    LLMRequest,
     Provider,
     ProviderAuthError,
     ProviderConfigError,
@@ -258,6 +260,17 @@ def _validate_image_payload(
     return len(decoded), None
 
 
+def _inject_model_override(req: LLMRequest, override_task_type: str) -> LLMRequest:
+    try:
+        override = settings_store.get_current().task_models.get(override_task_type)  # type: ignore[arg-type]
+    except RuntimeError:
+        return req
+    if override:
+        new_extras = {**(req.extras or {}), "model_override": override}
+        return req.model_copy(update={"extras": new_extras})
+    return req
+
+
 async def _invoke_task(
     *,
     task,
@@ -269,6 +282,7 @@ async def _invoke_task(
     page: int,
     image_bytes: int,
     start: float,
+    model_override_task: str | None = None,
     session_id: str | None = None,
     turn_index: int | None = None,
     extract_latency_ms: int | None = None,
@@ -279,6 +293,8 @@ async def _invoke_task(
 ):
     try:
         llm_req = task.build_request(ctx)
+        if model_override_task is not None:
+            llm_req = _inject_model_override(llm_req, model_override_task)
         llm_resp = await provider.invoke(llm_req)
         return task.parse_response(llm_resp), llm_resp, None
     except ProviderTimeout:
@@ -498,6 +514,7 @@ async def _execute_first_turn_v1(
         page=page,
         image_bytes=image_bytes,
         start=start,
+        model_override_task="extract",
         project_id=project_id,
         pdf_id=pdf_id,
     )
@@ -532,6 +549,7 @@ async def _execute_first_turn_v1(
         page=page,
         image_bytes=image_bytes,
         start=start,
+        model_override_task=task_type,
         turn_index=0,
         extract_latency_ms=extract_latency_ms,
         extracted_text_chars=extracted_text_chars,
@@ -743,6 +761,7 @@ async def _execute_follow_up_v1(
         page=page,
         image_bytes=0,
         start=start,
+        model_override_task=task_type,
         session_id=body.session_id,
         turn_index=turn_index,
         project_id=session.project_id,

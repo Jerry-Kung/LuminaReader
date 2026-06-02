@@ -15,6 +15,10 @@ def resolve_data_root() -> Path:
     return Path(raw).expanduser().resolve()
 
 
+def settings_json_path() -> Path:
+    return resolve_data_root() / "settings.json"
+
+
 def catalog_path() -> Path:
     return resolve_data_root() / "catalog.json"
 

@@ -27,6 +27,27 @@ class HealthData(BaseModel):
     provider_ready: bool
 
 
+class SettingsProviderOut(BaseModel):
+    kind: Literal["openai_compat"]
+    base_url: str
+    api_key_masked: str | None
+    default_model: str
+    timeout_seconds: int
+
+
+class SettingsResponse(BaseModel):
+    provider: SettingsProviderOut
+    task_models: dict[Literal["extract", "translate", "explain"], str | None]
+    source: Literal["user_data", "env_fallback"]
+    writable: bool
+    provider_ready: bool
+
+
+class FieldError(BaseModel):
+    path: str
+    reason: str
+
+
 class TranslateUsage(BaseModel):
     prompt_tokens: int | None = None
     completion_tokens: int | None = None

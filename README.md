@@ -346,7 +346,61 @@ V1.0 暂不重点实现：
 
 ---
 
-## 12. 本地启动（V0 阶段）
+## 12. 快速上手（面向终端用户）
+
+如果你只是想用 LuminaReader 阅读一本 PDF、让 AI 帮你翻译和解释段落，本节是你需要的全部信息。需要开发或部署的同学请直接看 §13。
+
+### 12.1 LuminaReader 是什么
+
+LuminaReader 是一个**本地运行**的 AI 辅助 PDF 阅读器：你打开一本 PDF，在屏幕上框选一段你想理解的内容，AI 会基于这段内容帮你翻译、解释、回答追问。所有数据都保存在你自己的电脑上，不上传到任何第三方服务（API 调用除外，下文 FAQ 有说明）。
+
+<!-- TODO screenshot: docs/images/v1.0.4-overview.png 全景图（书架 + 阅读器 + AI 面板） -->
+
+### 12.2 三步上手
+
+1. **启动应用** —— 按 §13 的方法启动前后端，浏览器访问 `http://localhost:5173`，你会看到"我的书架"。
+   <!-- TODO screenshot: docs/images/v1.0.4-bookshelf.png 书架页 -->
+2. **上传一本 PDF** —— 把 PDF 拖到书架，或点右上角"上传"按钮选择文件。上传完成后会出现一张书卡，点击卡片进入阅读器。
+3. **框选 + Run** —— 在 PDF 页面上按住鼠标拉一个矩形选区，右侧 AI 助手会激活；下方输入框可以补充一个问题（也可以留空），选择 Translate 或 Explain，点 **Run**。
+   <!-- TODO screenshot: docs/images/v1.0.4-reader-select.png 框选 + AI 卡片 -->
+
+随后可以在卡片底部继续追问，AI 会基于刚才那段内容回答。
+
+### 12.3 模型配置
+
+LuminaReader 默认使用你在 `backend/.env` 中配置的模型。如果想**不重启**就切换模型 / API Key / 各类任务的模型（翻译 / 解释 / 解析）：
+
+1. 点击页面左上角下拉切到 **Settings**。
+   <!-- TODO screenshot: docs/images/v1.0.4-settings.png 设置页 -->
+2. 在「Provider」段填入 Base URL、API Key、默认模型；可选地为 Translate / Explain / Extract 三个内部任务分别指定模型（留空表示使用默认模型）。
+3. 点保存，状态指示器会切换为「应用内」。下一次 Run 立即使用新配置。
+
+API Key 永远不会在 UI 中明文回显（只显示末 4 位遮罩），也不会上传到任何远程服务——它只保存在你电脑上的 `user_data/settings.json`（Unix 上权限 0600 / Windows 上 ACL 限制为当前用户）。
+
+### 12.4 常见 FAQ
+
+**Q1：保存设置后 API Key 输入框只显示一串 `***`，是不是密钥丢了？**
+A：没丢。这是遮罩显示——明文密钥**只**存在你电脑上的 `user_data/settings.json`，UI 永远不回显明文。要更换密钥时点输入框，遮罩串会被清空，你可以重新粘贴新值；不想改密钥就别动它，保存时密钥不会被覆盖。
+
+**Q2：我改了 `backend/.env` 中的 `OPENAI_API_KEY` 但配置没生效？**
+A：从 V1.0.4 起，应用优先读取 `user_data/settings.json`；只要这个文件存在，`.env` 就只作为兜底（fallback）。要让 `.env` 重新生效：删除 `user_data/settings.json`，重启后端即可。
+
+**Q3：PDF 上传失败 / 阅读时翻译 Run 报错怎么办？**
+A：上传失败通常是文件被其他程序占用，或目录权限不足；翻译失败通常是 API Key 无效 / 超出额度 / 网络不通。卡片内的错误文案会给出分类提示（V1.0.4 起按 网络 / 超时 / 429 / API Key 等分类显示），点「重试」按钮可以原地重试，不会留下失败痕迹。
+
+### 12.5 数据保存在哪里
+
+所有数据都在仓库或运行目录下的 `user_data/`：
+
+- `user_data/settings.json` —— 你的模型 / API Key / Task 模型配置（V1.0.4 起）
+- `user_data/projects/proj_<id>/` —— 每本书一个目录，含 `original.pdf` / `catalog.json` / SQLite 数据库 / 阅读位置等
+- `user_data/projects/proj_<id>/lumina.sqlite` —— 该书的本地数据库（阅读位置 / 对话历史 / 选区记录等）
+
+要彻底重置 LuminaReader：删 `user_data/` 即可（删之前请确认是否有需要保留的数据）。
+
+---
+
+## 13. 本地启动（V0 阶段）
 
 V0 阶段的启动方式、配置项与故障速查由 `claude_docs/setup-and-run.md` 维护，本节仅给出最短路径。
 

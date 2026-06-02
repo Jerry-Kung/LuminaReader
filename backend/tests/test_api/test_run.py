@@ -76,9 +76,12 @@ class MockRunProvider(Provider):
                 raise self.invoke_errors[index]
         if self.invoke_error is not None:
             raise self.invoke_error
+        model = "gpt-4o"
+        if req.extras and req.extras.get("model_override"):
+            model = str(req.extras["model_override"])
         return LLMResponse(
             text=self.response_text,
-            model="gpt-4o",
+            model=model,
             usage=LLMUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
         )
 
@@ -462,3 +465,80 @@ def test_first_turn_thumbnail_none_on_failure_does_not_block(
     ).fetchone()
     assert row is not None
     assert row[0] is None
+
+
+def _put_settings(run_client: TestClient, **task_overrides: str | None) -> None:
+    payload = {
+        "provider": {
+            "kind": "openai_compat",
+            "base_url": "https://api.openai.com/v1",
+            "api_key": "sk-fake-test1234",
+            "default_model": "gpt-4o",
+            "timeout_seconds": 60,
+        },
+        "task_models": {
+            "extract": None,
+            "translate": None,
+            "explain": None,
+            **task_overrides,
+        },
+    }
+    response = run_client.put("/api/v1/settings", json=payload)
+    assert response.status_code == 200
+
+
+def test_run_translate_uses_task_model_override(run_client: TestClient) -> None:
+    _put_settings(run_client, translate="gpt-4o-mini")
+    provider = MockRunProvider()
+    run_client.app.dependency_overrides[get_provider] = lambda: provider
+    response = run_client.post("/api/v1/run", json=run_payload(run_client, task_type="translate"))
+    assert response.status_code == 200
+    assert provider.all_requests[1].extras.get("model_override") == "gpt-4o-mini"
+    assert response.json()["data"]["meta"]["model"] == "gpt-4o-mini"
+
+
+def test_run_explain_falls_back_to_default(run_client: TestClient) -> None:
+    _put_settings(run_client, translate="gpt-4o-mini")
+    provider = MockRunProvider()
+    run_client.app.dependency_overrides[get_provider] = lambda: provider
+    response = run_client.post("/api/v1/run", json=run_payload(run_client, task_type="explain"))
+    assert response.status_code == 200
+    assert provider.all_requests[1].extras.get("model_override") is None
+    assert response.json()["data"]["meta"]["model"] == "gpt-4o"
+
+
+def test_run_extract_uses_task_model_override(run_client: TestClient) -> None:
+    _put_settings(run_client, extract="vlm-special")
+    provider = MockRunProvider()
+    run_client.app.dependency_overrides[get_provider] = lambda: provider
+    response = run_client.post("/api/v1/run", json=run_payload(run_client, task_type="translate"))
+    assert response.status_code == 200
+    assert provider.all_requests[0].extras.get("model_override") == "vlm-special"
+    assert provider.all_requests[1].extras.get("model_override") is None
+    assert response.json()["data"]["meta"]["model"] == "gpt-4o"
+
+
+def test_run_follow_up_uses_translate_override(run_client: TestClient) -> None:
+    _put_settings(run_client, translate="gpt-4o-mini")
+    provider = MockRunProvider()
+    run_client.app.dependency_overrides[get_provider] = lambda: provider
+    first = run_client.post("/api/v1/run", json=run_payload(run_client, task_type="translate"))
+    session_id = first.json()["data"]["session_id"]
+    for _ in range(2):
+        response = run_client.post("/api/v1/run", json=follow_up_payload(session_id))
+        assert response.status_code == 200
+        assert response.json()["data"]["meta"]["model"] == "gpt-4o-mini"
+    follow_up_requests = provider.all_requests[1:]
+    assert all(req.extras.get("model_override") == "gpt-4o-mini" for req in follow_up_requests)
+
+
+def test_run_settings_change_takes_effect_immediately(run_client: TestClient) -> None:
+    provider = MockRunProvider()
+    run_client.app.dependency_overrides[get_provider] = lambda: provider
+    first = run_client.post("/api/v1/run", json=run_payload(run_client, task_type="translate"))
+    session_id = first.json()["data"]["session_id"]
+    assert first.json()["data"]["meta"]["model"] == "gpt-4o"
+
+    _put_settings(run_client, translate="gpt-4o-mini")
+    second = run_client.post("/api/v1/run", json=follow_up_payload(session_id))
+    assert second.json()["data"]["meta"]["model"] == "gpt-4o-mini"

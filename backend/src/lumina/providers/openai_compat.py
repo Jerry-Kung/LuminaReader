@@ -41,8 +41,13 @@ class OpenAICompatProvider(Provider):
         )
 
     async def invoke(self, req: LLMRequest) -> LLMResponse:
+        override = None
+        if req.extras:
+            override = req.extras.get("model_override")
+        effective_model = override if override else self.model
+
         kwargs: dict = {
-            "model": self.model,
+            "model": effective_model,
             "messages": _to_openai_messages(req.messages),
         }
         if req.temperature is not None:
@@ -72,7 +77,7 @@ class OpenAICompatProvider(Provider):
                 total_tokens=response.usage.total_tokens,
             )
         raw = response.model_dump() if self.return_raw else None
-        return LLMResponse(text=text, model=response.model, usage=usage, raw=raw)
+        return LLMResponse(text=text, model=effective_model, usage=usage, raw=raw)
 
     async def health_check(self) -> bool:
         if not self.api_key.strip():

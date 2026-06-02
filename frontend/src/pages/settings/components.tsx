@@ -239,11 +239,11 @@ export function SettingsSection({ title, children, optional }: SettingsSectionPr
 }
 
 interface StatusIndicatorProps {
-  configSource: 'environment' | 'local';
-  isReady: boolean;
+  source: 'env_fallback' | 'user_data';
+  providerReady: boolean;
 }
 
-export function StatusIndicator({ configSource, isReady }: StatusIndicatorProps) {
+export function StatusIndicator({ source, providerReady }: StatusIndicatorProps) {
   return (
     <div className="bg-white rounded-xl border border-stone-200 overflow-hidden">
       <div className="px-5 py-4 border-b border-stone-100">
@@ -256,34 +256,34 @@ export function StatusIndicator({ configSource, isReady }: StatusIndicatorProps)
             <span className="text-sm text-stone-500">Config source</span>
             <span
               className={`inline-flex items-center gap-1.5 text-xs font-medium px-2.5 py-1 rounded-full ${
-                configSource === 'local'
+                source === 'user_data'
                   ? 'bg-amber-50 text-amber-700 border border-amber-200'
                   : 'bg-stone-100 text-stone-500 border border-stone-200'
               }`}
             >
               <span
                 className={`w-1.5 h-1.5 rounded-full ${
-                  configSource === 'local' ? 'bg-amber-500' : 'bg-stone-400'
+                  source === 'user_data' ? 'bg-amber-500' : 'bg-stone-400'
                 }`}
               />
-              {configSource === 'local' ? '应用内' : '环境变量'}
+              {source === 'user_data' ? '应用内' : '环境变量'}
             </span>
           </div>
 
           {/* Readiness */}
           <div className="flex items-center gap-2">
             <span className="relative flex h-2.5 w-2.5">
-              {isReady && (
+              {providerReady && (
                 <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
               )}
               <span
                 className={`relative inline-flex rounded-full h-2.5 w-2.5 ${
-                  isReady ? 'bg-emerald-500' : 'bg-stone-300'
+                  providerReady ? 'bg-emerald-500' : 'bg-stone-300'
                 }`}
               />
             </span>
-            <span className={`text-sm font-medium ${isReady ? 'text-emerald-600' : 'text-stone-400'}`}>
-              {isReady ? '已就绪' : '未配置密钥'}
+            <span className={`text-sm font-medium ${providerReady ? 'text-emerald-600' : 'text-stone-400'}`}>
+              {providerReady ? '已就绪' : '未配置密钥'}
             </span>
           </div>
         </div>

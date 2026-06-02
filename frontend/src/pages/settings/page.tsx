@@ -1,7 +1,13 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
-import { getSettings, saveSettings } from '@/services/api';
-import type { Settings } from '@/services/api';
+import {
+  getSettings,
+  saveSettings,
+  type ApiKeyIntent,
+  type SettingsFieldError,
+  type SettingsSource,
+  type SettingsUpdateInput,
+} from '@/services/api';
 import {
   TextInput,
   NumberInput,
@@ -12,17 +18,17 @@ import {
 } from './components';
 
 interface FormState {
-  service_url: string;
+  base_url: string;
   api_key: string;
   default_model: string;
   timeout_seconds: number;
-  ocr_model: string;
+  extract_model: string;
   translate_model: string;
   explain_model: string;
 }
 
 interface FormErrors {
-  service_url: string | null;
+  base_url: string | null;
   default_model: string | null;
   timeout_seconds: string | null;
 }
@@ -32,21 +38,47 @@ function isValidUrl(url: string): boolean {
   return url.startsWith('http://') || url.startsWith('https://');
 }
 
+function deriveApiKeyIntent(current: string, originalMask: string | null): ApiKeyIntent {
+  if (originalMask !== null && current === originalMask) {
+    return { kind: 'keep' };
+  }
+  if (current === '') {
+    if (originalMask === null) return { kind: 'keep' };
+    return { kind: 'clear' };
+  }
+  if (originalMask !== null && current === originalMask) {
+    return { kind: 'keep' };
+  }
+  return { kind: 'replace', value: current };
+}
+
+function mapFieldErrorsToFormErrors(
+  fieldErrors: SettingsFieldError[],
+): Partial<FormErrors> {
+  const out: Partial<FormErrors> = {};
+  for (const fe of fieldErrors) {
+    if (fe.path === 'provider.base_url') out.base_url = fe.reason;
+    else if (fe.path === 'provider.default_model') out.default_model = fe.reason;
+    else if (fe.path === 'provider.timeout_seconds') out.timeout_seconds = fe.reason;
+  }
+  return out;
+}
+
 export default function SettingsPage() {
   const navigate = useNavigate();
   const location = useLocation();
-  const [originalSettings, setOriginalSettings] = useState<Settings | null>(null);
+  const [originalSettings, setOriginalSettings] = useState<SettingsSource | null>(null);
   const [form, setForm] = useState<FormState>({
-    service_url: '',
+    base_url: '',
     api_key: '',
     default_model: '',
     timeout_seconds: 60,
-    ocr_model: '',
+    extract_model: '',
     translate_model: '',
     explain_model: '',
   });
   const [errors, setErrors] = useState<FormErrors>({
-    service_url: null,
+    base_url: null,
     default_model: null,
     timeout_seconds: null,
   });
@@ -67,17 +99,16 @@ export default function SettingsPage() {
     try {
       const data = await getSettings();
       setOriginalSettings(data);
-      const initialKey = data.api_key_mask || data.api_key || '';
       setForm({
-        service_url: data.service_url,
-        api_key: initialKey,
-        default_model: data.default_model,
-        timeout_seconds: data.timeout_seconds,
-        ocr_model: data.ocr_model || '',
-        translate_model: data.translate_model || '',
-        explain_model: data.explain_model || '',
+        base_url: data.provider.base_url,
+        api_key: data.provider.api_key_masked ?? '',
+        default_model: data.provider.default_model,
+        timeout_seconds: data.provider.timeout_seconds,
+        extract_model: data.task_models.extract ?? '',
+        translate_model: data.task_models.translate ?? '',
+        explain_model: data.task_models.explain ?? '',
       });
-      if (data.config_source === 'environment') {
+      if (data.source === 'env_fallback') {
         setShowEnvHint(true);
       }
     } catch {
@@ -91,17 +122,20 @@ export default function SettingsPage() {
     loadSettings();
   }, [loadSettings]);
 
-  // Track changes
   useEffect(() => {
     if (!originalSettings) return;
-    const keyChanged = form.api_key !== (originalSettings.api_key_mask || originalSettings.api_key || '');
+    const originalMask = originalSettings.provider.api_key_masked ?? '';
+    const keyChanged =
+      originalMask === ''
+        ? form.api_key !== ''
+        : form.api_key !== originalMask;
     const otherChanged =
-      form.service_url !== originalSettings.service_url ||
-      form.default_model !== originalSettings.default_model ||
-      form.timeout_seconds !== originalSettings.timeout_seconds ||
-      form.ocr_model !== (originalSettings.ocr_model || '') ||
-      form.translate_model !== (originalSettings.translate_model || '') ||
-      form.explain_model !== (originalSettings.explain_model || '');
+      form.base_url !== originalSettings.provider.base_url ||
+      form.default_model !== originalSettings.provider.default_model ||
+      form.timeout_seconds !== originalSettings.provider.timeout_seconds ||
+      form.extract_model !== (originalSettings.task_models.extract ?? '') ||
+      form.translate_model !== (originalSettings.task_models.translate ?? '') ||
+      form.explain_model !== (originalSettings.task_models.explain ?? '');
     setHasChanges(keyChanged || otherChanged);
   }, [form, originalSettings]);
 
@@ -113,8 +147,8 @@ export default function SettingsPage() {
 
   const updateField = useCallback(<K extends keyof FormState>(key: K, value: FormState[K]) => {
     setForm((prev) => ({ ...prev, [key]: value }));
-    if (key === 'service_url') {
-      setErrors((prev) => ({ ...prev, service_url: null }));
+    if (key === 'base_url') {
+      setErrors((prev) => ({ ...prev, base_url: null }));
     }
     if (key === 'default_model') {
       setErrors((prev) => ({ ...prev, default_model: null }));
@@ -125,11 +159,11 @@ export default function SettingsPage() {
   }, []);
 
   const validateField = useCallback((key: keyof FormState) => {
-    if (key === 'service_url') {
-      if (!isValidUrl(form.service_url)) {
-        setErrors((prev) => ({ ...prev, service_url: '请输入合法的 http(s) 地址' }));
+    if (key === 'base_url') {
+      if (!isValidUrl(form.base_url)) {
+        setErrors((prev) => ({ ...prev, base_url: '请输入合法的 http(s) 地址' }));
       } else {
-        setErrors((prev) => ({ ...prev, service_url: null }));
+        setErrors((prev) => ({ ...prev, base_url: null }));
       }
     }
     if (key === 'timeout_seconds') {
@@ -150,47 +184,81 @@ export default function SettingsPage() {
 
   const handleSave = useCallback(async () => {
     const newErrors: FormErrors = {
-      service_url: !isValidUrl(form.service_url) ? '请输入合法的 http(s) 地址' : null,
+      base_url: !isValidUrl(form.base_url) ? '请输入合法的 http(s) 地址' : null,
       default_model: !form.default_model.trim() ? '默认模型不能为空' : null,
-      timeout_seconds: form.timeout_seconds < 5 || form.timeout_seconds > 300 ? '超时秒数应在 5 到 300 之间' : null,
+      timeout_seconds:
+        form.timeout_seconds < 5 || form.timeout_seconds > 300
+          ? '超时秒数应在 5 到 300 之间'
+          : null,
     };
     setErrors(newErrors);
 
-    if (newErrors.service_url || newErrors.default_model || newErrors.timeout_seconds) {
+    if (newErrors.base_url || newErrors.default_model || newErrors.timeout_seconds) {
       return;
     }
 
     setSaveState('saving');
     setSaveError(null);
 
-    try {
-      const result = await saveSettings({
-        service_url: form.service_url,
-        api_key: form.api_key,
-        default_model: form.default_model,
-        timeout_seconds: form.timeout_seconds,
-        ocr_model: form.ocr_model,
-        translate_model: form.translate_model,
-        explain_model: form.explain_model,
-      });
+    const intent = deriveApiKeyIntent(
+      form.api_key,
+      originalSettings?.provider.api_key_masked ?? null,
+    );
 
-      if (result.success) {
+    const input: SettingsUpdateInput = {
+      base_url: form.base_url.trim(),
+      default_model: form.default_model.trim(),
+      timeout_seconds: form.timeout_seconds,
+      task_models: {
+        extract: form.extract_model.trim() || null,
+        translate: form.translate_model.trim() || null,
+        explain: form.explain_model.trim() || null,
+      },
+      api_key: intent,
+    };
+
+    const result = await saveSettings(input);
+
+    switch (result.kind) {
+      case 'ok': {
         setSaveState('success');
         showToast('Settings saved');
         setHasChanges(false);
-        await loadSettings();
-        setTimeout(() => {
-          setSaveState('idle');
-        }, 2000);
-      } else {
-        setSaveState('error');
-        setSaveError(result.error || '保存失败，请检查后端日志');
+        setOriginalSettings(result.data);
+        setForm((prev) => ({
+          ...prev,
+          api_key: result.data.provider.api_key_masked ?? '',
+        }));
+        if (result.data.source === 'user_data') {
+          setShowEnvHint(false);
+        }
+        setTimeout(() => setSaveState('idle'), 2000);
+        break;
       }
-    } catch (err: any) {
-      setSaveState('error');
-      setSaveError(err.message || '无法写入配置文件，请检查应用数据目录的写权限');
+      case 'invalid': {
+        setSaveState('error');
+        setSaveError(result.message);
+        const mapped = mapFieldErrorsToFormErrors(result.fieldErrors);
+        setErrors((prev) => ({ ...prev, ...mapped }));
+        break;
+      }
+      case 'persist_failed': {
+        setSaveState('error');
+        setSaveError(result.message || '无法写入配置文件，请检查应用数据目录的写权限');
+        break;
+      }
+      case 'network_error': {
+        setSaveState('error');
+        setSaveError(result.message || '无法连接后端，请检查后端服务是否启动');
+        break;
+      }
+      case 'unknown_error': {
+        setSaveState('error');
+        setSaveError(result.message || `保存失败 (HTTP ${result.httpStatus ?? '?'})`);
+        break;
+      }
     }
-  }, [form, showToast, loadSettings]);
+  }, [form, originalSettings, showToast]);
 
   const handleCancel = useCallback(() => {
     if (hasChanges) {
@@ -217,7 +285,6 @@ export default function SettingsPage() {
     setForm((prev) => ({ ...prev, api_key: '' }));
   }, []);
 
-  // Prevent browser back if unsaved
   useEffect(() => {
     const handleBeforeUnload = (e: BeforeUnloadEvent) => {
       if (hasChanges) {
@@ -264,8 +331,7 @@ export default function SettingsPage() {
 
         {!isLoading && (
           <div className="space-y-6">
-            {/* Environment hint */}
-            {showEnvHint && originalSettings?.config_source === 'environment' && (
+            {showEnvHint && originalSettings?.source === 'env_fallback' && (
               <div className="bg-amber-50 border border-amber-200 rounded-lg px-4 py-3 flex items-center justify-between gap-4">
                 <div className="flex items-center gap-2">
                   <i className="ri-information-line text-amber-500 text-sm"></i>
@@ -282,17 +348,16 @@ export default function SettingsPage() {
               </div>
             )}
 
-            {/* Section 1: Model Connection */}
             <SettingsSection title="模型服务连接">
               <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
                 <div className="md:col-span-2">
                   <TextInput
-                    id="service_url"
+                    id="base_url"
                     label="服务地址"
-                    value={form.service_url}
-                    onChange={(v) => updateField('service_url', v)}
-                    onBlur={() => validateField('service_url')}
-                    error={errors.service_url}
+                    value={form.base_url}
+                    onChange={(v) => updateField('base_url', v)}
+                    onBlur={() => validateField('base_url')}
+                    error={errors.base_url}
                     placeholder="https://api.openai.com/v1"
                   />
                 </div>
@@ -301,7 +366,7 @@ export default function SettingsPage() {
                     id="api_key"
                     label="API 密钥"
                     value={form.api_key}
-                    mask={originalSettings?.api_key_mask || null}
+                    mask={originalSettings?.provider.api_key_masked ?? null}
                     onChange={(v) => updateField('api_key', v)}
                     error={null}
                     hint="密钥只保存在本地，不会上传到任何远端。"
@@ -331,17 +396,16 @@ export default function SettingsPage() {
               </div>
             </SettingsSection>
 
-            {/* Section 2: Task Models (Optional) */}
             <SettingsSection title="各任务使用的模型" optional>
               <p className="text-sm text-stone-500 -mt-2 mb-1">
                 留空表示使用上面的默认模型。
               </p>
               <div className="grid grid-cols-1 md:grid-cols-3 gap-5">
                 <TextInput
-                  id="ocr_model"
+                  id="extract_model"
                   label="OCR 抽取"
-                  value={form.ocr_model}
-                  onChange={(v) => updateField('ocr_model', v)}
+                  value={form.extract_model}
+                  onChange={(v) => updateField('extract_model', v)}
                   placeholder={form.default_model}
                 />
                 <TextInput
@@ -361,16 +425,14 @@ export default function SettingsPage() {
               </div>
             </SettingsSection>
 
-            {/* Section 3: Status + Actions */}
             <div className="space-y-4">
               {originalSettings && (
                 <StatusIndicator
-                  configSource={originalSettings.config_source}
-                  isReady={originalSettings.is_ready}
+                  source={originalSettings.source}
+                  providerReady={originalSettings.provider_ready}
                 />
               )}
 
-              {/* Save error bar */}
               {saveError && (
                 <div className="flex items-center gap-2 bg-red-50 border border-red-200 rounded-lg px-4 py-3">
                   <i className="ri-error-warning-line text-red-400 text-sm"></i>
@@ -378,7 +440,6 @@ export default function SettingsPage() {
                 </div>
               )}
 
-              {/* Action buttons */}
               <div className="flex items-center justify-end gap-3">
                 <button
                   onClick={handleCancel}
@@ -415,7 +476,6 @@ export default function SettingsPage() {
         )}
       </div>
 
-      {/* Leave confirmation dialog */}
       {showLeaveConfirm && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
           <div className="absolute inset-0 bg-black/20" onClick={handleStay} />
@@ -444,7 +504,6 @@ export default function SettingsPage() {
         </div>
       )}
 
-      {/* Toast */}
       {toast && <Toast message={toast} />}
     </div>
   );

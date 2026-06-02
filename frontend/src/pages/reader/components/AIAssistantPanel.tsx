@@ -1,6 +1,6 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import type { AIResult, Message, HistoryEntry } from '../page';
-import type { TaskType } from '@/services/api';
+import type { TaskType, ErrorCategory } from '@/services/api';
 import MarkdownRenderer from './MarkdownRenderer';
 
 interface AIAssistantPanelProps {
@@ -24,6 +24,8 @@ interface AIAssistantPanelProps {
   onTaskTypeChange: (type: TaskType) => void;
   onUserInputChange: (text: string) => void;
   onPanelModeChange: (mode: 'narrow' | 'wide' | 'overlay') => void;
+  onRetry?: (message: Message) => void;
+  onDismissError?: (message: Message) => void;
 }
 
 const taskLabelConfig = {
@@ -54,7 +56,32 @@ function formatRelativeFromEpochSec(epochSec: number): string {
   return `${Math.floor(diff / 86400 / 30)} 个月前`;
 }
 
-function MessageBubble({ message }: { message: Message }) {
+function categoryIcon(category?: ErrorCategory): string {
+  switch (category) {
+    case 'network':
+      return 'ri-wifi-off-line';
+    case 'timeout':
+      return 'ri-time-line';
+    case 'rate_limited':
+      return 'ri-speed-up-line';
+    case 'token_limit':
+      return 'ri-text-wrap';
+    case 'provider_unconfigured':
+      return 'ri-shield-keyhole-line';
+    default:
+      return 'ri-error-warning-line';
+  }
+}
+
+function MessageBubble({
+  message,
+  onRetry,
+  onDismiss,
+}: {
+  message: Message;
+  onRetry?: (m: Message) => void;
+  onDismiss?: (m: Message) => void;
+}) {
   if (message.role === 'user') {
     return (
       <div className="flex justify-end mb-2">
@@ -89,9 +116,28 @@ function MessageBubble({ message }: { message: Message }) {
       <div className="flex justify-start mb-2">
         <div className="max-w-[85%] max-w-[560px] bg-red-50 border border-red-200 rounded-2xl rounded-bl-md px-3 py-2.5">
           <div className="flex items-start gap-2">
-            <i className="ri-error-warning-line text-red-400 text-sm mt-0.5"></i>
-            <div>
-              <p className="text-sm text-red-600">{message.errorText || 'Request failed'}</p>
+            <i className={`${categoryIcon(message.errorCategory)} text-red-400 text-sm mt-0.5`}></i>
+            <div className="flex-1 min-w-0">
+              <p className="text-sm text-red-600">{message.errorText || 'AI 调用失败'}</p>
+              <div className="flex items-center gap-2 mt-2">
+                {message.retry && onRetry && (
+                  <button
+                    onClick={() => onRetry(message)}
+                    className="inline-flex items-center px-2.5 py-1 text-xs font-medium text-red-600 bg-white border border-red-200 rounded-md hover:bg-red-100 cursor-pointer transition-colors"
+                  >
+                    <i className="ri-refresh-line text-xs mr-1"></i>
+                    重试
+                  </button>
+                )}
+                {onDismiss && (
+                  <button
+                    onClick={() => onDismiss(message)}
+                    className="inline-flex items-center px-2.5 py-1 text-xs font-medium text-stone-500 bg-white border border-stone-200 rounded-md hover:bg-stone-50 cursor-pointer transition-colors"
+                  >
+                    忽略
+                  </button>
+                )}
+              </div>
             </div>
           </div>
         </div>
@@ -142,7 +188,7 @@ function FollowUpInput({ onSend, disabled }: { onSend: (text: string) => void; d
         value={text}
         onChange={(e) => setText(e.target.value)}
         onKeyDown={handleKeyDown}
-        placeholder="Ask a follow-up..."
+        placeholder="继续追问…"
         disabled={disabled}
         className="flex-1 min-h-[32px] max-h-20 text-xs text-stone-700 bg-stone-50 border border-stone-200 rounded-lg px-2.5 py-1.5 resize-none focus:outline-none focus:border-amber-400 placeholder:text-stone-400 leading-relaxed"
         rows={1}
@@ -166,6 +212,8 @@ function HistoryItem({
   onFollowUp,
   onDelete,
   isAIWorking,
+  onRetry,
+  onDismissError,
 }: {
   entry: HistoryEntry;
   isExpanded: boolean;
@@ -173,6 +221,8 @@ function HistoryItem({
   onFollowUp: (text: string) => void;
   onDelete: () => void;
   isAIWorking: boolean;
+  onRetry?: (m: Message) => void;
+  onDismissError?: (m: Message) => void;
 }) {
   const config = taskLabelConfig[entry.taskType];
   const placeholder = (entry.summary || '历史对话').slice(0, 60);
@@ -230,7 +280,12 @@ function HistoryItem({
           ) : (
             <>
               {entry.messages.map((message) => (
-                <MessageBubble key={message.id} message={message} />
+                <MessageBubble
+                  key={message.id}
+                  message={message}
+                  onRetry={onRetry}
+                  onDismiss={onDismissError}
+                />
               ))}
               {!hasLoading && (
                 <FollowUpInput onSend={onFollowUp} disabled={isAIWorking} />
@@ -281,7 +336,7 @@ function LaunchInputArea({
       {!hasSelection && (
         <div className="flex items-center gap-2 text-stone-400 mb-2">
           <i className="ri-cursor-line text-xs"></i>
-          <span className="text-xs">Select an area on the PDF to start</span>
+          <span className="text-xs">请先在 PDF 上框选一段内容</span>
         </div>
       )}
       <div className="space-y-2">
@@ -289,7 +344,7 @@ function LaunchInputArea({
           value={userInput}
           onChange={(e) => onUserInputChange(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="Ask something optional (e.g. explain this formula, translate this paragraph)..."
+          placeholder="可选：补充一句问题（例如：解释这个公式，翻译这一段）…"
           disabled={isDisabled}
           className="w-full h-20 text-sm text-stone-700 bg-stone-50 border border-stone-200 rounded-lg px-3 py-2.5 resize-none focus:outline-none focus:border-amber-400 placeholder:text-stone-400 leading-relaxed disabled:bg-stone-100 disabled:text-stone-400"
           rows={2}
@@ -327,7 +382,7 @@ function LaunchInputArea({
             {isAIWorking ? (
               <>
                 <i className="ri-loader-4-line animate-spin"></i>
-                {activeTaskType === 'translate' ? 'Translating...' : 'Explaining...'}
+                {activeTaskType === 'translate' ? '翻译中…' : '解释中…'}
               </>
             ) : (
               <>
@@ -381,6 +436,8 @@ export default function AIAssistantPanel({
   onTaskTypeChange,
   onUserInputChange,
   onPanelModeChange,
+  onRetry,
+  onDismissError,
 }: AIAssistantPanelProps) {
   const handleCopy = async (text: string) => {
     try {
@@ -473,6 +530,8 @@ export default function AIAssistantPanel({
                     onFollowUp={(text) => onHistoryFollowUp(entry.conversationId, text)}
                     onDelete={() => onDeleteHistory(entry.conversationId)}
                     isAIWorking={isAIWorking}
+                    onRetry={onRetry}
+                    onDismissError={onDismissError}
                   />
                 ))}
               </div>
@@ -487,7 +546,7 @@ export default function AIAssistantPanel({
           {isAIWorking && !hasAnyCard && (
             <div className="flex flex-col items-center justify-center gap-3 text-stone-400 py-6">
               <i className="ri-loader-4-line animate-spin text-2xl"></i>
-              <p className="text-sm">AI is working...</p>
+              <p className="text-sm">AI 正在思考…</p>
             </div>
           )}
 
@@ -504,9 +563,9 @@ export default function AIAssistantPanel({
                 <i className="ri-robot-2-line text-2xl"></i>
               </div>
               <div className="text-center">
-                <p className="text-sm text-stone-400">No AI conversations yet</p>
+                <p className="text-sm text-stone-400">还没有对话</p>
                 <p className="text-xs text-stone-300 mt-1">
-                  Select an area on the PDF, then type a question below and click Run
+                  在 PDF 上框选一段内容，然后在下方输入问题点击运行
                 </p>
               </div>
             </div>
@@ -580,7 +639,12 @@ export default function AIAssistantPanel({
 
                         <div className="px-2 py-2">
                           {result.messages.map((message) => (
-                            <MessageBubble key={message.id} message={message} />
+                            <MessageBubble
+                              key={message.id}
+                              message={message}
+                              onRetry={onRetry}
+                              onDismiss={onDismissError}
+                            />
                           ))}
                         </div>
 

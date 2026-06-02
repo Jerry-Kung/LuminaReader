@@ -216,6 +216,47 @@ async def test_health_check_false_when_key_empty() -> None:
     create.assert_not_called()
 
 
+@pytest.mark.asyncio
+async def test_invoke_uses_default_model_when_no_override() -> None:
+    create = AsyncMock(return_value=_mock_completion())
+    provider = _make_provider(create_mock=create)
+    await provider.invoke(_sample_request())
+    assert create.await_args.kwargs["model"] == "gpt-4o"
+
+
+@pytest.mark.asyncio
+async def test_invoke_uses_override_when_present() -> None:
+    create = AsyncMock(return_value=_mock_completion(model="gpt-4o-mini"))
+    provider = _make_provider(create_mock=create)
+    req = _sample_request()
+    req.extras = {"model_override": "gpt-4o-mini"}
+    result = await provider.invoke(req)
+    assert create.await_args.kwargs["model"] == "gpt-4o-mini"
+    assert result.model == "gpt-4o-mini"
+
+
+@pytest.mark.asyncio
+async def test_invoke_ignores_empty_override() -> None:
+    create = AsyncMock(return_value=_mock_completion())
+    provider = _make_provider(create_mock=create)
+    req = _sample_request()
+    req.extras = {"model_override": ""}
+    result = await provider.invoke(req)
+    assert create.await_args.kwargs["model"] == "gpt-4o"
+    assert result.model == "gpt-4o"
+
+
+@pytest.mark.asyncio
+async def test_invoke_ignores_none_extras() -> None:
+    create = AsyncMock(return_value=_mock_completion())
+    provider = _make_provider(create_mock=create)
+    req = _sample_request()
+    req.extras = None  # type: ignore[assignment]
+    result = await provider.invoke(req)
+    assert create.await_args.kwargs["model"] == "gpt-4o"
+    assert result.model == "gpt-4o"
+
+
 def test_build_provider_from_config() -> None:
     cfg = Settings(
         openai_api_key="sk-test-not-real",

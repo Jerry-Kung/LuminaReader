@@ -11,13 +11,39 @@ import {
   listConversations,
   listMessages,
   TranslateApiError,
+  classifyApiError,
+  errorMessageFor,
   type TaskType,
+  type ErrorCategory,
   type ConversationSummary,
 } from '@/services/api';
 import Toolbar from './components/Toolbar';
 import PDFViewer from './components/PDFViewer';
 import AIAssistantPanel from './components/AIAssistantPanel';
 import ThumbnailPanel from './components/ThumbnailPanel';
+
+type RetryPayload =
+  | {
+      kind: 'first_turn';
+      cardId: number;
+      taskType: TaskType;
+      capture: CaptureResult;
+      userQuestion?: string;
+      pdfId?: string;
+    }
+  | {
+      kind: 'follow_up';
+      cardId: number;
+      taskType: TaskType;
+      sessionId: string;
+      userQuestion: string;
+    }
+  | {
+      kind: 'history_follow_up';
+      conversationId: string;
+      taskType: TaskType;
+      userQuestion: string;
+    };
 
 export interface Message {
   id: number;
@@ -27,6 +53,8 @@ export interface Message {
   isLoading?: boolean;
   isError?: boolean;
   errorText?: string;
+  errorCategory?: ErrorCategory;
+  retry?: RetryPayload;
 }
 
 export interface AIResult {
@@ -69,6 +97,35 @@ function formatError(err: unknown): string {
   if (err instanceof TranslateApiError) return `[${err.code}] ${err.message}`;
   if (err instanceof Error) return err.message;
   return 'AI request failed. Please try again.';
+}
+
+function errorMessageFrom(err: unknown): { category: ErrorCategory; display: string } {
+  const category = classifyApiError(err);
+  return { category, display: errorMessageFor(category) };
+}
+
+function buildErrorMessage(messageId: number, err: unknown, retry: RetryPayload): Message {
+  const { category, display } = errorMessageFrom(err);
+  return {
+    id: messageId,
+    role: 'ai',
+    text: '',
+    timestamp: Date.now(),
+    isError: true,
+    errorCategory: category,
+    errorText: display,
+    retry,
+  };
+}
+
+function loadingMessage(messageId: number): Message {
+  return {
+    id: messageId,
+    role: 'ai',
+    text: '',
+    timestamp: Date.now(),
+    isLoading: true,
+  };
 }
 
 let msgSeq = 1;
@@ -134,6 +191,7 @@ export default function ReaderPage() {
     () => typeof window !== 'undefined' && window.innerWidth < 1280,
   );
   const thumbUserOverrideRef = useRef<boolean>(false);
+  const retryInFlightRef = useRef(false);
 
   useEffect(() => {
     const handler = () => {
@@ -335,9 +393,10 @@ export default function ReaderPage() {
       const cardId = nextMsgId();
       const loadingId = nextMsgId();
       const trimmedInput = inputText?.trim();
+      let capture: CaptureResult | null = null;
 
       try {
-        const capture = await captureImage();
+        capture = await captureImage();
         if (!capture) throw new Error('Failed to capture image');
 
         const initialMessages: Message[] = [];
@@ -392,26 +451,26 @@ export default function ReaderPage() {
           return updated;
         });
       } catch (err: unknown) {
-        const msg = formatError(err);
-        setAiError(msg);
+        const { display } = errorMessageFrom(err);
+        setAiError(display);
         setAiResults((prev) => {
           const idx = prev.findIndex((r) => r.id === cardId);
           if (idx === -1) return prev;
           const updated = [...prev];
-          const filtered = updated[idx].messages.filter((m) => m.id !== loadingId);
           updated[idx] = {
             ...updated[idx],
-            messages: [
-              ...filtered,
-              {
-                id: nextMsgId(),
-                role: 'ai',
-                text: 'Request failed',
-                timestamp: Date.now(),
-                isError: true,
-                errorText: msg,
-              },
-            ],
+            messages: updated[idx].messages.map((m) =>
+              m.id === loadingId && capture
+                ? buildErrorMessage(loadingId, err, {
+                    kind: 'first_turn',
+                    cardId,
+                    taskType,
+                    capture,
+                    userQuestion: trimmedInput,
+                    pdfId,
+                  })
+                : m,
+            ),
           };
           return updated;
         });
@@ -465,25 +524,24 @@ export default function ReaderPage() {
           return updated;
         });
       } catch (err: unknown) {
-        const msg = formatError(err);
+        const { display } = errorMessageFrom(err);
         setAiResults((prev) => {
           const idx = prev.findIndex((r) => r.id === cardId);
           if (idx === -1) return prev;
           const updated = [...prev];
-          const filtered = updated[idx].messages.filter((m) => m.id !== loadingId);
           updated[idx] = {
             ...updated[idx],
-            messages: [
-              ...filtered,
-              {
-                id: nextMsgId(),
-                role: 'ai',
-                text: 'Request failed',
-                timestamp: Date.now(),
-                isError: true,
-                errorText: msg,
-              },
-            ],
+            messages: updated[idx].messages.map((m) =>
+              m.id === loadingId
+                ? buildErrorMessage(loadingId, err, {
+                    kind: 'follow_up',
+                    cardId,
+                    taskType: card.type,
+                    sessionId: card.sessionId,
+                    userQuestion: trimmed,
+                  })
+                : m,
+            ),
           };
           return updated;
         });
@@ -627,24 +685,22 @@ export default function ReaderPage() {
           }),
         );
       } catch (err) {
-        const msg = formatError(err);
+        const { display } = errorMessageFrom(err);
         setHistory((prev) =>
           prev.map((h) => {
             if (h.conversationId !== conversationId) return h;
-            const filtered = h.messages.filter((m) => m.id !== loadingId);
             return {
               ...h,
-              messages: [
-                ...filtered,
-                {
-                  id: nextMsgId(),
-                  role: 'ai',
-                  text: 'Request failed',
-                  timestamp: Date.now(),
-                  isError: true,
-                  errorText: msg,
-                },
-              ],
+              messages: h.messages.map((m) =>
+                m.id === loadingId
+                  ? buildErrorMessage(loadingId, err, {
+                      kind: 'history_follow_up',
+                      conversationId,
+                      taskType: entry.taskType,
+                      userQuestion: trimmed,
+                    })
+                  : m,
+              ),
             };
           }),
         );
@@ -652,6 +708,187 @@ export default function ReaderPage() {
     },
     [history],
   );
+
+  const handleRetry = useCallback(
+    async (msg: Message) => {
+      if (!msg.retry || retryInFlightRef.current) return;
+      retryInFlightRef.current = true;
+      const r = msg.retry;
+      const messageId = msg.id;
+
+      if (r.kind === 'first_turn') {
+        setAiResults((prev) =>
+          prev.map((card) =>
+            card.id === r.cardId
+              ? {
+                  ...card,
+                  messages: card.messages.map((m) =>
+                    m.id === messageId ? loadingMessage(messageId) : m,
+                  ),
+                }
+              : card,
+          ),
+        );
+        setAiError(null);
+        try {
+          const result = await runTask(
+            r.taskType,
+            r.capture.selection,
+            {
+              data: r.capture.base64,
+              width: r.capture.width,
+              height: r.capture.height,
+            },
+            { targetLang: 'zh-CN', userQuestion: r.userQuestion, pdfId: r.pdfId },
+          );
+          setAiResults((prev) => {
+            const idx = prev.findIndex((c) => c.id === r.cardId);
+            if (idx === -1) return prev;
+            const updated = [...prev];
+            updated[idx] = {
+              ...updated[idx],
+              sessionId: result.sessionId,
+              messages: updated[idx].messages.map((m) =>
+                m.id === messageId
+                  ? { id: messageId, role: 'ai', text: result.text, timestamp: Date.now() }
+                  : m,
+              ),
+            };
+            return updated;
+          });
+        } catch (err: unknown) {
+          const { display } = errorMessageFrom(err);
+          setAiError(display);
+          setAiResults((prev) => {
+            const idx = prev.findIndex((c) => c.id === r.cardId);
+            if (idx === -1) return prev;
+            const updated = [...prev];
+            updated[idx] = {
+              ...updated[idx],
+              messages: updated[idx].messages.map((m) =>
+                m.id === messageId ? buildErrorMessage(messageId, err, r) : m,
+              ),
+            };
+            return updated;
+          });
+        }
+      } else if (r.kind === 'follow_up') {
+        setAiResults((prev) =>
+          prev.map((card) =>
+            card.id === r.cardId
+              ? {
+                  ...card,
+                  messages: card.messages.map((m) =>
+                    m.id === messageId ? loadingMessage(messageId) : m,
+                  ),
+                }
+              : card,
+          ),
+        );
+        try {
+          const result = await runFollowUp(r.taskType, r.sessionId, r.userQuestion, {
+            targetLang: 'zh-CN',
+          });
+          setAiResults((prev) => {
+            const idx = prev.findIndex((c) => c.id === r.cardId);
+            if (idx === -1) return prev;
+            const updated = [...prev];
+            updated[idx] = {
+              ...updated[idx],
+              messages: updated[idx].messages.map((m) =>
+                m.id === messageId
+                  ? { id: messageId, role: 'ai', text: result.text, timestamp: Date.now() }
+                  : m,
+              ),
+            };
+            return updated;
+          });
+        } catch (err: unknown) {
+          setAiResults((prev) => {
+            const idx = prev.findIndex((c) => c.id === r.cardId);
+            if (idx === -1) return prev;
+            const updated = [...prev];
+            updated[idx] = {
+              ...updated[idx],
+              messages: updated[idx].messages.map((m) =>
+                m.id === messageId ? buildErrorMessage(messageId, err, r) : m,
+              ),
+            };
+            return updated;
+          });
+        }
+      } else {
+        setHistory((prev) =>
+          prev.map((h) =>
+            h.conversationId === r.conversationId
+              ? {
+                  ...h,
+                  messages: h.messages.map((m) =>
+                    m.id === messageId ? loadingMessage(messageId) : m,
+                  ),
+                }
+              : h,
+          ),
+        );
+        try {
+          const result = await runFollowUp(r.taskType, r.conversationId, r.userQuestion, {
+            targetLang: 'zh-CN',
+          });
+          setHistory((prev) =>
+            prev.map((h) => {
+              if (h.conversationId !== r.conversationId) return h;
+              return {
+                ...h,
+                lastUsedAt: Math.floor(Date.now() / 1000),
+                messages: h.messages.map((m) =>
+                  m.id === messageId
+                    ? { id: messageId, role: 'ai', text: result.text, timestamp: Date.now() }
+                    : m,
+                ),
+              };
+            }),
+          );
+        } catch (err: unknown) {
+          setHistory((prev) =>
+            prev.map((h) => {
+              if (h.conversationId !== r.conversationId) return h;
+              return {
+                ...h,
+                messages: h.messages.map((m) =>
+                  m.id === messageId ? buildErrorMessage(messageId, err, r) : m,
+                ),
+              };
+            }),
+          );
+        }
+      }
+      retryInFlightRef.current = false;
+    },
+    [],
+  );
+
+  const handleDismissError = useCallback((msg: Message) => {
+    if (!msg.retry) return;
+    const r = msg.retry;
+    if (r.kind === 'history_follow_up') {
+      setHistory((prev) =>
+        prev.map((h) =>
+          h.conversationId === r.conversationId
+            ? { ...h, messages: h.messages.filter((m) => m.id !== msg.id) }
+            : h,
+        ),
+      );
+    } else {
+      setAiResults((prev) =>
+        prev.map((card) =>
+          card.id === r.cardId
+            ? { ...card, messages: card.messages.filter((m) => m.id !== msg.id) }
+            : card,
+        ),
+      );
+    }
+    setAiError(null);
+  }, []);
 
   const displayName = fileName ? fileName.replace(/\.pdf$/i, '') : '';
 
@@ -742,6 +979,8 @@ export default function ReaderPage() {
           onTaskTypeChange={setActiveTaskType}
           onUserInputChange={setUserInput}
           onPanelModeChange={setPanelMode}
+          onRetry={handleRetry}
+          onDismissError={handleDismissError}
         />
       </div>
     </div>

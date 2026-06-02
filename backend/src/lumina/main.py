@@ -16,7 +16,8 @@ from lumina.db.startup import apply_pending_for_all_projects
 from lumina.logging import get_logger, log_with_fields, setup_logging
 from lumina.projects.catalog import load_catalog
 from lumina.projects.paths import resolve_data_root
-from lumina.providers import init_provider, reset_provider
+from lumina import settings_store
+from lumina.providers import init_provider_from_resolved, reset_provider
 from lumina.sessions import cleanup_loop, init_session_store, reset_session_store
 from lumina.request_id import generate_request_id
 from lumina.schemas.api import error_response
@@ -79,7 +80,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         data_root.mkdir(parents=True, exist_ok=True)
         load_catalog()
         apply_pending_for_all_projects()
-        app.state.provider = init_provider(cfg)
+        resolved = settings_store.bootstrap()
+        app.state.provider = init_provider_from_resolved(
+            api_key=resolved.api_key,
+            base_url=resolved.base_url,
+            default_model=resolved.default_model,
+            timeout_seconds=resolved.timeout_seconds,
+        )
         store = init_session_store(
             max_entries=cfg.session_max_entries,
             ttl_seconds=cfg.session_ttl_seconds,

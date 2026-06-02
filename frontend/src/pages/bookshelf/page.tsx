@@ -14,6 +14,7 @@ import {
 import BookCard from './components/BookCard';
 import UploadArea from './components/UploadArea';
 import EmptyState from './components/EmptyState';
+import OnboardingBanner from './components/OnboardingBanner';
 import SortSelector from './components/SortSelector';
 import DeleteConfirmDialog from './components/DeleteConfirmDialog';
 import DuplicateReminder from './components/DuplicateReminder';
@@ -23,6 +24,8 @@ function formatError(err: unknown, fallback: string): string {
   if (err instanceof Error) return err.message;
   return fallback;
 }
+
+const ONBOARDING_KEY = 'lumina:onboarded';
 
 export default function BookshelfPage() {
   const navigate = useNavigate();
@@ -36,6 +39,13 @@ export default function BookshelfPage() {
   const [pendingUploadFile, setPendingUploadFile] = useState<File | null>(null);
   const [deleteTarget, setDeleteTarget] = useState<LibraryItem | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const [showOnboarding, setShowOnboarding] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem(ONBOARDING_KEY) !== '1';
+    } catch {
+      return false;
+    }
+  });
   const abortRef = useRef(false);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -59,6 +69,15 @@ export default function BookshelfPage() {
     if (toastTimerRef.current) clearTimeout(toastTimerRef.current);
     setToast(message);
     toastTimerRef.current = setTimeout(() => setToast(null), 3000);
+  }, []);
+
+  const dismissOnboarding = useCallback(() => {
+    try {
+      localStorage.setItem(ONBOARDING_KEY, '1');
+    } catch {
+      // localStorage 不可用则只是本次会话内不再显示
+    }
+    setShowOnboarding(false);
   }, []);
 
   const handleOpenBook = useCallback(
@@ -200,6 +219,8 @@ export default function BookshelfPage() {
       </div>
 
       <div className="flex-1 max-w-7xl mx-auto w-full px-6 py-6">
+        {showOnboarding && <OnboardingBanner onDismiss={dismissOnboarding} />}
+
         <div className="mb-6">
           <UploadArea
             isUploading={isUploading}

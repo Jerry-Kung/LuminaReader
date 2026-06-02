@@ -8,6 +8,8 @@ __all__ = [
     "build_provider_from_config",
     "get_provider",
     "init_provider",
+    "init_provider_from_resolved",
+    "rebuild_provider",
     "reset_provider",
 ]
 
@@ -29,6 +31,39 @@ def init_provider(cfg: Settings) -> Provider:
     global _provider
     _provider = build_provider_from_config(cfg)
     return _provider
+
+
+def rebuild_provider(
+    *,
+    api_key: str | None,
+    base_url: str,
+    default_model: str,
+    timeout_seconds: int,
+) -> Provider:
+    global _provider
+    _provider = OpenAICompatProvider(
+        api_key=api_key or "",
+        base_url=base_url,
+        model=default_model,
+        timeout_seconds=timeout_seconds,
+        return_raw=False,
+    )
+    return _provider
+
+
+def init_provider_from_resolved(
+    *,
+    api_key: str | None,
+    base_url: str,
+    default_model: str,
+    timeout_seconds: int,
+) -> Provider:
+    return rebuild_provider(
+        api_key=api_key,
+        base_url=base_url,
+        default_model=default_model,
+        timeout_seconds=timeout_seconds,
+    )
 
 
 def get_provider() -> Provider:
