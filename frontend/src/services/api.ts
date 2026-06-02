@@ -571,3 +571,105 @@ export async function listMessages(conversationId: string): Promise<Conversation
   }
   return parseEnvelope<ConversationDetail>(response);
 }
+
+// V1.0.4 F3: 模型配置（设置页）
+// 后端 settings API 尚未实现，本节为占位实现：API_BASE 为空时走内存 mock，
+// 接通后端后只需把 fetch/解析改成 v1 信封契约（GET/PUT /api/v1/settings）。
+
+export interface Settings {
+  service_url: string;
+  api_key: string;
+  api_key_mask: string | null;
+  default_model: string;
+  timeout_seconds: number;
+  ocr_model: string;
+  translate_model: string;
+  explain_model: string;
+  config_source: 'environment' | 'local';
+  is_ready: boolean;
+}
+
+export type SettingsForm = Omit<Settings, 'api_key_mask' | 'config_source' | 'is_ready'>;
+
+const SETTINGS_MOCK_STATE: { current: Settings } = {
+  current: {
+    service_url: 'https://api.openai.com/v1',
+    api_key: '',
+    api_key_mask: null,
+    default_model: 'gpt-4o',
+    timeout_seconds: 60,
+    ocr_model: '',
+    translate_model: '',
+    explain_model: '',
+    config_source: 'environment',
+    is_ready: false,
+  },
+};
+
+function maskKey(key: string): string | null {
+  if (!key) return null;
+  const tail = key.slice(-4);
+  return `sk-***...${tail}`;
+}
+
+export async function getSettings(): Promise<Settings> {
+  if (!API_BASE) {
+    return { ...SETTINGS_MOCK_STATE.current };
+  }
+  const url = `${API_BASE}/api/v1/settings`;
+  let response: Response;
+  try {
+    response = await fetch(url);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to reach backend.';
+    throw new TranslateApiError('NETWORK_ERROR', msg);
+  }
+  return parseEnvelope<Settings>(response);
+}
+
+export async function saveSettings(
+  form: SettingsForm,
+): Promise<{ success: boolean; error?: string }> {
+  if (!API_BASE) {
+    if (!form.service_url.startsWith('http://') && !form.service_url.startsWith('https://')) {
+      return { success: false, error: '请输入合法的 http(s) 地址' };
+    }
+    if (form.timeout_seconds < 5 || form.timeout_seconds > 300) {
+      return { success: false, error: '超时秒数应在 5 到 300 之间' };
+    }
+    if (!form.default_model.trim()) {
+      return { success: false, error: '默认模型不能为空' };
+    }
+    SETTINGS_MOCK_STATE.current = {
+      ...SETTINGS_MOCK_STATE.current,
+      ...form,
+      api_key_mask: maskKey(form.api_key),
+      config_source: 'local',
+      is_ready: !!form.api_key,
+    };
+    return { success: true };
+  }
+  const url = `${API_BASE}/api/v1/settings`;
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(form),
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to reach backend.';
+    return { success: false, error: msg };
+  }
+  if (response.ok) return { success: true };
+  let envelope: ErrorEnvelope | null = null;
+  try {
+    envelope = await response.json();
+  } catch {
+    envelope = null;
+  }
+  return {
+    success: false,
+    error: envelope?.error?.message || `保存失败 (HTTP ${response.status})`,
+  };
+}

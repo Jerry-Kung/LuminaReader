@@ -693,6 +693,7 @@ export default function ReaderPage() {
         onZoomIn={zoomIn}
         onZoomOut={zoomOut}
         onToggleSelectionMode={handleToggleSelectionMode}
+        onOpenSettings={() => navigate('/settings', { state: { from: `/reader/${pdfId}` } })}
       />
 
       <div className="flex-1 flex overflow-hidden relative">

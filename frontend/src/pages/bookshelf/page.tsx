@@ -188,6 +188,13 @@ export default function BookshelfPage() {
           </div>
           <div className="flex items-center gap-2">
             <span className="text-xs text-stone-400">{books.length} 本书</span>
+            <button
+              onClick={() => navigate('/settings', { state: { from: '/' } })}
+              className="w-8 h-8 flex items-center justify-center rounded-md text-stone-400 hover:text-stone-600 hover:bg-stone-100 cursor-pointer transition-colors"
+              title="设置"
+            >
+              <i className="ri-settings-3-line text-sm"></i>
+            </button>
           </div>
         </div>
       </div>
