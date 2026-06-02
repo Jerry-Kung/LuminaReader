@@ -46,11 +46,19 @@ def test_auto_create_project_creates_dir_pdf_sqlite_manifest_catalog(data_root):
     assert project_dir(created.project_id).exists()
     assert project_pdf_path(created.project_id).read_bytes() == PDF_BYTES
     conn = get_connection(created.project_id)
-    assert read_schema_version(conn) == 1
+    # V1.0.4: newly created Projects materialize directly at the current
+    # SCHEMA_VERSION (auto_create_project calls initialize_schema, which now
+    # runs every registered migration). Track SCHEMA_VERSION rather than hard-
+    # coding the integer so future bumps don't drift this test.
+    from lumina.db.migrations import SCHEMA_VERSION
+    assert read_schema_version(conn) == SCHEMA_VERSION
     meta_count = conn.execute("SELECT COUNT(*) FROM project_meta").fetchone()[0]
     pdf_count = conn.execute("SELECT COUNT(*) FROM pdfs").fetchone()[0]
     assert meta_count == 1
     assert pdf_count == 1
+    # V1.0.4: the new pdf row carries last_read_page = 1 (DEFAULT applied via 002).
+    row = conn.execute("SELECT last_read_page FROM pdfs").fetchone()
+    assert row[0] == 1
     manifest = json.loads(project_manifest_path(created.project_id).read_text())
     assert manifest["project"]["id"] == created.project_id
     entry = find_by_project_id(created.project_id)

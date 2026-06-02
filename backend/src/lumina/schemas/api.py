@@ -74,7 +74,12 @@ class LibraryItem(BaseModel):
     primary_pdf_size: int
     created_at: int
     last_opened_at: int
+    last_read_page: int = 1
     thumbnail_url: str | None = None
+
+
+class ReadingPositionUpdate(BaseModel):
+    last_read_page: int
 
 
 class LibraryListData(BaseModel):

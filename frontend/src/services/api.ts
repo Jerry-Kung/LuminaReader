@@ -262,6 +262,7 @@ export interface LibraryItem {
   primary_pdf_size: number;
   created_at: number;
   last_opened_at: number;
+  last_read_page: number;
   thumbnail_url: string | null;
 }
 
@@ -501,6 +502,45 @@ export async function deletePdf(pdfId: string): Promise<void> {
 
 export function getPdfRawUrl(pdfId: string): string {
   return `${API_BASE}/api/v1/pdfs/${encodeURIComponent(pdfId)}/raw`;
+}
+
+// V1.0.4 F9: persist last_read_page. 204/404 both resolve; 400 throws.
+export async function updateReadingPosition(
+  pdfId: string,
+  lastReadPage: number,
+): Promise<void> {
+  if (!API_BASE) return;
+  if (!Number.isInteger(lastReadPage) || lastReadPage < 1) {
+    throw new TranslateApiError(
+      'INVALID_REQUEST',
+      `last_read_page must be a positive integer (got ${lastReadPage}).`,
+    );
+  }
+  const url = `${API_BASE}/api/v1/pdfs/${encodeURIComponent(pdfId)}/reading-position`;
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ last_read_page: lastReadPage }),
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to reach backend.';
+    throw new TranslateApiError('NETWORK_ERROR', msg);
+  }
+  if (response.status === 204 || response.status === 404) return;
+  let envelope: ErrorEnvelope | null = null;
+  try {
+    envelope = await response.json();
+  } catch {
+    envelope = null;
+  }
+  throw new TranslateApiError(
+    envelope?.error?.code || 'INTERNAL_ERROR',
+    envelope?.error?.message || `Failed to update reading position (HTTP ${response.status}).`,
+    envelope?.error?.request_id,
+    response.status,
+  );
 }
 
 export async function listConversations(pdfId: string): Promise<ConversationSummary[]> {

@@ -3,6 +3,8 @@ import logging
 from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
+from lumina.db.engine import get_connection
+from lumina.db.models import get_pdf_last_read_page
 from lumina.logging import get_logger, log_with_fields
 from lumina.projects.catalog import list_entries
 from lumina.request_id import generate_request_id
@@ -37,18 +39,26 @@ async def get_library(sort: str = "last_opened_at_desc"):
         )
 
     entries = list_entries(sort=sort)
-    items = [
-        LibraryItem(
-            pdf_id=e.primary_pdf_id,
-            name=e.name,
-            primary_pdf_filename=e.primary_pdf_filename,
-            primary_pdf_size=e.primary_pdf_size,
-            created_at=e.created_at,
-            last_opened_at=e.last_opened_at,
-            thumbnail_url=None,
+    items = []
+    for e in entries:
+        try:
+            conn = get_connection(e.id)
+            stored = get_pdf_last_read_page(conn, e.primary_pdf_id)
+        except Exception:
+            stored = None
+        last_read_page = stored if isinstance(stored, int) and stored >= 1 else 1
+        items.append(
+            LibraryItem(
+                pdf_id=e.primary_pdf_id,
+                name=e.name,
+                primary_pdf_filename=e.primary_pdf_filename,
+                primary_pdf_size=e.primary_pdf_size,
+                created_at=e.created_at,
+                last_opened_at=e.last_opened_at,
+                last_read_page=last_read_page,
+                thumbnail_url=None,
+            )
         )
-        for e in entries
-    ]
     log_with_fields(
         logger,
         logging.INFO,

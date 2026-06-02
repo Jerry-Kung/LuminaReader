@@ -1,4 +1,7 @@
-SCHEMA_VERSION = 1
+from __future__ import annotations
+
+target_version = 1
+description = "Initial schema (V1.0.3): project_meta, pdfs, selections, conversations, messages + indexes."
 
 INIT_SQL = """
 CREATE TABLE IF NOT EXISTS project_meta (
@@ -62,30 +65,5 @@ CREATE INDEX IF NOT EXISTS idx_messages_conv     ON messages(conversation_id, tu
 """
 
 
-class SchemaVersionTooNewError(RuntimeError):
-    pass
-
-
-def initialize_schema(conn) -> None:
+def apply(conn) -> None:
     conn.executescript(INIT_SQL)
-
-
-def read_schema_version(conn) -> int | None:
-    try:
-        row = conn.execute("SELECT schema_version FROM project_meta LIMIT 1").fetchone()
-    except Exception:
-        return None
-    return row[0] if row else None
-
-
-def migrate(conn, from_version: int, to_version: int) -> None:
-    if from_version == to_version:
-        return
-    if from_version < to_version:
-        raise NotImplementedError(
-            f"No migration registered from {from_version} to {to_version}"
-        )
-    raise SchemaVersionTooNewError(
-        f"DB schema_version={from_version} > backend SCHEMA_VERSION={to_version}; "
-        "please upgrade the backend."
-    )

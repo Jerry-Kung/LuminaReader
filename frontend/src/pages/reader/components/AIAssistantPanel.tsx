@@ -10,6 +10,7 @@ interface AIAssistantPanelProps {
   expandedHistoryId: string | null;
   onToggleHistory: (conversationId: string) => void;
   onHistoryFollowUp: (conversationId: string, text: string) => void;
+  onDeleteHistory: (conversationId: string) => void;
   isAIWorking: boolean;
   error: string | null;
   hasSelection: boolean;
@@ -163,12 +164,14 @@ function HistoryItem({
   isExpanded,
   onToggle,
   onFollowUp,
+  onDelete,
   isAIWorking,
 }: {
   entry: HistoryEntry;
   isExpanded: boolean;
   onToggle: () => void;
   onFollowUp: (text: string) => void;
+  onDelete: () => void;
   isAIWorking: boolean;
 }) {
   const config = taskLabelConfig[entry.taskType];
@@ -178,27 +181,40 @@ function HistoryItem({
 
   return (
     <div className="rounded-lg border border-stone-200 bg-white overflow-hidden">
-      <button
-        onClick={onToggle}
-        className="flex items-center gap-3 w-full px-3 py-2.5 text-left cursor-pointer hover:bg-stone-50/50 transition-colors"
-      >
-        <div className="w-10 h-8 rounded border border-stone-200 flex-shrink-0 flex items-center justify-center bg-stone-100 text-stone-400">
-          <span className="text-sm font-serif">{firstLetter}</span>
-        </div>
-        <div className="flex-1 min-w-0">
-          <p className="text-sm text-stone-700 truncate leading-snug">{placeholder}</p>
-          <div className="flex items-center gap-2 mt-0.5">
-            <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium rounded-full ${config.bgClass} ${config.textClass}`}>
-              <i className={`${config.icon} text-[10px]`}></i>
-              {config.label}
-            </span>
-            <span className="text-xs text-stone-400">{formatRelativeFromEpochSec(entry.lastUsedAt)}</span>
+      <div className="flex items-stretch w-full hover:bg-stone-50/50 transition-colors">
+        <button
+          onClick={onToggle}
+          className="flex items-center gap-3 flex-1 min-w-0 px-3 py-2.5 text-left cursor-pointer"
+        >
+          <div className="w-10 h-8 rounded border border-stone-200 flex-shrink-0 flex items-center justify-center bg-stone-100 text-stone-400">
+            <span className="text-sm font-serif">{firstLetter}</span>
           </div>
-        </div>
-        <i
-          className={`ri-arrow-down-s-line text-stone-400 flex-shrink-0 transition-transform duration-200 ${isExpanded ? 'rotate-180' : ''}`}
-        ></i>
-      </button>
+          <div className="flex-1 min-w-0">
+            <p className="text-sm text-stone-700 truncate leading-snug">{placeholder}</p>
+            <div className="flex items-center gap-2 mt-0.5">
+              <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-medium rounded-full ${config.bgClass} ${config.textClass}`}>
+                <i className={`${config.icon} text-[10px]`}></i>
+                {config.label}
+              </span>
+              <span className="text-xs text-stone-400">{formatRelativeFromEpochSec(entry.lastUsedAt)}</span>
+            </div>
+          </div>
+          <i
+            className={`ri-arrow-down-s-line text-stone-400 flex-shrink-0 transition-transform duration-200 ${isExpanded ? 'rotate-180' : ''}`}
+          ></i>
+        </button>
+        <button
+          onClick={(e) => {
+            e.stopPropagation();
+            onDelete();
+          }}
+          className="w-9 flex-shrink-0 flex items-center justify-center text-stone-400 hover:text-red-500 hover:bg-red-50 transition-colors cursor-pointer border-l border-stone-100"
+          title="删除该历史对话"
+          aria-label="删除该历史对话"
+        >
+          <i className="ri-delete-bin-line text-sm"></i>
+        </button>
+      </div>
 
       <div
         className={`transition-all duration-300 ease-out overflow-hidden ${isExpanded ? 'max-h-[3000px] opacity-100' : 'max-h-0 opacity-0'}`}
@@ -351,6 +367,7 @@ export default function AIAssistantPanel({
   expandedHistoryId,
   onToggleHistory,
   onHistoryFollowUp,
+  onDeleteHistory,
   isAIWorking,
   error,
   hasSelection,
@@ -454,6 +471,7 @@ export default function AIAssistantPanel({
                     isExpanded={expandedHistoryId === entry.conversationId}
                     onToggle={() => onToggleHistory(entry.conversationId)}
                     onFollowUp={(text) => onHistoryFollowUp(entry.conversationId, text)}
+                    onDelete={() => onDeleteHistory(entry.conversationId)}
                     isAIWorking={isAIWorking}
                   />
                 ))}

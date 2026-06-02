@@ -12,6 +12,7 @@ from lumina.api.v0 import router as v0_router
 from lumina.api.v1 import router as v1_router
 from lumina.config import Settings, get_settings
 from lumina.db.engine import close_all
+from lumina.db.startup import apply_pending_for_all_projects
 from lumina.logging import get_logger, log_with_fields, setup_logging
 from lumina.projects.catalog import load_catalog
 from lumina.projects.paths import resolve_data_root
@@ -77,6 +78,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         data_root = resolve_data_root()
         data_root.mkdir(parents=True, exist_ok=True)
         load_catalog()
+        apply_pending_for_all_projects()
         app.state.provider = init_provider(cfg)
         store = init_session_store(
             max_entries=cfg.session_max_entries,

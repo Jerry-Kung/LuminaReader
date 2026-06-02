@@ -1,6 +1,7 @@
 import { useState, useRef, useCallback, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { usePDF } from '@/hooks/usePDF';
+import { usePdfReadingPosition } from '@/hooks/usePdfReadingPosition';
 import {
   runTask,
   runFollowUp,
@@ -16,6 +17,7 @@ import {
 import Toolbar from './components/Toolbar';
 import PDFViewer from './components/PDFViewer';
 import AIAssistantPanel from './components/AIAssistantPanel';
+import ThumbnailPanel from './components/ThumbnailPanel';
 
 export interface Message {
   id: number;
@@ -120,6 +122,34 @@ export default function ReaderPage() {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [expandedHistoryId, setExpandedHistoryId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  // F9: 从 library 拿到的上次阅读位置 + 待跳标记。
+  // 用 state 而非 ref：library 是异步的，PDF raw 可能命中浏览器缓存先 ready，
+  // 必须靠 state 的 re-render 让 restore effect 在 library 完成后再次跑一遍。
+  const [pendingRestorePage, setPendingRestorePage] = useState<number | null>(null);
+  const [restoreAppliedForPdfId, setRestoreAppliedForPdfId] = useState<string | undefined>(undefined);
+
+  // F1: 缩略图栏折叠状态。D2 默认展开；R-V104-5 窄屏（< 1280px）首次进入自动折叠。
+  // 用户手动操作后不再被窗口变化覆盖（userOverride）。
+  const [thumbnailCollapsed, setThumbnailCollapsed] = useState<boolean>(
+    () => typeof window !== 'undefined' && window.innerWidth < 1280,
+  );
+  const thumbUserOverrideRef = useRef<boolean>(false);
+
+  useEffect(() => {
+    const handler = () => {
+      if (thumbUserOverrideRef.current) return;
+      setThumbnailCollapsed(window.innerWidth < 1280);
+    };
+    window.addEventListener('resize', handler);
+    return () => window.removeEventListener('resize', handler);
+  }, []);
+
+  const handleToggleThumbnail = useCallback(() => {
+    thumbUserOverrideRef.current = true;
+    setThumbnailCollapsed((c) => !c);
+  }, []);
+
+  usePdfReadingPosition(pdfId, currentPage, restoreAppliedForPdfId === pdfId);
 
   // Load PDF bytes from backend when pdfId changes.
   useEffect(() => {
@@ -128,16 +158,46 @@ export default function ReaderPage() {
   }, [pdfId, loadPDFFromUrl]);
 
   // Resolve display name from library list (single-shot — the library endpoint is the source of truth for names).
+  // V1.0.4 F9: also cache last_read_page for restore-on-open.
+  // pendingRestorePage 语义：null = library 尚未返回；number（含 1）= 已返回，restore 可推进。
+  // 即便值为 1，也必须显式 setPendingRestorePage(1)，否则 restoreAppliedForPdfId 不会被设，
+  // 导致 hook 永久 disabled，用户翻页将无法写入 DB（新书首次阅读场景）。
   useEffect(() => {
     if (!pdfId) return;
+    setPendingRestorePage(null);
+    setRestoreAppliedForPdfId(undefined);
     let cancelled = false;
     fetchLibrary().then((items) => {
       if (cancelled) return;
       const match = items.find((item) => item.pdf_id === pdfId);
-      if (match) setFileName(match.primary_pdf_filename || match.name);
-    }).catch(() => { /* silent */ });
+      if (match) {
+        setFileName(match.primary_pdf_filename || match.name);
+        const stored = match.last_read_page;
+        setPendingRestorePage(
+          Number.isInteger(stored) && stored >= 1 ? stored : 1,
+        );
+      } else {
+        // PDF 不在 library 中（可能是上传后未刷新等边缘场景）：放弃 restore，但仍开闸允许写
+        setPendingRestorePage(1);
+      }
+    }).catch(() => {
+      if (!cancelled) setPendingRestorePage(1); // 网络失败也开闸，避免 hook 永久 disabled
+    });
     return () => { cancelled = true; };
   }, [pdfId, setFileName]);
+
+  // F9: restore last_read_page once BOTH numPages ready AND pendingRestorePage resolved from library.
+  // Clamp to [1, numPages]. Only run once per pdfId.
+  useEffect(() => {
+    if (!pdfId || numPages <= 0) return;
+    if (restoreAppliedForPdfId === pdfId) return;
+    if (pendingRestorePage === null) return; // library 尚未返回，等下一次 re-render
+    if (pendingRestorePage > 1) {
+      const clamped = Math.min(pendingRestorePage, numPages);
+      if (clamped > 1) goToPage(clamped);
+    }
+    setRestoreAppliedForPdfId(pdfId);
+  }, [pdfId, numPages, pendingRestorePage, restoreAppliedForPdfId, goToPage]);
 
   // Load history conversations for this PDF.
   useEffect(() => {
@@ -507,6 +567,24 @@ export default function ReaderPage() {
     [ensureHistoryLoaded],
   );
 
+  const handleDeleteHistory = useCallback(
+    async (conversationId: string) => {
+      const entry = history.find((h) => h.conversationId === conversationId);
+      const label = entry?.summary?.trim() ? entry.summary.slice(0, 40) : '该历史对话';
+      const ok = window.confirm(`确定删除「${label}」？此操作不可撤销。`);
+      if (!ok) return;
+      try {
+        await clearSession(conversationId);
+      } catch {
+        // Session release failed (network/server); proceed with local cleanup so UI does not feel stuck.
+      }
+      setHistory((prev) => prev.filter((h) => h.conversationId !== conversationId));
+      setExpandedHistoryId((prev) => (prev === conversationId ? null : prev));
+      setAiResults((prev) => prev.filter((r) => r.sessionId !== conversationId));
+    },
+    [history],
+  );
+
   // Continue a history conversation: append user/loading turns locally, then runFollowUp(conversation_id).
   const handleHistoryFollowUp = useCallback(
     async (conversationId: string, text: string) => {
@@ -618,6 +696,15 @@ export default function ReaderPage() {
       />
 
       <div className="flex-1 flex overflow-hidden relative">
+        <ThumbnailPanel
+          pdfDoc={pdfDoc}
+          numPages={numPages}
+          currentPage={currentPage}
+          onPageClick={goToPage}
+          isLoading={isLoading}
+          collapsed={thumbnailCollapsed}
+          onToggleCollapsed={handleToggleThumbnail}
+        />
         <PDFViewer
           pdfDoc={pdfDoc}
           currentPage={currentPage}
@@ -640,6 +727,7 @@ export default function ReaderPage() {
           expandedHistoryId={expandedHistoryId}
           onToggleHistory={handleToggleHistory}
           onHistoryFollowUp={handleHistoryFollowUp}
+          onDeleteHistory={handleDeleteHistory}
           isAIWorking={isAIWorking}
           error={aiError}
           hasSelection={!!selectedArea}

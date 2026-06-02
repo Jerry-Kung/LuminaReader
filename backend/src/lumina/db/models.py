@@ -296,3 +296,19 @@ def list_conversations_brief(conn) -> list[ConversationRow]:
         """
     ).fetchall()
     return [ConversationRow(*row) for row in rows]
+
+
+def get_pdf_last_read_page(conn, pdf_id: str) -> int | None:
+    row = conn.execute(
+        "SELECT last_read_page FROM pdfs WHERE id = ?",
+        (pdf_id,),
+    ).fetchone()
+    return row[0] if row else None
+
+
+def update_pdf_last_read_page(conn, pdf_id: str, last_read_page: int) -> int:
+    cursor = conn.execute(
+        "UPDATE pdfs SET last_read_page = ? WHERE id = ?",
+        (last_read_page, pdf_id),
+    )
+    return cursor.rowcount

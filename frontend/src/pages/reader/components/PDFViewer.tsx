@@ -51,6 +51,16 @@ export default function PDFViewer({
   });
   const renderTaskRef = useRef<pdfjsLib.RenderTask | null>(null);
   const [containerSize, setContainerSize] = useState({ width: 0, height: 0 });
+  const boundaryHitRef = useRef<{ direction: 'up' | 'down'; timer: number } | null>(null);
+
+  const clearBoundaryHit = useCallback(() => {
+    if (boundaryHitRef.current) {
+      window.clearTimeout(boundaryHitRef.current.timer);
+      boundaryHitRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => clearBoundaryHit, [clearBoundaryHit]);
 
   useEffect(() => {
     const updateSize = () => {
@@ -120,6 +130,14 @@ export default function PDFViewer({
     };
   }, [pdfDoc, currentPage, scale, containerSize]);
 
+  useEffect(() => {
+    if (containerRef.current) {
+      containerRef.current.scrollTop = 0;
+      containerRef.current.scrollLeft = 0;
+    }
+    clearBoundaryHit();
+  }, [currentPage, clearBoundaryHit]);
+
   const handleWheel = useCallback(
     (e: React.WheelEvent) => {
       if (e.ctrlKey || e.metaKey) {
@@ -129,16 +147,55 @@ export default function PDFViewer({
         } else {
           onZoomOut();
         }
-      } else {
+        return;
+      }
+
+      const container = containerRef.current;
+      if (!container) return;
+
+      const canScrollVertically = container.scrollHeight > container.clientHeight + 1;
+
+      if (!canScrollVertically) {
         e.preventDefault();
+        clearBoundaryHit();
         if (e.deltaY > 0) {
+          onNextPage();
+        } else if (e.deltaY < 0) {
+          onPrevPage();
+        }
+        return;
+      }
+
+      const direction: 'down' | 'up' = e.deltaY > 0 ? 'down' : 'up';
+      const atTop = container.scrollTop <= 0;
+      const atBottom = container.scrollTop + container.clientHeight >= container.scrollHeight - 1;
+      const atBoundary = (direction === 'down' && atBottom) || (direction === 'up' && atTop);
+
+      if (!atBoundary) {
+        clearBoundaryHit();
+        return;
+      }
+
+      const hit = boundaryHitRef.current;
+      if (hit && hit.direction === direction) {
+        e.preventDefault();
+        clearBoundaryHit();
+        if (direction === 'down') {
           onNextPage();
         } else {
           onPrevPage();
         }
+        return;
       }
+
+      e.preventDefault();
+      clearBoundaryHit();
+      const timer = window.setTimeout(() => {
+        boundaryHitRef.current = null;
+      }, 300);
+      boundaryHitRef.current = { direction, timer };
     },
-    [onNextPage, onPrevPage, onZoomIn, onZoomOut],
+    [onNextPage, onPrevPage, onZoomIn, onZoomOut, clearBoundaryHit],
   );
 
   useEffect(() => {
@@ -229,75 +286,77 @@ export default function PDFViewer({
     <div
       ref={containerRef}
       onWheel={handleWheel}
-      className="flex-1 overflow-hidden bg-stone-100 flex items-start justify-center p-6"
+      className="flex-1 overflow-auto bg-stone-100"
     >
-      {isLoading && (
-        <div className="flex flex-col items-center justify-center h-full gap-3 text-stone-400">
-          <i className="ri-loader-4-line animate-spin text-3xl"></i>
-          <p className="text-sm">Loading PDF...</p>
-        </div>
-      )}
-
-      {error && (
-        <div className="flex flex-col items-center justify-center h-full gap-3 text-red-500">
-          <i className="ri-error-warning-line text-3xl"></i>
-          <p className="text-sm">{error}</p>
-        </div>
-      )}
-
-      {!pdfDoc && !isLoading && !error && (
-        <div className="flex flex-col items-center justify-center h-full gap-4 text-stone-400">
-          <div className="w-20 h-20 flex items-center justify-center rounded-2xl bg-stone-200">
-            <i className="ri-file-pdf-2-line text-4xl text-stone-400"></i>
+      <div className="min-h-full flex items-start justify-center p-6">
+        {isLoading && (
+          <div className="flex flex-col items-center justify-center h-full gap-3 text-stone-400">
+            <i className="ri-loader-4-line animate-spin text-3xl"></i>
+            <p className="text-sm">Loading PDF...</p>
           </div>
-          <div className="text-center">
-            <p className="text-sm font-medium text-stone-500">No PDF opened</p>
-            <p className="text-xs text-stone-400 mt-1">
-              Click &quot;Open PDF&quot; in the toolbar to get started
-            </p>
+        )}
+
+        {error && (
+          <div className="flex flex-col items-center justify-center h-full gap-3 text-red-500">
+            <i className="ri-error-warning-line text-3xl"></i>
+            <p className="text-sm">{error}</p>
           </div>
-        </div>
-      )}
+        )}
 
-      {pdfDoc && !isLoading && (
-        <div
-          className="relative inline-block"
-          style={{ cursor: isSelecting ? 'crosshair' : 'default' }}
-        >
-          <canvas
-            ref={canvasRef}
-            onMouseDown={handleMouseDown}
-            onMouseMove={handleMouseMove}
-            onMouseUp={handleMouseUp}
-            onMouseLeave={handleMouseUp}
-            className="shadow-lg bg-white"
-          />
+        {!pdfDoc && !isLoading && !error && (
+          <div className="flex flex-col items-center justify-center h-full gap-4 text-stone-400">
+            <div className="w-20 h-20 flex items-center justify-center rounded-2xl bg-stone-200">
+              <i className="ri-file-pdf-2-line text-4xl text-stone-400"></i>
+            </div>
+            <div className="text-center">
+              <p className="text-sm font-medium text-stone-500">No PDF opened</p>
+              <p className="text-xs text-stone-400 mt-1">
+                Click &quot;Open PDF&quot; in the toolbar to get started
+              </p>
+            </div>
+          </div>
+        )}
 
-          {selectionRect && (
-            <div
-              className="absolute pointer-events-none border-2 border-amber-400 bg-amber-400/15"
-              style={{
-                left: `${selectionRect.left * 100}%`,
-                top: `${selectionRect.top * 100}%`,
-                width: `${selectionRect.width * 100}%`,
-                height: `${selectionRect.height * 100}%`,
-              }}
+        {pdfDoc && !isLoading && (
+          <div
+            className="relative inline-block"
+            style={{ cursor: isSelecting ? 'crosshair' : 'default' }}
+          >
+            <canvas
+              ref={canvasRef}
+              onMouseDown={handleMouseDown}
+              onMouseMove={handleMouseMove}
+              onMouseUp={handleMouseUp}
+              onMouseLeave={handleMouseUp}
+              className="shadow-lg bg-white"
             />
-          )}
 
-          {selectedArea && !selection.isDragging && (
-            <div
-              className="absolute pointer-events-none border-2 border-amber-500 bg-amber-400/10"
-              style={{
-                left: `${selectedArea.x * 100}%`,
-                top: `${selectedArea.y * 100}%`,
-                width: `${selectedArea.width * 100}%`,
-                height: `${selectedArea.height * 100}%`,
-              }}
-            />
-          )}
-        </div>
-      )}
+            {selectionRect && (
+              <div
+                className="absolute pointer-events-none border-2 border-amber-400 bg-amber-400/15"
+                style={{
+                  left: `${selectionRect.left * 100}%`,
+                  top: `${selectionRect.top * 100}%`,
+                  width: `${selectionRect.width * 100}%`,
+                  height: `${selectionRect.height * 100}%`,
+                }}
+              />
+            )}
+
+            {selectedArea && !selection.isDragging && (
+              <div
+                className="absolute pointer-events-none border-2 border-amber-500 bg-amber-400/10"
+                style={{
+                  left: `${selectedArea.x * 100}%`,
+                  top: `${selectedArea.y * 100}%`,
+                  width: `${selectedArea.width * 100}%`,
+                  height: `${selectedArea.height * 100}%`,
+                }}
+              />
+            )}
+          </div>
+        )}
+      </div>
     </div>
   );
 }
