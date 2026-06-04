@@ -1,4 +1,5 @@
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from typing import Annotated, Literal
 
 from pydantic import BaseModel, Field
@@ -27,6 +28,8 @@ class LLMRequest(BaseModel):
     messages: list[LLMMessage]
     temperature: float | None = None
     max_tokens: int | None = None
+    stream: bool = False
+    thinking: bool = False
     extras: dict = Field(default_factory=dict)
 
 
@@ -41,6 +44,24 @@ class LLMResponse(BaseModel):
     model: str
     usage: LLMUsage | None = None
     raw: dict | None = None
+    thinking_enabled: bool = False
+
+
+class LLMStreamEvent(BaseModel):
+    """Unified streaming event; Provider adapts upstream chunks to this schema.
+
+    Normal order: n × text_delta → optional usage → done
+    Error path: n × text_delta → error → stop (no done)
+    """
+
+    type: Literal["text_delta", "usage", "done", "error"]
+    delta: str | None = None
+    usage: LLMUsage | None = None
+    model: str | None = None
+    thinking_enabled: bool | None = None
+    code: str | None = None
+    message: str | None = None
+    retriable: bool | None = None
 
 
 class ProviderError(Exception):
@@ -70,6 +91,10 @@ class Provider(ABC):
 
     @abstractmethod
     async def invoke(self, req: LLMRequest) -> LLMResponse: ...
+
+    @abstractmethod
+    async def invoke_stream(self, req: LLMRequest) -> AsyncIterator[LLMStreamEvent]:
+        """Streaming call; emits LLMStreamEvent sequence (see LLMStreamEvent)."""
 
     @abstractmethod
     async def health_check(self) -> bool:

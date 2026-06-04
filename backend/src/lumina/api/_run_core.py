@@ -1,7 +1,11 @@
+import asyncio
 import base64
 import binascii
+import json
 import logging
 import time
+from collections.abc import AsyncIterator
+from dataclasses import dataclass, field
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
@@ -16,15 +20,20 @@ from lumina.projects.manager import PdfNotFoundError, lookup_project_by_pdf_id
 from lumina.request_id import generate_request_id
 from lumina import settings_store
 from lumina.providers.base import (
+    LLMMessage,
     LLMRequest,
+    LLMStreamEvent,
+    LLMUsage,
     Provider,
     ProviderAuthError,
     ProviderConfigError,
     ProviderTimeout,
     ProviderUpstreamError,
-    LLMMessage,
     TextPart,
 )
+from lumina.providers.errors import StreamUnsupportedError
+from lumina.providers.openai_compat import _is_qwen_base_url
+from lumina.tasks.base import Task
 from lumina.schemas.api import (
     TranslateData,
     TranslateMeta,
@@ -43,6 +52,57 @@ ALLOWED_IMAGE_MIME = "image/png"
 API_VERSION = "v1"
 
 logger = get_logger("lumina.run")
+
+STREAM_HEARTBEAT_SECONDS = 15.0
+_SSE_KEEP_ALIVE = b":keep-alive\n\n"
+
+
+def _encode_sse(event: str, data: dict) -> bytes:
+    payload = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+    return f"event: {event}\ndata: {payload}\n\n".encode("utf-8")
+
+
+def _usage_to_dict(usage: LLMUsage | None) -> dict:
+    if usage is None:
+        return {}
+    return {
+        "prompt_tokens": usage.prompt_tokens,
+        "completion_tokens": usage.completion_tokens,
+        "total_tokens": usage.total_tokens,
+    }
+
+
+def _thinking_enabled_for_meta() -> bool:
+    try:
+        current = settings_store.get_current()
+        return current.thinking.enabled and _is_qwen_base_url(current.base_url)
+    except RuntimeError:
+        return False
+
+
+def _task_supports_stream(_task: Task) -> bool:
+    return True
+
+
+@dataclass
+class PreparedStreamRun:
+    request_id: str
+    start: float
+    task_type: str
+    page: int
+    image_bytes: int
+    project_id: str | None
+    pdf_id: str | None
+    conversation_id: str
+    turn_index: int
+    is_first_turn: bool
+    extract_latency_ms: int | None
+    extracted_text_chars: int | None
+    drive_ctx: TaskContext
+    task: Task
+    follow_up_user_question: str | None
+    meta_payload: dict
+    meta_ready: asyncio.Event = field(default_factory=asyncio.Event)
 
 
 def is_payload_too_large(content_length: int | None, image_data_b64: str) -> bool:
@@ -89,6 +149,7 @@ def _log_run_call(
     project_id: str | None = None,
     pdf_id: str | None = None,
     conversation_id: str | None = None,
+    thinking_enabled: bool | None = None,
 ) -> None:
     log_with_fields(
         logger,
@@ -112,6 +173,9 @@ def _log_run_call(
         project_id=project_id or "",
         pdf_id=pdf_id or "",
         conversation_id=conversation_id or "",
+        thinking_enabled=(
+            thinking_enabled if thinking_enabled is not None else False
+        ),
     )
 
 
@@ -260,6 +324,17 @@ def _validate_image_payload(
     return len(decoded), None
 
 
+def _inject_thinking(req: LLMRequest, *, enabled: bool) -> LLMRequest:
+    return req.model_copy(update={"thinking": enabled})
+
+
+def _thinking_enabled_from_settings() -> bool:
+    try:
+        return settings_store.get_current().thinking.enabled
+    except RuntimeError:
+        return False
+
+
 def _inject_model_override(req: LLMRequest, override_task_type: str) -> LLMRequest:
     try:
         override = settings_store.get_current().task_models.get(override_task_type)  # type: ignore[arg-type]
@@ -290,11 +365,16 @@ async def _invoke_task(
     project_id: str | None = None,
     pdf_id: str | None = None,
     conversation_id: str | None = None,
+    apply_thinking: bool = True,
 ):
     try:
         llm_req = task.build_request(ctx)
         if model_override_task is not None:
             llm_req = _inject_model_override(llm_req, model_override_task)
+        if apply_thinking:
+            llm_req = _inject_thinking(llm_req, enabled=_thinking_enabled_from_settings())
+        else:
+            llm_req = _inject_thinking(llm_req, enabled=False)
         llm_resp = await provider.invoke(llm_req)
         return task.parse_response(llm_resp), llm_resp, None
     except ProviderTimeout:
@@ -386,6 +466,7 @@ def _build_success_response(
     }
     if turn_index is not None:
         meta_kwargs["turn_index"] = turn_index
+    meta_kwargs["thinking_enabled"] = llm_resp.thinking_enabled
 
     data = TranslateData(
         text=result.text,
@@ -414,6 +495,7 @@ def _build_success_response(
         project_id=project_id,
         pdf_id=pdf_id,
         conversation_id=conversation_id,
+        thinking_enabled=llm_resp.thinking_enabled,
     )
     return ok_response(data)
 
@@ -515,6 +597,7 @@ async def _execute_first_turn_v1(
         image_bytes=image_bytes,
         start=start,
         model_override_task="extract",
+        apply_thinking=False,
         project_id=project_id,
         pdf_id=pdf_id,
     )
@@ -839,3 +922,526 @@ async def execute_run(
         start=start,
         allowed_task_types=allowed_task_types,
     )
+
+
+async def _stream_driver_events(
+    *,
+    prepared: PreparedStreamRun,
+    provider: Provider,
+) -> AsyncIterator[LLMStreamEvent]:
+    accumulated_text = ""
+    interrupted = False
+    usage: LLMUsage | None = None
+    model: str | None = None
+    thinking_enabled = False
+    stream_error: LLMStreamEvent | None = None
+
+    try:
+        llm_req = prepared.task.build_request(prepared.drive_ctx)
+        llm_req = llm_req.model_copy(update={"stream": True})
+        llm_req = _inject_model_override(llm_req, prepared.task_type)
+        llm_req = _inject_thinking(llm_req, enabled=_thinking_enabled_from_settings())
+        async for event in provider.invoke_stream(llm_req):
+            if event.type == "text_delta" and event.delta:
+                accumulated_text += event.delta
+                yield event
+            elif event.type == "usage":
+                usage = event.usage
+                yield event
+            elif event.type == "done":
+                model = event.model
+                thinking_enabled = bool(event.thinking_enabled)
+                yield event
+                break
+            elif event.type == "error":
+                interrupted = True
+                stream_error = event
+                yield event
+                break
+    except asyncio.CancelledError:
+        interrupted = True
+        raise
+    finally:
+        latency_ms = int((time.perf_counter() - prepared.start) * 1000)
+        assistant_meta = {
+            "model": model,
+            "prompt_tokens": usage.prompt_tokens if usage else None,
+            "completion_tokens": usage.completion_tokens if usage and not interrupted else None,
+            "latency_ms": latency_ms,
+        }
+        store = get_session_store()
+        if prepared.is_first_turn:
+            await store.finalize_streaming_assistant(
+                prepared.conversation_id,
+                turn_index=prepared.turn_index,
+                assistant_text=accumulated_text,
+                interrupted=interrupted,
+                assistant_meta=assistant_meta,
+            )
+        elif accumulated_text or interrupted:
+            user_msg = LLMMessage(
+                role="user",
+                content=[TextPart(text=prepared.follow_up_user_question or "")],
+            )
+            assistant_msg = LLMMessage(
+                role="assistant",
+                content=[TextPart(text=accumulated_text)],
+            )
+            await store.append_turn(
+                prepared.conversation_id,
+                user_message=user_msg,
+                assistant_message=assistant_msg,
+                turn_index=prepared.turn_index,
+                assistant_meta=assistant_meta,
+                interrupted=interrupted,
+            )
+        _ = stream_error
+
+
+async def prepare_stream_run(
+    *,
+    request: Request,
+    body: TranslateRequest,
+    provider: Provider,
+    settings: Settings,
+    request_id: str,
+    allowed_task_types: set[str] | None = None,
+) -> JSONResponse | PreparedStreamRun:
+    start = time.perf_counter()
+    task_type = body.task_type
+    page = body.selection.page if body.selection is not None else 0
+
+    task, task_error = _resolve_task(
+        body=body,
+        allowed_task_types=allowed_task_types,
+        request_id=request_id,
+        api_version=API_VERSION,
+        page=page,
+        image_bytes=0,
+    )
+    if task_error is not None:
+        return task_error
+
+    if not _task_supports_stream(task):
+        return _error_json(
+            status_code=400,
+            code="STREAM_UNSUPPORTED",
+            message="Streaming is not supported for this task.",
+            request_id=request_id,
+            api_version=API_VERSION,
+            task_type=task_type,
+            page=page,
+            image_bytes=0,
+        )
+
+    if body.session_id is None:
+        if not body.pdf_id:
+            return _error_json(
+                status_code=400,
+                code="INVALID_REQUEST",
+                message="First turn requires pdf_id.",
+                request_id=request_id,
+                api_version=API_VERSION,
+                task_type=task_type,
+                page=page,
+                image_bytes=0,
+            )
+        if body.selection is None or body.image is None:
+            return _error_json(
+                status_code=400,
+                code="INVALID_REQUEST",
+                message="First turn requires selection and image.",
+                request_id=request_id,
+                api_version=API_VERSION,
+                task_type=task_type,
+                page=page,
+                image_bytes=0,
+                pdf_id=body.pdf_id,
+            )
+        try:
+            catalog_entry = lookup_project_by_pdf_id(body.pdf_id)
+        except PdfNotFoundError:
+            return _error_json(
+                status_code=404,
+                code="PDF_NOT_FOUND",
+                message="PDF not found.",
+                request_id=request_id,
+                api_version=API_VERSION,
+                task_type=task_type,
+                page=page,
+                image_bytes=0,
+                pdf_id=body.pdf_id,
+            )
+
+        project_id = catalog_entry.id
+        pdf_id = body.pdf_id
+        image_bytes, image_error = _validate_image_payload(
+            request=request,
+            body=body,
+            request_id=request_id,
+            api_version=API_VERSION,
+            task_type=task_type,
+            page=page,
+        )
+        if image_error is not None:
+            return image_error
+
+        extract_ctx = TaskContext(
+            selection=body.selection,
+            image=body.image,
+            options={"temperature": settings.llm_temperature},
+            project_id=project_id,
+            pdf_id=pdf_id,
+        )
+        extract_start = time.perf_counter()
+        extract_result, extract_resp, extract_error = await _invoke_task(
+            task=EXTRACT_TASK,
+            ctx=extract_ctx,
+            provider=provider,
+            request_id=request_id,
+            api_version=API_VERSION,
+            task_type=task_type,
+            page=page,
+            image_bytes=image_bytes,
+            start=start,
+            model_override_task="extract",
+            apply_thinking=False,
+            project_id=project_id,
+            pdf_id=pdf_id,
+        )
+        extract_latency_ms = int((time.perf_counter() - extract_start) * 1000)
+        if extract_error is not None:
+            return extract_error
+
+        extracted_text = extract_result.text
+        extracted_text_chars = len(extracted_text)
+        drive_ctx = TaskContext(
+            selection=None,
+            image=None,
+            extracted_text=extracted_text,
+            user_question=body.options.user_question,
+            history=[],
+            options={
+                "target_lang": body.options.target_lang,
+                "temperature": settings.llm_temperature,
+            },
+            project_id=project_id,
+            pdf_id=pdf_id,
+        )
+
+        conversation_id = f"conv_{ULID()}"
+        selection_id = f"sel_{ULID()}"
+        user_history_text = _compose_user_history_text(
+            extracted_text, body.options.user_question
+        )
+        store = get_session_store()
+        meta = {
+            "page": body.selection.page,
+            "x": body.selection.x,
+            "y": body.selection.y,
+            "w": body.selection.w,
+            "h": body.selection.h,
+            "dpi": body.selection.dpi,
+            "image_bytes": image_bytes,
+        }
+        thumbnail_png = None
+        try:
+            thumbnail_png = render_thumbnail(body.image.data)
+        except Exception:
+            thumbnail_png = None
+        selection_row = SelectionRow(
+            id=selection_id,
+            pdf_id=pdf_id,
+            page=body.selection.page,
+            x=body.selection.x,
+            y=body.selection.y,
+            w=body.selection.w,
+            h=body.selection.h,
+            dpi=body.selection.dpi,
+            thumbnail_png=thumbnail_png,
+            created_at=int(time.time()),
+        )
+        try:
+            await store.create(
+                conversation_id=conversation_id,
+                project_id=project_id,
+                pdf_id=pdf_id,
+                selection_id=selection_id,
+                task_type=task_type,
+                extracted_text=extracted_text,
+                selection_row=selection_row,
+                first_user_question=body.options.user_question,
+                first_user_content=user_history_text,
+                first_assistant_text="",
+                first_assistant_meta={"model": None},
+                meta=meta,
+            )
+        except Exception:
+            return _error_json(
+                status_code=500,
+                code="INTERNAL_ERROR",
+                message="An internal server error occurred.",
+                request_id=request_id,
+                api_version=API_VERSION,
+                task_type=task_type,
+                page=page,
+                image_bytes=image_bytes,
+                project_id=project_id,
+                pdf_id=pdf_id,
+            )
+
+        try:
+            default_model = settings_store.get_current().default_model
+        except RuntimeError:
+            default_model = settings.openai_model
+
+        meta_payload = {
+            "request_id": request_id,
+            "session_id": conversation_id,
+            "conversation_id": conversation_id,
+            "task_type": task_type,
+            "turn_index": 0,
+            "model": default_model,
+            "thinking_enabled": _thinking_enabled_for_meta(),
+            "extract_latency_ms": extract_latency_ms,
+        }
+        prepared = PreparedStreamRun(
+            request_id=request_id,
+            start=start,
+            task_type=task_type,
+            page=page,
+            image_bytes=image_bytes,
+            project_id=project_id,
+            pdf_id=pdf_id,
+            conversation_id=conversation_id,
+            turn_index=0,
+            is_first_turn=True,
+            extract_latency_ms=extract_latency_ms,
+            extracted_text_chars=extracted_text_chars,
+            drive_ctx=drive_ctx,
+            task=task,
+            follow_up_user_question=None,
+            meta_payload=meta_payload,
+        )
+        prepared.meta_ready.set()
+        return prepared
+
+    if body.image is not None:
+        return _error_json(
+            status_code=400,
+            code="INVALID_REQUEST",
+            message="Follow-up turn must not include image.",
+            request_id=request_id,
+            api_version=API_VERSION,
+            task_type=task_type,
+            page=page,
+            image_bytes=0,
+            session_id=body.session_id,
+        )
+
+    user_question = body.options.user_question
+    if not user_question:
+        return _error_json(
+            status_code=400,
+            code="INVALID_REQUEST",
+            message="Follow-up turn requires options.user_question.",
+            request_id=request_id,
+            api_version=API_VERSION,
+            task_type=task_type,
+            page=page,
+            image_bytes=0,
+            session_id=body.session_id,
+        )
+
+    store = get_session_store()
+    session = await store.get(body.session_id)
+    if session is None:
+        return _error_json(
+            status_code=400,
+            code="SESSION_NOT_FOUND",
+            message="Session not found.",
+            request_id=request_id,
+            api_version=API_VERSION,
+            task_type=task_type,
+            page=page,
+            image_bytes=0,
+            session_id=body.session_id,
+        )
+
+    if session.task_type != body.task_type:
+        return _error_json(
+            status_code=400,
+            code="SESSION_TASK_MISMATCH",
+            message="Task type does not match session.",
+            request_id=request_id,
+            api_version=API_VERSION,
+            task_type=task_type,
+            page=page,
+            image_bytes=0,
+            session_id=body.session_id,
+        )
+
+    turn_index = len(session.messages) // 2
+    drive_ctx = TaskContext(
+        selection=None,
+        image=None,
+        extracted_text=session.extracted_text,
+        user_question=user_question,
+        history=list(session.messages),
+        options={
+            "target_lang": body.options.target_lang,
+            "temperature": settings.llm_temperature,
+        },
+        project_id=session.project_id,
+        pdf_id=session.pdf_id,
+    )
+    try:
+        default_model = settings_store.get_current().default_model
+    except RuntimeError:
+        default_model = settings.openai_model
+
+    meta_payload = {
+        "request_id": request_id,
+        "session_id": body.session_id,
+        "conversation_id": body.session_id,
+        "task_type": task_type,
+        "turn_index": turn_index,
+        "model": default_model,
+        "thinking_enabled": _thinking_enabled_for_meta(),
+    }
+    prepared = PreparedStreamRun(
+        request_id=request_id,
+        start=start,
+        task_type=task_type,
+        page=page,
+        image_bytes=0,
+        project_id=session.project_id,
+        pdf_id=session.pdf_id,
+        conversation_id=body.session_id,
+        turn_index=turn_index,
+        is_first_turn=False,
+        extract_latency_ms=None,
+        extracted_text_chars=None,
+        drive_ctx=drive_ctx,
+        task=task,
+        follow_up_user_question=user_question,
+        meta_payload=meta_payload,
+    )
+    prepared.meta_ready.set()
+    return prepared
+
+
+def _log_run_stream_completed(
+    *,
+    prepared: PreparedStreamRun,
+    stream_chunks: int,
+    first_chunk_latency_ms: int | None,
+    stream_aborted: bool,
+    error_code: str | None,
+    latency_ms: int,
+    thinking_enabled: bool,
+) -> None:
+    log_with_fields(
+        logger,
+        logging.INFO if error_code is None and not stream_aborted else logging.WARNING,
+        "run stream completed",
+        request_id=prepared.request_id,
+        api_version=API_VERSION,
+        task_type=prepared.task_type,
+        page=prepared.page,
+        image_bytes=prepared.image_bytes,
+        model=prepared.meta_payload.get("model", ""),
+        latency_ms=latency_ms,
+        prompt_tokens="",
+        completion_tokens="",
+        http_status=200,
+        error_code=error_code or "",
+        session_id=prepared.conversation_id,
+        turn_index=prepared.turn_index,
+        extract_latency_ms=prepared.extract_latency_ms if prepared.extract_latency_ms is not None else "",
+        extracted_text_chars=prepared.extracted_text_chars if prepared.extracted_text_chars is not None else "",
+        project_id=prepared.project_id or "",
+        pdf_id=prepared.pdf_id or "",
+        conversation_id=prepared.conversation_id,
+        thinking_enabled=thinking_enabled,
+        stream=True,
+        stream_chunks=stream_chunks,
+        first_chunk_latency_ms=first_chunk_latency_ms if first_chunk_latency_ms is not None else "",
+        stream_aborted=stream_aborted,
+    )
+
+
+async def iter_run_sse_bytes(
+    *,
+    prepared: PreparedStreamRun,
+    provider: Provider,
+    heartbeat_seconds: float = STREAM_HEARTBEAT_SECONDS,
+) -> AsyncIterator[bytes]:
+    stream_start = time.perf_counter()
+    stream_chunks = 0
+    first_chunk_latency_ms: int | None = None
+    stream_aborted = False
+    error_code: str | None = None
+    thinking_enabled = bool(prepared.meta_payload.get("thinking_enabled", False))
+
+    pending: asyncio.Task | None = None
+    try:
+        await prepared.meta_ready.wait()
+        yield _encode_sse("meta", prepared.meta_payload)
+
+        events_iter = _stream_driver_events(
+            prepared=prepared, provider=provider
+        ).__aiter__()
+        pending = asyncio.create_task(events_iter.__anext__())
+        while pending is not None:
+            done_set, _ = await asyncio.wait({pending}, timeout=heartbeat_seconds)
+            if pending not in done_set:
+                yield _SSE_KEEP_ALIVE
+                continue
+
+            try:
+                event = pending.result()
+            except StopAsyncIteration:
+                break
+            pending = asyncio.create_task(events_iter.__anext__())
+
+            if event.type == "text_delta":
+                stream_chunks += 1
+                if first_chunk_latency_ms is None:
+                    first_chunk_latency_ms = int((time.perf_counter() - stream_start) * 1000)
+                yield _encode_sse("text_delta", {"delta": event.delta})
+            elif event.type == "usage":
+                yield _encode_sse("usage", _usage_to_dict(event.usage))
+            elif event.type == "done":
+                if event.thinking_enabled is not None:
+                    thinking_enabled = bool(event.thinking_enabled)
+                yield _encode_sse(
+                    "done",
+                    {"latency_ms": int((time.perf_counter() - prepared.start) * 1000)},
+                )
+            elif event.type == "error":
+                error_code = event.code
+                yield _encode_sse(
+                    "error",
+                    {
+                        "code": event.code,
+                        "message": event.message,
+                        "retriable": event.retriable,
+                        "partial_text_kept": stream_chunks > 0,
+                    },
+                )
+    except (asyncio.CancelledError, GeneratorExit):
+        stream_aborted = True
+        raise
+    finally:
+        if pending is not None and not pending.done():
+            pending.cancel()
+        _log_run_stream_completed(
+            prepared=prepared,
+            stream_chunks=stream_chunks,
+            first_chunk_latency_ms=first_chunk_latency_ms,
+            stream_aborted=stream_aborted,
+            error_code=error_code,
+            latency_ms=int((time.perf_counter() - prepared.start) * 1000),
+            thinking_enabled=thinking_enabled,
+        )

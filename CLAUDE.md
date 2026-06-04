@@ -5,7 +5,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - **项目名**：LuminaReader，一款面向PDF书籍深度阅读的 AI 辅助阅读工作台。
 - **定位**：本地优先、模型可配置、以书籍 Project 为组织单位的 AI 阅读助手
 - **完整愿景与功能规划**：见 `README.md`
-- **当前阶段**：项目 V1.0 早期设计与开发阶段，遵循“小步快跑”式开发原则。
+- **当前阶段**：项目 V1.1 设计与开发阶段，遵循“小步快跑”式开发原则。
 
 ## 2. 工作规范
 
@@ -13,7 +13,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - 新版本的需求分析、模块设计、任务规划等重量级更新，讨论明确后归档到./claude_docs目录。轻量级的代码改动/bug修复可以直接执行，不写文档
 - 涉及整体架构/核心数据结构/跨模块接口契约/前后端配合等重要变更行为的改动，请同步更新./claude_docs中的相关文档
 - 默认不进行全量文档阅读，仅阅读与当前任务直接相关的项目文档，默认不阅读历史版本归档文件
-- 如有必要更新CLAUDE.md与README.md等核心文档，遵守最小化更新原则，不得添加任务无关的冗余内容。
+- 如有必要更新CLAUDE.md与README.md等核心文档，遵守最小化更新原则，不得添加任务无关的冗余内容
+- 小规模的代码改动（更新范围不超过100行代码/3个文件，不涉及重要的前端UI/数据结构/API/架构改动）由你直接执行。中等规模及以上的设计与开发工作请转交给readdy.ai和Cursor（参考第5和第6节内容）
 
 ## 3. 核心文档
 

@@ -25,6 +25,7 @@ interface FormState {
   extract_model: string;
   translate_model: string;
   explain_model: string;
+  thinking_enabled: boolean;
 }
 
 interface FormErrors {
@@ -76,6 +77,7 @@ export default function SettingsPage() {
     extract_model: '',
     translate_model: '',
     explain_model: '',
+    thinking_enabled: false,
   });
   const [errors, setErrors] = useState<FormErrors>({
     base_url: null,
@@ -107,6 +109,7 @@ export default function SettingsPage() {
         extract_model: data.task_models.extract ?? '',
         translate_model: data.task_models.translate ?? '',
         explain_model: data.task_models.explain ?? '',
+        thinking_enabled: data.thinking?.enabled ?? false,
       });
       if (data.source === 'env_fallback') {
         setShowEnvHint(true);
@@ -135,7 +138,8 @@ export default function SettingsPage() {
       form.timeout_seconds !== originalSettings.provider.timeout_seconds ||
       form.extract_model !== (originalSettings.task_models.extract ?? '') ||
       form.translate_model !== (originalSettings.task_models.translate ?? '') ||
-      form.explain_model !== (originalSettings.task_models.explain ?? '');
+      form.explain_model !== (originalSettings.task_models.explain ?? '') ||
+      form.thinking_enabled !== (originalSettings.thinking?.enabled ?? false);
     setHasChanges(keyChanged || otherChanged);
   }, [form, originalSettings]);
 
@@ -213,6 +217,9 @@ export default function SettingsPage() {
         extract: form.extract_model.trim() || null,
         translate: form.translate_model.trim() || null,
         explain: form.explain_model.trim() || null,
+      },
+      thinking: {
+        enabled: form.thinking_enabled,
       },
       api_key: intent,
     };
@@ -423,6 +430,25 @@ export default function SettingsPage() {
                   placeholder={form.default_model}
                 />
               </div>
+            </SettingsSection>
+
+            <SettingsSection title="高级">
+              <label className="flex items-start gap-3 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={form.thinking_enabled}
+                  onChange={(e) => updateField('thinking_enabled', e.target.checked)}
+                  className="mt-0.5 w-4 h-4 rounded border-stone-300 text-amber-600 focus:ring-amber-500 cursor-pointer"
+                />
+                <div className="flex-1">
+                  <div className="text-sm font-medium text-stone-700">
+                    启用 thinking 模式
+                  </div>
+                  <p className="text-xs text-stone-400 mt-1">
+                    仅对 Qwen 兼容接口（含 dashscope/aliyuncs）生效；其他服务地址将自动忽略。开启后模型在回答前会先做内部思考，质量更稳但延迟与计费增加。
+                  </p>
+                </div>
+              </label>
             </SettingsSection>
 
             <div className="space-y-4">

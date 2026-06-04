@@ -16,6 +16,8 @@ from lumina.projects.paths import settings_json_path
 logger = logging.getLogger("lumina.settings")
 
 TASK_TYPES = frozenset({"extract", "translate", "explain"})
+ALLOWED_TOP_LEVEL_KEYS = frozenset({"provider", "task_models", "thinking"})
+THINKING_ALLOWED_KEYS = frozenset({"enabled"})
 MASKED_KEY_PREFIX = "sk-***..."
 
 
@@ -30,6 +32,11 @@ class SettingsPersistError(Exception):
 
 
 @dataclass(frozen=True)
+class ThinkingSettings:
+    enabled: bool = False
+
+
+@dataclass(frozen=True)
 class ResolvedSettings:
     provider_kind: Literal["openai_compat"]
     base_url: str
@@ -37,6 +44,7 @@ class ResolvedSettings:
     default_model: str
     timeout_seconds: int
     task_models: dict[Literal["extract", "translate", "explain"], str | None]
+    thinking: ThinkingSettings
     source: Literal["user_data", "env_fallback"]
 
 
@@ -91,8 +99,52 @@ def _default_task_models() -> dict[str, str | None]:
     return {"extract": None, "translate": None, "explain": None}
 
 
-def _validate_payload(data: dict[str, Any]) -> dict[str, Any]:
+def _validate_thinking(
+    data: dict[str, Any],
+    errors: list[dict[str, str]],
+    *,
+    env_fallback_enabled: bool,
+) -> ThinkingSettings:
+    thinking = data.get("thinking", _MISSING)
+    if thinking is _MISSING:
+        return ThinkingSettings(enabled=env_fallback_enabled)
+    if not isinstance(thinking, dict):
+        errors.append({"path": "thinking", "reason": "thinking must be an object"})
+        return ThinkingSettings(enabled=False)
+    extra_keys = set(thinking.keys()) - THINKING_ALLOWED_KEYS
+    if extra_keys:
+        for key in sorted(extra_keys):
+            errors.append(
+                {
+                    "path": f"thinking.{key}",
+                    "reason": f"unknown field thinking.{key}",
+                }
+            )
+    enabled = thinking.get("enabled", False)
+    if not isinstance(enabled, bool):
+        errors.append(
+            {
+                "path": "thinking.enabled",
+                "reason": "thinking.enabled must be a boolean",
+            }
+        )
+        return ThinkingSettings(enabled=False)
+    return ThinkingSettings(enabled=enabled)
+
+
+def _validate_payload(
+    data: dict[str, Any],
+    *,
+    env_fallback_enabled: bool = False,
+) -> dict[str, Any]:
     errors: list[dict[str, str]] = []
+
+    unknown_top = set(data.keys()) - ALLOWED_TOP_LEVEL_KEYS
+    if unknown_top:
+        for key in sorted(unknown_top):
+            errors.append(
+                {"path": key, "reason": f"unknown top-level field {key}"}
+            )
 
     provider = data.get("provider")
     if not isinstance(provider, dict):
@@ -184,6 +236,10 @@ def _validate_payload(data: dict[str, Any]) -> dict[str, Any]:
                     }
                 )
 
+    thinking_settings = _validate_thinking(
+        data, errors, env_fallback_enabled=env_fallback_enabled
+    )
+
     if errors:
         raise InvalidSettingsError(errors)
 
@@ -204,7 +260,11 @@ def _validate_payload(data: dict[str, Any]) -> dict[str, Any]:
     if api_key is not _MISSING:
         normalized_provider["api_key"] = None if api_key is None else str(api_key).strip()
 
-    return {"provider": normalized_provider, "task_models": normalized_task_models}
+    return {
+        "provider": normalized_provider,
+        "task_models": normalized_task_models,
+        "thinking": thinking_settings,
+    }
 
 
 _MISSING = object()
@@ -229,6 +289,7 @@ def _resolved_from_validated(
             "translate": task_models["translate"],
             "explain": task_models["explain"],
         },
+        thinking=validated["thinking"],
         source=source,
     )
 
@@ -243,6 +304,7 @@ def _to_disk_document(resolved: ResolvedSettings) -> dict[str, Any]:
             "timeout_seconds": resolved.timeout_seconds,
         },
         "task_models": dict(resolved.task_models),
+        "thinking": {"enabled": resolved.thinking.enabled},
     }
 
 
@@ -306,7 +368,10 @@ def bootstrap() -> ResolvedSettings:
     if sj_path.exists():
         try:
             raw = json.loads(sj_path.read_text(encoding="utf-8"))
-            validated = _validate_payload(raw)
+            validated = _validate_payload(
+                raw,
+                env_fallback_enabled=env_cfg.thinking_enabled,
+            )
             provider = validated["provider"]
             file_api_key = provider.get("api_key", env_cfg.openai_api_key or None)
             _current = _resolved_from_validated(
@@ -333,6 +398,7 @@ def bootstrap() -> ResolvedSettings:
         default_model=env_cfg.openai_model,
         timeout_seconds=int(env_cfg.llm_timeout_seconds),
         task_models=_default_task_models(),  # type: ignore[assignment]
+        thinking=ThinkingSettings(enabled=env_cfg.thinking_enabled),
         source="env_fallback",
     )
     logger.info(
@@ -370,7 +436,23 @@ def _merge_update(payload: dict[str, Any], current: ResolvedSettings) -> dict[st
             [{"path": "task_models", "reason": "task_models must be an object"}]
         )
 
-    return {"provider": merged_provider, "task_models": merged_task_models}
+    thinking_in = payload.get("thinking")
+    if thinking_in is None:
+        merged_thinking: dict[str, Any] = {"enabled": current.thinking.enabled}
+    elif isinstance(thinking_in, dict):
+        merged_thinking = dict(thinking_in)
+        if "enabled" not in merged_thinking:
+            merged_thinking["enabled"] = current.thinking.enabled
+    else:
+        raise InvalidSettingsError(
+            [{"path": "thinking", "reason": "thinking must be an object"}]
+        )
+
+    return {
+        "provider": merged_provider,
+        "task_models": merged_task_models,
+        "thinking": merged_thinking,
+    }
 
 
 def apply_update(payload: dict[str, Any]) -> ResolvedSettings:
@@ -378,8 +460,21 @@ def apply_update(payload: dict[str, Any]) -> ResolvedSettings:
     if _current is None:
         raise RuntimeError("settings_store has not been bootstrapped")
 
+    unknown_top = set(payload.keys()) - ALLOWED_TOP_LEVEL_KEYS
+    if unknown_top:
+        raise InvalidSettingsError(
+            [
+                {"path": key, "reason": f"unknown top-level field {key}"}
+                for key in sorted(unknown_top)
+            ]
+        )
+
     merged = _merge_update(payload, _current)
-    validated = _validate_payload(merged)
+    env_cfg = get_settings()
+    validated = _validate_payload(
+        merged,
+        env_fallback_enabled=env_cfg.thinking_enabled,
+    )
     provider = validated["provider"]
     api_key = provider.get("api_key", _current.api_key)
 

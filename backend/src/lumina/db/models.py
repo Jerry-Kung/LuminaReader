@@ -201,6 +201,35 @@ def delete_messages_of_conversation(conn, conversation_id: str) -> None:
     )
 
 
+def update_assistant_message_at_turn(
+    conn,
+    conversation_id: str,
+    turn_index: int,
+    *,
+    content: str,
+    model: str | None,
+    prompt_tokens: int | None,
+    completion_tokens: int | None,
+    latency_ms: int | None,
+) -> None:
+    conn.execute(
+        """
+        UPDATE messages
+        SET content = ?, model = ?, prompt_tokens = ?, completion_tokens = ?, latency_ms = ?
+        WHERE conversation_id = ? AND turn_index = ? AND role = 'assistant'
+        """,
+        (
+            content,
+            model,
+            prompt_tokens,
+            completion_tokens,
+            latency_ms,
+            conversation_id,
+            turn_index,
+        ),
+    )
+
+
 def update_conversation_last_used(conn, conversation_id: str, ts: int) -> None:
     conn.execute(
         "UPDATE conversations SET last_used_at = ? WHERE id = ?",

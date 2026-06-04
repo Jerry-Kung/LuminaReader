@@ -1,8 +1,15 @@
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 
 from pydantic import BaseModel, Field
 
-from lumina.providers.base import LLMMessage, LLMRequest, LLMResponse, Provider
+from lumina.providers.base import (
+    LLMMessage,
+    LLMRequest,
+    LLMResponse,
+    LLMStreamEvent,
+    Provider,
+)
 from lumina.schemas.selection import ImagePayload, Selection
 
 
@@ -40,3 +47,11 @@ class Task(ABC):
         req = self.build_request(ctx)
         resp = await provider.invoke(req)
         return self.parse_response(resp)
+
+    async def run_stream(
+        self, ctx: TaskContext, provider: Provider
+    ) -> AsyncIterator[LLMStreamEvent]:
+        req = self.build_request(ctx)
+        req = req.model_copy(update={"stream": True})
+        async for event in provider.invoke_stream(req):
+            yield event

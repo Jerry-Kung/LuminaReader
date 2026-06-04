@@ -9,6 +9,7 @@ dist/
 out/
 .vite/
 *.local
+frontend/tsc_log.txt
 
 # Editor / OS
 .DS_Store

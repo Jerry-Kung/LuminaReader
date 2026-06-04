@@ -30,13 +30,6 @@ export interface TranslateMeta {
   };
 }
 
-export interface RunResult {
-  text: string;
-  sessionId: string;
-  turnIndex: number;
-  meta: TranslateMeta;
-}
-
 export interface RunOptions {
   targetLang?: string;
   userQuestion?: string;
@@ -60,24 +53,60 @@ interface ErrorEnvelope {
 
 type Envelope<T> = SuccessEnvelope<T> | ErrorEnvelope;
 
-interface RunData {
-  text: string;
-  session_id: string;
-  conversation_id?: string;
-  meta: TranslateMeta & { turn_index?: number };
-}
-
 export class TranslateApiError extends Error {
   code: string;
   requestId?: string;
   httpStatus?: number;
+  retriable?: boolean;
 
-  constructor(code: string, message: string, requestId?: string, httpStatus?: number) {
+  constructor(
+    code: string,
+    message: string,
+    requestId?: string,
+    httpStatus?: number,
+    retriable?: boolean,
+  ) {
     super(message);
     this.code = code;
     this.requestId = requestId;
     this.httpStatus = httpStatus;
+    this.retriable = retriable;
   }
+}
+
+// =====================================================================
+// V1.1.0 F1：SSE 流式 API（取代 V1.0.x 的 runTask / runFollowUp 一次性 POST）
+// 后端契约见 claude_docs/api-contract.md §4.2.2
+// =====================================================================
+
+export interface StreamMeta {
+  request_id: string;
+  session_id: string;
+  conversation_id: string;
+  task_type: TaskType;
+  turn_index: number;
+  model: string;
+  thinking_enabled: boolean;
+  extract_latency_ms?: number;
+}
+
+export interface StreamUsage {
+  prompt_tokens?: number;
+  completion_tokens?: number;
+  total_tokens?: number;
+}
+
+export interface RunStreamCallbacks {
+  onMeta: (meta: StreamMeta) => void;
+  onTextDelta: (delta: string) => void;
+  onUsage: (usage: StreamUsage) => void;
+  onDone: (final: { latency_ms: number }) => void;
+  // partialTextKept: 后端已把累积文本落库（含 [interrupted] 标记）；前端 partial 气泡可保留
+  onError: (err: TranslateApiError, opts: { partialTextKept: boolean }) => void;
+}
+
+export interface RunStreamHandle {
+  abort: () => void;
 }
 
 const MOCK_TEXTS: Record<TaskType, string> = {
@@ -89,88 +118,291 @@ const MOCK_TEXTS: Record<TaskType, string> = {
 
 const mockTurnCounter: Record<string, number> = {};
 
-function mockRun(
+function mockRunStream(
   taskType: TaskType,
   sessionId: string,
-  userQuestion?: string,
-): Promise<RunResult> {
-  return new Promise((resolve) => {
-    const turnIndex = mockTurnCounter[sessionId] ?? 0;
-    mockTurnCounter[sessionId] = turnIndex + 1;
-    const baseText = turnIndex === 0 ? MOCK_TEXTS[taskType] : '这是模拟的追问回答。';
-    const text = userQuestion ? `（针对你的问题：「${userQuestion}」）\n\n${baseText}` : baseText;
-    setTimeout(
-      () =>
-        resolve({
-          text,
-          sessionId,
-          turnIndex,
-          meta: { model: 'mock', latency_ms: 0, task_type: taskType, turn_index: turnIndex },
-        }),
-      800 + Math.random() * 700,
-    );
-  });
-}
+  userQuestion: string | undefined,
+  isFollowUp: boolean,
+  callbacks: RunStreamCallbacks,
+): RunStreamHandle {
+  let aborted = false;
+  const timers: ReturnType<typeof setTimeout>[] = [];
+  const conversationId = isFollowUp ? sessionId : `mock-${Date.now()}`;
+  const turnIndex = mockTurnCounter[conversationId] ?? 0;
+  mockTurnCounter[conversationId] = turnIndex + 1;
+  const baseText = turnIndex === 0 ? MOCK_TEXTS[taskType] : '这是模拟的追问回答。';
+  const fullText = userQuestion ? `（针对你的问题：「${userQuestion}」）\n\n${baseText}` : baseText;
+  // 切成 5 段模拟流式
+  const chunkSize = Math.max(1, Math.ceil(fullText.length / 5));
+  const chunks: string[] = [];
+  for (let i = 0; i < fullText.length; i += chunkSize) chunks.push(fullText.slice(i, i + chunkSize));
 
-async function postRun(body: Record<string, unknown>): Promise<RunResult> {
-  const url = `${API_BASE}/api/v1/run`;
-
-  let response: Response;
-  try {
-    response = await fetch(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : 'Failed to reach backend.';
-    throw new TranslateApiError('NETWORK_ERROR', msg);
-  }
-
-  let envelope: Envelope<RunData>;
-  try {
-    envelope = await response.json();
-  } catch {
-    throw new TranslateApiError(
-      'INVALID_RESPONSE',
-      `Backend returned non-JSON response (HTTP ${response.status}).`,
-      undefined,
-      response.status,
-    );
-  }
-
-  if (envelope.ok === true) {
-    const data = envelope.data;
-    return {
-      text: data.text,
-      sessionId: data.session_id,
-      turnIndex: data.meta?.turn_index ?? 0,
-      meta: data.meta ?? {},
+  const start = performance.now();
+  timers.push(setTimeout(() => {
+    if (aborted) return;
+    const meta: StreamMeta = {
+      request_id: `mock-req-${Date.now()}`,
+      session_id: conversationId,
+      conversation_id: conversationId,
+      task_type: taskType,
+      turn_index: turnIndex,
+      model: 'mock',
+      thinking_enabled: false,
+      ...(isFollowUp ? {} : { extract_latency_ms: 200 }),
     };
-  }
+    callbacks.onMeta(meta);
+  }, 200));
 
-  const errorBody = envelope.error;
-  throw new TranslateApiError(
-    errorBody?.code || 'INTERNAL_ERROR',
-    errorBody?.message || 'Unknown backend error.',
-    errorBody?.request_id,
-    response.status,
-  );
+  chunks.forEach((c, i) => {
+    timers.push(setTimeout(() => {
+      if (aborted) return;
+      callbacks.onTextDelta(c);
+    }, 350 + i * 60));
+  });
+
+  timers.push(setTimeout(() => {
+    if (aborted) return;
+    callbacks.onUsage({ prompt_tokens: 100, completion_tokens: 50, total_tokens: 150 });
+    callbacks.onDone({ latency_ms: Math.round(performance.now() - start) });
+  }, 350 + chunks.length * 60 + 40));
+
+  return {
+    abort: () => {
+      aborted = true;
+      timers.forEach(clearTimeout);
+    },
+  };
 }
 
-// First turn: image + selection required; backend creates the session.
-// V1.0.3: pdfId required so backend can resolve project context.
-export async function runTask(
+interface SSEParseState {
+  buffer: string;
+  doneSeen: boolean;
+  textChunkCount: number;
+  errorCode?: string;
+}
+
+function parseSSEFrame(rawFrame: string, callbacks: RunStreamCallbacks, state: SSEParseState): void {
+  if (state.doneSeen) return;
+  // 兼容 \r\n
+  const frame = rawFrame.replace(/\r/g, '');
+  if (!frame) return;
+  // 心跳/注释帧
+  if (frame.startsWith(':')) return;
+
+  const lines = frame.split('\n');
+  let event = '';
+  let data = '';
+  for (const line of lines) {
+    if (line.startsWith('event:')) event = line.slice(6).trim();
+    else if (line.startsWith('data:')) data = line.slice(5).trim();
+    // 其他字段（id: / retry:）忽略
+  }
+  if (!event || !data) return;
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(data);
+  } catch {
+    state.doneSeen = true;
+    callbacks.onError(
+      new TranslateApiError('INVALID_RESPONSE', `Malformed SSE frame: ${event}`),
+      { partialTextKept: state.textChunkCount > 0 },
+    );
+    return;
+  }
+  const obj = parsed as Record<string, unknown>;
+
+  switch (event) {
+    case 'meta':
+      callbacks.onMeta(obj as unknown as StreamMeta);
+      break;
+    case 'text_delta': {
+      const delta = typeof obj.delta === 'string' ? obj.delta : '';
+      if (delta) {
+        state.textChunkCount += 1;
+        callbacks.onTextDelta(delta);
+      }
+      break;
+    }
+    case 'usage':
+      callbacks.onUsage(obj as unknown as StreamUsage);
+      break;
+    case 'done':
+      state.doneSeen = true;
+      callbacks.onDone({ latency_ms: typeof obj.latency_ms === 'number' ? obj.latency_ms : 0 });
+      break;
+    case 'error': {
+      state.doneSeen = true;
+      const code = typeof obj.code === 'string' ? obj.code : 'STREAM_INTERRUPTED';
+      const message = typeof obj.message === 'string' ? obj.message : 'Stream interrupted.';
+      const retriable = obj.retriable === true;
+      const partialKept = obj.partial_text_kept === true;
+      state.errorCode = code;
+      const err = new TranslateApiError(code, message, undefined, undefined, retriable);
+      callbacks.onError(err, { partialTextKept: partialKept });
+      break;
+    }
+    default:
+      // 未知事件：忽略
+      break;
+  }
+}
+
+async function consumeSSE(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  callbacks: RunStreamCallbacks,
+): Promise<void> {
+  const decoder = new TextDecoder('utf-8', { fatal: false });
+  const state: SSEParseState = { buffer: '', doneSeen: false, textChunkCount: 0 };
+
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      state.buffer += decoder.decode(value, { stream: true });
+
+      let idx: number;
+      while ((idx = state.buffer.indexOf('\n\n')) !== -1) {
+        const frame = state.buffer.slice(0, idx);
+        state.buffer = state.buffer.slice(idx + 2);
+        parseSSEFrame(frame, callbacks, state);
+        if (state.doneSeen) {
+          // done / error 后丢弃后续 buffer
+          state.buffer = '';
+          return;
+        }
+      }
+    }
+    // 流自然结束：flush decoder + 末尾不完整帧兜底
+    state.buffer += decoder.decode();
+    if (state.buffer.trim() && !state.doneSeen) {
+      parseSSEFrame(state.buffer, callbacks, state);
+    }
+    // 走到这里仍没 done / error：视为流被截断
+    if (!state.doneSeen) {
+      callbacks.onError(
+        new TranslateApiError('STREAM_INTERRUPTED', 'Stream ended without done event.', undefined, undefined, true),
+        { partialTextKept: state.textChunkCount > 0 },
+      );
+    }
+  } catch (err) {
+    if ((err as { name?: string })?.name === 'AbortError') return; // abort 静默
+    if (state.doneSeen) return;
+    const msg = err instanceof Error ? err.message : 'Stream read failed.';
+    callbacks.onError(
+      new TranslateApiError('NETWORK_ERROR', msg, undefined, undefined, true),
+      { partialTextKept: state.textChunkCount > 0 },
+    );
+  }
+}
+
+function startSSEFetch(
+  url: string,
+  body: Record<string, unknown>,
+  callbacks: RunStreamCallbacks,
+): RunStreamHandle {
+  const ac = new AbortController();
+  let finished = false;
+  const wrap: RunStreamCallbacks = {
+    onMeta: (m) => { if (!finished) callbacks.onMeta(m); },
+    onTextDelta: (d) => { if (!finished) callbacks.onTextDelta(d); },
+    onUsage: (u) => { if (!finished) callbacks.onUsage(u); },
+    onDone: (f) => { if (finished) return; finished = true; callbacks.onDone(f); },
+    onError: (e, o) => { if (finished) return; finished = true; callbacks.onError(e, o); },
+  };
+
+  (async () => {
+    let response: Response;
+    try {
+      response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'text/event-stream',
+        },
+        body: JSON.stringify(body),
+        cache: 'no-store',
+        signal: ac.signal,
+      });
+    } catch (err) {
+      if ((err as { name?: string })?.name === 'AbortError') return;
+      const msg = err instanceof Error ? err.message : 'Failed to reach backend.';
+      wrap.onError(new TranslateApiError('NETWORK_ERROR', msg, undefined, undefined, true), {
+        partialTextKept: false,
+      });
+      return;
+    }
+
+    const ct = (response.headers.get('content-type') || '').toLowerCase();
+    const isSSE = response.ok && ct.startsWith('text/event-stream');
+
+    if (!isSSE) {
+      // STREAM_UNSUPPORTED 等 JSON 信封路径
+      let envelope: unknown = null;
+      try {
+        envelope = await response.json();
+      } catch {
+        wrap.onError(
+          new TranslateApiError(
+            'INVALID_RESPONSE',
+            `Backend returned non-JSON response (HTTP ${response.status}).`,
+            undefined,
+            response.status,
+          ),
+          { partialTextKept: false },
+        );
+        return;
+      }
+      const env = envelope as Envelope<unknown>;
+      if (env && env.ok === true) {
+        // 不应到达——options.stream=true 时后端应返 SSE；防御性处理
+        wrap.onError(
+          new TranslateApiError('INVALID_RESPONSE', 'Expected SSE but got JSON success envelope.'),
+          { partialTextKept: false },
+        );
+        return;
+      }
+      const errorBody = env && env.ok === false ? env.error : undefined;
+      wrap.onError(
+        new TranslateApiError(
+          errorBody?.code || 'INTERNAL_ERROR',
+          errorBody?.message || `Request failed (HTTP ${response.status}).`,
+          errorBody?.request_id,
+          response.status,
+          false,
+        ),
+        { partialTextKept: false },
+      );
+      return;
+    }
+
+    if (!response.body) {
+      wrap.onError(
+        new TranslateApiError('INVALID_RESPONSE', 'SSE response missing body.'),
+        { partialTextKept: false },
+      );
+      return;
+    }
+    const reader = response.body.getReader();
+    await consumeSSE(reader, wrap);
+  })();
+
+  return {
+    abort: () => {
+      if (finished) return;
+      finished = true;
+      ac.abort();
+    },
+  };
+}
+
+function buildFirstTurnBody(
   taskType: TaskType,
   selection: TranslateSelection,
   image: TranslateImage,
-  options: RunOptions = {},
-): Promise<RunResult> {
-  if (!API_BASE) {
-    return mockRun(taskType, `mock-${Date.now()}`, options.userQuestion);
-  }
-
-  return postRun({
+  options: RunOptions,
+): Record<string, unknown> {
+  return {
     task_type: taskType,
     session_id: null,
     pdf_id: options.pdfId ?? null,
@@ -192,22 +424,18 @@ export async function runTask(
     options: {
       target_lang: options.targetLang ?? 'zh-CN',
       user_question: options.userQuestion ?? null,
+      stream: true,
     },
-  });
+  };
 }
 
-// Follow-up turn: text-driven only (Scheme D). No image; backend holds extracted_text + history.
-export async function runFollowUp(
+function buildFollowUpBody(
   taskType: TaskType,
   sessionId: string,
   userQuestion: string,
-  options: { targetLang?: string } = {},
-): Promise<RunResult> {
-  if (!API_BASE) {
-    return mockRun(taskType, sessionId, userQuestion);
-  }
-
-  return postRun({
+  options: { targetLang?: string },
+): Record<string, unknown> {
+  return {
     task_type: taskType,
     session_id: sessionId,
     selection: null,
@@ -215,8 +443,37 @@ export async function runFollowUp(
     options: {
       target_lang: options.targetLang ?? 'zh-CN',
       user_question: userQuestion,
+      stream: true,
     },
-  });
+  };
+}
+
+// First turn streaming: image + selection required; backend creates the session.
+export function runTaskStream(
+  taskType: TaskType,
+  selection: TranslateSelection,
+  image: TranslateImage,
+  options: RunOptions,
+  callbacks: RunStreamCallbacks,
+): RunStreamHandle {
+  if (!API_BASE) {
+    return mockRunStream(taskType, '', options.userQuestion, false, callbacks);
+  }
+  return startSSEFetch(`${API_BASE}/api/v1/run`, buildFirstTurnBody(taskType, selection, image, options), callbacks);
+}
+
+// Follow-up streaming: text-driven only (Scheme D).
+export function runFollowUpStream(
+  taskType: TaskType,
+  sessionId: string,
+  userQuestion: string,
+  options: { targetLang?: string },
+  callbacks: RunStreamCallbacks,
+): RunStreamHandle {
+  if (!API_BASE) {
+    return mockRunStream(taskType, sessionId, userQuestion, true, callbacks);
+  }
+  return startSSEFetch(`${API_BASE}/api/v1/run`, buildFollowUpBody(taskType, sessionId, userQuestion, options), callbacks);
 }
 
 // Release a session ("clear conversation"). 204 = deleted, 404 = already gone — both resolve.
@@ -591,9 +848,14 @@ export interface SettingsTaskModels {
   explain: string | null;
 }
 
+export interface SettingsThinking {
+  enabled: boolean;
+}
+
 export interface SettingsSource {
   provider: SettingsProvider;
   task_models: SettingsTaskModels;
+  thinking: SettingsThinking;
   source: 'user_data' | 'env_fallback';
   writable: boolean;
   provider_ready: boolean;
@@ -614,6 +876,7 @@ export interface SettingsUpdateInput {
   default_model: string;
   timeout_seconds: number;
   task_models: SettingsTaskModels;
+  thinking: SettingsThinking;
   api_key: ApiKeyIntent;
 }
 
@@ -635,6 +898,7 @@ export async function getSettings(): Promise<SettingsSource> {
         timeout_seconds: 60,
       },
       task_models: { extract: null, translate: null, explain: null },
+      thinking: { enabled: false },
       source: 'env_fallback',
       writable: false,
       provider_ready: false,
@@ -671,6 +935,9 @@ export async function saveSettings(input: SettingsUpdateInput): Promise<SaveSett
       translate: input.task_models.translate,
       explain: input.task_models.explain,
     },
+    thinking: {
+      enabled: input.thinking.enabled,
+    },
   };
 
   if (!API_BASE) {
@@ -706,6 +973,7 @@ export async function saveSettings(input: SettingsUpdateInput): Promise<SaveSett
           timeout_seconds: input.timeout_seconds,
         },
         task_models: input.task_models,
+        thinking: input.thinking,
         source: 'user_data',
         writable: true,
         provider_ready: input.api_key.kind === 'replace',
@@ -769,12 +1037,14 @@ export type ErrorCategory =
   | 'token_limit'
   | 'provider_unconfigured'
   | 'server_error'
+  | 'interrupted'
   | 'unknown';
 
 /** 把 catch 到的 err 归类到 ErrorCategory，仅用于 UI 文案分支。 */
 export function classifyApiError(err: unknown): ErrorCategory {
   if (err instanceof TranslateApiError) {
     const code = err.code;
+    if (code === 'STREAM_INTERRUPTED') return 'interrupted';
     if (code === 'NETWORK_ERROR') return 'network';
     if (code === 'PROVIDER_ERROR' || code === 'PROVIDER_UNCONFIGURED') return 'provider_unconfigured';
     if (code === 'INVALID_RESPONSE') return 'server_error';
@@ -808,6 +1078,8 @@ export function errorMessageFor(category: ErrorCategory): string {
       return 'AI 服务未就绪：可能是 API Key 未配置 / 已失效，请到「设置」检查。';
     case 'server_error':
       return '后端处理失败，请稍后重试；若持续出现请检查后端日志。';
+    case 'interrupted':
+      return '流式输出中断，可点击重试继续。';
     case 'unknown':
     default:
       return 'AI 调用失败，请重试。';

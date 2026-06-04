@@ -227,7 +227,7 @@ function HistoryItem({
   const config = taskLabelConfig[entry.taskType];
   const placeholder = (entry.summary || '历史对话').slice(0, 60);
   const firstLetter = (entry.summary || '?').trim().charAt(0).toUpperCase() || '？';
-  const hasLoading = entry.messages.some((m) => m.isLoading);
+  const hasLoading = entry.messages.some((m) => m.isLoading || m.isStreaming);
 
   return (
     <div className="rounded-lg border border-stone-200 bg-white overflow-hidden">
@@ -577,7 +577,7 @@ export default function AIAssistantPanel({
                 const config = taskLabelConfig[result.type];
                 const aiMessages = result.messages.filter((m) => m.role === 'ai');
                 const latestAiMessage = aiMessages[aiMessages.length - 1];
-                const hasLoading = result.messages.some((m) => m.isLoading);
+                const hasLoading = result.messages.some((m) => m.isLoading || m.isStreaming);
 
                 return (
                   <div

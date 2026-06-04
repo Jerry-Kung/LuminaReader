@@ -7,7 +7,8 @@ from lumina.main import create_app
 from lumina.projects.manager import auto_create_project
 from lumina.providers import get_provider, reset_provider
 from lumina.sessions import reset_session_store
-from lumina.providers.base import LLMRequest, LLMResponse, Provider
+from lumina.providers.base import LLMRequest, LLMResponse, LLMStreamEvent, Provider
+from lumina.providers.errors import StreamUnsupportedError
 
 PDF_BYTES = b"%PDF-1.4 test fixture"
 
@@ -20,6 +21,10 @@ class FakeProvider(Provider):
 
     async def invoke(self, req: LLMRequest) -> LLMResponse:
         raise NotImplementedError
+
+    async def invoke_stream(self, req: LLMRequest):
+        raise StreamUnsupportedError("streaming not supported in fake provider")
+        yield LLMStreamEvent(type="done")  # pragma: no cover
 
     async def health_check(self) -> bool:
         return self._ready

@@ -221,6 +221,73 @@ def test_atomic_write_windows_no_throw_on_acl_fail(patched_env, caplog) -> None:
     assert any("ACL" in r.message for r in caplog.records)
 
 
+def test_bootstrap_thinking_default_false(patched_env) -> None:
+    resolved = settings_store.bootstrap()
+    assert resolved.thinking.enabled is False
+
+
+def test_bootstrap_thinking_env_fallback(patched_env, monkeypatch) -> None:
+    cfg = _env_settings(thinking_enabled=True)
+    monkeypatch.setattr("lumina.settings_store.get_settings", lambda: cfg)
+    resolved = settings_store.bootstrap()
+    assert resolved.thinking.enabled is True
+
+
+def test_bootstrap_file_missing_thinking_uses_env(patched_env, tmp_path, monkeypatch) -> None:
+    cfg = _env_settings(thinking_enabled=True)
+    monkeypatch.setattr("lumina.settings_store.get_settings", lambda: cfg)
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps(_valid_disk_doc()), encoding="utf-8")
+    resolved = settings_store.bootstrap()
+    assert resolved.thinking.enabled is True
+
+
+def test_apply_update_persists_thinking(patched_env, tmp_path) -> None:
+    settings_store.bootstrap()
+    init_provider(patched_env)
+    payload = _valid_update_payload(thinking={"enabled": True})
+    settings_store.apply_update(payload)
+    saved = json.loads((tmp_path / "settings.json").read_text(encoding="utf-8"))
+    assert saved["thinking"] == {"enabled": True}
+    assert settings_store.get_current().thinking.enabled is True
+
+
+def test_apply_update_without_thinking_preserves(patched_env) -> None:
+    settings_store.bootstrap()
+    init_provider(patched_env)
+    settings_store.apply_update(_valid_update_payload(thinking={"enabled": True}))
+    settings_store.apply_update(_valid_update_payload())
+    assert settings_store.get_current().thinking.enabled is True
+
+
+def test_apply_update_thinking_enabled_type_error(patched_env) -> None:
+    settings_store.bootstrap()
+    payload = _valid_update_payload(thinking={"enabled": "yes"})
+    with pytest.raises(settings_store.InvalidSettingsError) as exc_info:
+        settings_store.apply_update(payload)
+    paths = [e["path"] for e in exc_info.value.field_errors]
+    assert "thinking.enabled" in paths
+
+
+def test_apply_update_thinking_unknown_field(patched_env) -> None:
+    settings_store.bootstrap()
+    payload = _valid_update_payload(thinking={"enabled": True, "budget": 1000})
+    with pytest.raises(settings_store.InvalidSettingsError) as exc_info:
+        settings_store.apply_update(payload)
+    paths = [e["path"] for e in exc_info.value.field_errors]
+    assert "thinking.budget" in paths
+
+
+def test_apply_update_unknown_top_level_key(patched_env) -> None:
+    settings_store.bootstrap()
+    payload = _valid_update_payload()
+    payload["extra_section"] = {}
+    with pytest.raises(settings_store.InvalidSettingsError) as exc_info:
+        settings_store.apply_update(payload)
+    paths = [e["path"] for e in exc_info.value.field_errors]
+    assert "extra_section" in paths
+
+
 def test_rebuild_provider_replaces_singleton(patched_env) -> None:
     settings_store.bootstrap()
     init_provider(patched_env)

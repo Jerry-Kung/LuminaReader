@@ -27,6 +27,7 @@ class Settings(BaseSettings):
     lumina_data_root: str = ""
     lumina_sqlite_busy_timeout_ms: int = 5000
     lumina_pdf_max_size_mb: int = 100
+    thinking_enabled: bool = False
 
     @property
     def cors_origins_list(self) -> list[str]:

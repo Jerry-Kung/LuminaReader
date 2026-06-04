@@ -59,6 +59,14 @@ def settings_client(settings_env) -> TestClient:
     close_all()
 
 
+def test_get_fallback_includes_thinking_disabled(
+    settings_client: TestClient, settings_env: Settings
+) -> None:
+    response = settings_client.get("/api/v1/settings")
+    assert response.status_code == 200
+    assert response.json()["data"]["thinking"]["enabled"] is False
+
+
 def test_get_fallback(settings_client: TestClient, settings_env: Settings) -> None:
     response = settings_client.get("/api/v1/settings")
     assert response.status_code == 200
@@ -76,6 +84,23 @@ def test_get_user_data(settings_client: TestClient, data_root) -> None:
     body = response.json()
     assert body["data"]["source"] == "user_data"
     assert body["data"]["provider"]["default_model"] == "gpt-4o-mini"
+
+
+def test_put_thinking_enabled(settings_client: TestClient) -> None:
+    payload = _settings_payload(thinking={"enabled": True})
+    response = settings_client.put("/api/v1/settings", json=payload)
+    assert response.status_code == 200
+    assert response.json()["data"]["thinking"]["enabled"] is True
+    get_resp = settings_client.get("/api/v1/settings")
+    assert get_resp.json()["data"]["thinking"]["enabled"] is True
+
+
+def test_put_thinking_unknown_field(settings_client: TestClient) -> None:
+    payload = _settings_payload(thinking={"enabled": True, "budget": 1000})
+    response = settings_client.put("/api/v1/settings", json=payload)
+    assert response.status_code == 422
+    paths = [e["path"] for e in response.json()["error"]["field_errors"]]
+    assert "thinking.budget" in paths
 
 
 def test_put_valid_updates_state(settings_client: TestClient) -> None:

@@ -257,6 +257,67 @@ async def test_invoke_ignores_none_extras() -> None:
     assert result.model == "gpt-4o"
 
 
+@pytest.mark.asyncio
+async def test_invoke_thinking_default_false_no_extra_body() -> None:
+    create = AsyncMock(return_value=_mock_completion())
+    provider = _make_provider(create_mock=create)
+    result = await provider.invoke(_sample_request())
+    kwargs = create.await_args.kwargs
+    assert "extra_body" not in kwargs
+    assert result.thinking_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_invoke_thinking_qwen_base_url_enables_extra_body() -> None:
+    create = AsyncMock(return_value=_mock_completion())
+    provider = OpenAICompatProvider(
+        api_key="sk-test-not-real",
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        model="qwen-max",
+        timeout_seconds=60,
+        client=MagicMock(chat=MagicMock(completions=MagicMock(create=create))),
+    )
+    req = _sample_request()
+    req.thinking = True
+    result = await provider.invoke(req)
+    kwargs = create.await_args.kwargs
+    assert kwargs["extra_body"] == {"enable_thinking": True}
+    assert result.thinking_enabled is True
+
+
+@pytest.mark.asyncio
+async def test_invoke_thinking_non_qwen_silent_fallback() -> None:
+    create = AsyncMock(return_value=_mock_completion())
+    provider = _make_provider(create_mock=create)
+    req = _sample_request()
+    req.thinking = True
+    result = await provider.invoke(req)
+    kwargs = create.await_args.kwargs
+    assert "extra_body" not in kwargs
+    assert result.thinking_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_invoke_thinking_coexists_with_model_override_extras() -> None:
+    create = AsyncMock(return_value=_mock_completion(model="custom-model"))
+    provider = OpenAICompatProvider(
+        api_key="sk-test-not-real",
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        model="qwen-max",
+        timeout_seconds=60,
+        client=MagicMock(chat=MagicMock(completions=MagicMock(create=create))),
+    )
+    req = _sample_request()
+    req.thinking = True
+    req.extras = {"model_override": "custom-model"}
+    result = await provider.invoke(req)
+    kwargs = create.await_args.kwargs
+    assert kwargs["model"] == "custom-model"
+    assert kwargs["extra_body"] == {"enable_thinking": True}
+    assert result.thinking_enabled is True
+    assert result.model == "custom-model"
+
+
 def test_build_provider_from_config() -> None:
     cfg = Settings(
         openai_api_key="sk-test-not-real",

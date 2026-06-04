@@ -8,15 +8,19 @@ from lumina.config import Settings, get_settings
 from lumina.db.engine import close_all
 from lumina.main import create_app
 from lumina.projects.manager import auto_create_project
+from lumina import settings_store
 from lumina.providers import get_provider, reset_provider
 from lumina.providers.base import (
     LLMRequest,
     LLMResponse,
+    LLMStreamEvent,
     LLMUsage,
     Provider,
     ProviderAuthError,
     ProviderTimeout,
 )
+from lumina.providers.errors import StreamUnsupportedError
+from lumina.providers.openai_compat import _is_qwen_base_url
 from lumina.sessions import get_session_store, reset_session_store
 
 MINIMAL_PNG_B64 = (
@@ -79,11 +83,23 @@ class MockRunProvider(Provider):
         model = "gpt-4o"
         if req.extras and req.extras.get("model_override"):
             model = str(req.extras["model_override"])
+        thinking_active = False
+        if req.thinking:
+            try:
+                base_url = settings_store.get_current().base_url
+                thinking_active = _is_qwen_base_url(base_url)
+            except RuntimeError:
+                thinking_active = False
         return LLMResponse(
             text=self.response_text,
             model=model,
             usage=LLMUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
+            thinking_enabled=thinking_active,
         )
+
+    async def invoke_stream(self, req: LLMRequest):
+        raise StreamUnsupportedError("streaming not supported in mock run provider")
+        yield LLMStreamEvent(type="done")  # pragma: no cover
 
     async def health_check(self) -> bool:
         return True
@@ -105,6 +121,8 @@ def run_client(data_root, default_pdf_id) -> TestClient:
         openai_model="gpt-4o",
     )
     get_settings.cache_clear()
+    settings_store._reset_state()
+    settings_store.bootstrap()
     reset_provider()
     reset_session_store()
     app = create_app(settings)
@@ -115,6 +133,7 @@ def run_client(data_root, default_pdf_id) -> TestClient:
         yield client
     app.dependency_overrides.clear()
     get_settings.cache_clear()
+    settings_store._reset_state()
     close_all()
     reset_provider()
     reset_session_store()
@@ -467,11 +486,17 @@ def test_first_turn_thumbnail_none_on_failure_does_not_block(
     assert row[0] is None
 
 
-def _put_settings(run_client: TestClient, **task_overrides: str | None) -> None:
+def _put_settings(
+    run_client: TestClient,
+    *,
+    base_url: str = "https://api.openai.com/v1",
+    thinking_enabled: bool | None = None,
+    **task_overrides: str | None,
+) -> None:
     payload = {
         "provider": {
             "kind": "openai_compat",
-            "base_url": "https://api.openai.com/v1",
+            "base_url": base_url,
             "api_key": "sk-fake-test1234",
             "default_model": "gpt-4o",
             "timeout_seconds": 60,
@@ -483,8 +508,85 @@ def _put_settings(run_client: TestClient, **task_overrides: str | None) -> None:
             **task_overrides,
         },
     }
+    if thinking_enabled is not None:
+        payload["thinking"] = {"enabled": thinking_enabled}
     response = run_client.put("/api/v1/settings", json=payload)
     assert response.status_code == 200
+
+
+def test_run_thinking_disabled_meta_false(run_client: TestClient) -> None:
+    response = run_client.post("/api/v1/run", json=run_payload(run_client))
+    assert response.status_code == 200
+    assert response.json()["data"]["meta"]["thinking_enabled"] is False
+
+
+def test_run_thinking_enabled_qwen_meta_true(run_client: TestClient) -> None:
+    _put_settings(
+        run_client,
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        thinking_enabled=True,
+    )
+    response = run_client.post("/api/v1/run", json=run_payload(run_client))
+    assert response.status_code == 200
+    assert response.json()["data"]["meta"]["thinking_enabled"] is True
+
+
+def test_run_thinking_enabled_non_qwen_meta_false(run_client: TestClient) -> None:
+    _put_settings(run_client, thinking_enabled=True)
+    response = run_client.post("/api/v1/run", json=run_payload(run_client))
+    assert response.status_code == 200
+    assert response.json()["data"]["meta"]["thinking_enabled"] is False
+
+
+def test_run_extract_forces_thinking_false(run_client: TestClient) -> None:
+    _put_settings(
+        run_client,
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        thinking_enabled=True,
+    )
+    provider = MockRunProvider()
+    run_client.app.dependency_overrides[get_provider] = lambda: provider
+    response = run_client.post("/api/v1/run", json=run_payload(run_client))
+    assert response.status_code == 200
+    assert provider.all_requests[0].thinking is False
+    assert provider.all_requests[1].thinking is True
+
+
+def test_run_follow_up_injects_thinking(run_client: TestClient) -> None:
+    _put_settings(
+        run_client,
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        thinking_enabled=True,
+    )
+    provider = MockRunProvider()
+    run_client.app.dependency_overrides[get_provider] = lambda: provider
+    first = run_client.post("/api/v1/run", json=run_payload(run_client))
+    session_id = first.json()["data"]["session_id"]
+    provider.all_requests.clear()
+    second = run_client.post("/api/v1/run", json=follow_up_payload(session_id))
+    assert second.status_code == 200
+    assert len(provider.all_requests) == 1
+    assert provider.all_requests[0].thinking is True
+
+
+def test_run_log_includes_thinking_enabled(
+    run_client: TestClient,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    _put_settings(
+        run_client,
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        thinking_enabled=True,
+    )
+    caplog.set_level(logging.INFO, logger="lumina.run")
+    response = run_client.post("/api/v1/run", json=run_payload(run_client))
+    assert response.status_code == 200
+    run_logs = [
+        getattr(record, "extra_fields", {})
+        for record in caplog.records
+        if record.message == "run call completed"
+    ]
+    assert run_logs[-1]["thinking_enabled"] is True
 
 
 def test_run_translate_uses_task_model_override(run_client: TestClient) -> None:

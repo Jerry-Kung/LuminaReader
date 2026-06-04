@@ -96,6 +96,32 @@ async def test_get_missing_returns_none() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.asyncio
+async def test_append_turn_interrupted_marks_content_and_null_completion() -> None:
+    store = SessionStore()
+    session = await _create_session(store)
+    user_msg = LLMMessage(role="user", content=[TextPart(text="q1")])
+    ai_msg = LLMMessage(role="assistant", content=[TextPart(text="hello")])
+
+    await store.append_turn(
+        session.session_id,
+        user_message=user_msg,
+        assistant_message=ai_msg,
+        turn_index=1,
+        interrupted=True,
+    )
+
+    from lumina.db.engine import get_connection
+    from lumina.db.models import list_messages
+
+    conn = get_connection(session.project_id)
+    rows = list_messages(conn, session.session_id)
+    assistant = [r for r in rows if r.role == "assistant" and r.turn_index == 1][0]
+    assert assistant.content.endswith("[interrupted]")
+    assert assistant.completion_tokens is None
+
+
+@pytest.mark.asyncio
 async def test_append_turn_adds_two_messages() -> None:
     store = SessionStore()
     session = await _create_session(store)

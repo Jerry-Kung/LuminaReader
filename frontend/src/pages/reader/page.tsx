@@ -3,8 +3,8 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { usePDF } from '@/hooks/usePDF';
 import { usePdfReadingPosition } from '@/hooks/usePdfReadingPosition';
 import {
-  runTask,
-  runFollowUp,
+  runTaskStream,
+  runFollowUpStream,
   clearSession,
   fetchLibrary,
   getPdfRawUrl,
@@ -16,6 +16,9 @@ import {
   type TaskType,
   type ErrorCategory,
   type ConversationSummary,
+  type RunStreamHandle,
+  type RunStreamCallbacks,
+  type StreamMeta,
 } from '@/services/api';
 import Toolbar from './components/Toolbar';
 import PDFViewer from './components/PDFViewer';
@@ -51,6 +54,7 @@ export interface Message {
   text: string;
   timestamp: number;
   isLoading?: boolean;
+  isStreaming?: boolean;
   isError?: boolean;
   errorText?: string;
   errorCategory?: ErrorCategory;
@@ -104,8 +108,10 @@ function errorMessageFrom(err: unknown): { category: ErrorCategory; display: str
   return { category, display: errorMessageFor(category) };
 }
 
-function buildErrorMessage(messageId: number, err: unknown, retry: RetryPayload): Message {
+function buildErrorMessage(messageId: number, err: unknown, retry?: RetryPayload): Message {
   const { category, display } = errorMessageFrom(err);
+  // STREAM 错误帧 retriable=false 时，不塞 retry，UI 不展示重试按钮
+  const allowRetry = !(err instanceof TranslateApiError) || err.retriable !== false;
   return {
     id: messageId,
     role: 'ai',
@@ -114,7 +120,7 @@ function buildErrorMessage(messageId: number, err: unknown, retry: RetryPayload)
     isError: true,
     errorCategory: category,
     errorText: display,
-    retry,
+    retry: allowRetry ? retry : undefined,
   };
 }
 
@@ -131,6 +137,51 @@ function loadingMessage(messageId: number): Message {
 let msgSeq = 1;
 function nextMsgId(): number {
   return Date.now() * 1000 + (msgSeq++ % 1000);
+}
+
+interface TextDeltaCommitter {
+  push: (delta: string) => void;
+  flushNow: () => void;
+  reset: () => void;
+}
+
+function createTextDeltaCommitter(
+  flushFn: (appended: string) => void,
+  intervalMs = 50,
+): TextDeltaCommitter {
+  let buf = '';
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  const flush = () => {
+    if (!buf) return;
+    const payload = buf;
+    buf = '';
+    flushFn(payload);
+  };
+  return {
+    push(delta: string) {
+      buf += delta;
+      if (timer === null) {
+        timer = setTimeout(() => {
+          timer = null;
+          flush();
+        }, intervalMs);
+      }
+    },
+    flushNow() {
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      flush();
+    },
+    reset() {
+      if (timer !== null) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      buf = '';
+    },
+  };
 }
 
 function summaryFromConversation(c: ConversationSummary): string {
@@ -192,6 +243,19 @@ export default function ReaderPage() {
   );
   const thumbUserOverrideRef = useRef<boolean>(false);
   const retryInFlightRef = useRef(false);
+  // V1.1.0 F1: 流式 in-flight handles。卡内 stream key=cardId；history follow-up key=conversationId。
+  const cardStreamsRef = useRef<Map<number, RunStreamHandle>>(new Map());
+  const historyStreamsRef = useRef<Map<string, RunStreamHandle>>(new Map());
+
+  // Unmount cleanup: abort 所有 in-flight 流，避免回调对已卸载组件 setState。
+  useEffect(() => {
+    return () => {
+      cardStreamsRef.current.forEach((h) => h.abort());
+      cardStreamsRef.current.clear();
+      historyStreamsRef.current.forEach((h) => h.abort());
+      historyStreamsRef.current.clear();
+    };
+  }, []);
 
   useEffect(() => {
     const handler = () => {
@@ -256,6 +320,15 @@ export default function ReaderPage() {
     }
     setRestoreAppliedForPdfId(pdfId);
   }, [pdfId, numPages, pendingRestorePage, restoreAppliedForPdfId, goToPage]);
+
+  // pdfId 切换：abort 所有 in-flight 流（避免回调对已重置的 aiResults/history 写入）。
+  // 注意：保留 effect 顺序——必须在依赖 pdfId 的其他 setAiResults/setHistory effect 之前。
+  useEffect(() => {
+    cardStreamsRef.current.forEach((h) => h.abort());
+    cardStreamsRef.current.clear();
+    historyStreamsRef.current.forEach((h) => h.abort());
+    historyStreamsRef.current.clear();
+  }, [pdfId]);
 
   // Load history conversations for this PDF.
   useEffect(() => {
@@ -393,66 +466,53 @@ export default function ReaderPage() {
       const cardId = nextMsgId();
       const loadingId = nextMsgId();
       const trimmedInput = inputText?.trim();
-      let capture: CaptureResult | null = null;
 
+      let capture: CaptureResult;
       try {
-        capture = await captureImage();
-        if (!capture) throw new Error('Failed to capture image');
-
-        const initialMessages: Message[] = [];
-        if (trimmedInput) {
-          initialMessages.push({
-            id: nextMsgId(),
-            role: 'user',
-            text: trimmedInput,
-            timestamp: Date.now(),
-          });
-        }
-        initialMessages.push({
-          id: loadingId,
-          role: 'ai',
-          text: '',
-          timestamp: Date.now(),
-          isLoading: true,
-        });
-
-        setAiResults((prev) => [
-          ...prev.map((r) => (r.collapsed ? r : { ...r, collapsed: true })),
-          {
-            id: cardId,
-            type: taskType,
-            sessionId: '',
-            imageBase64: capture.dataUrl,
-            messages: initialMessages,
-            timestamp: Date.now(),
-            collapsed: false,
-          },
-        ]);
-
-        const result = await runTask(taskType, capture.selection, {
-          data: capture.base64,
-          width: capture.width,
-          height: capture.height,
-        }, { targetLang: 'zh-CN', userQuestion: trimmedInput, pdfId });
-
-        setAiResults((prev) => {
-          const idx = prev.findIndex((r) => r.id === cardId);
-          if (idx === -1) return prev;
-          const updated = [...prev];
-          const filtered = updated[idx].messages.filter((m) => m.id !== loadingId);
-          updated[idx] = {
-            ...updated[idx],
-            sessionId: result.sessionId,
-            messages: [
-              ...filtered,
-              { id: nextMsgId(), role: 'ai', text: result.text, timestamp: Date.now() },
-            ],
-          };
-          return updated;
-        });
-      } catch (err: unknown) {
+        const captured = await captureImage();
+        if (!captured) throw new Error('Failed to capture image');
+        capture = captured;
+      } catch (err) {
         const { display } = errorMessageFrom(err);
         setAiError(display);
+        setIsAIWorking(false);
+        return;
+      }
+
+      const initialMessages: Message[] = [];
+      if (trimmedInput) {
+        initialMessages.push({
+          id: nextMsgId(),
+          role: 'user',
+          text: trimmedInput,
+          timestamp: Date.now(),
+        });
+      }
+      initialMessages.push(loadingMessage(loadingId));
+
+      setAiResults((prev) => [
+        ...prev.map((r) => (r.collapsed ? r : { ...r, collapsed: true })),
+        {
+          id: cardId,
+          type: taskType,
+          sessionId: '',
+          imageBase64: capture.dataUrl,
+          messages: initialMessages,
+          timestamp: Date.now(),
+          collapsed: false,
+        },
+      ]);
+
+      const retryPayload: RetryPayload = {
+        kind: 'first_turn',
+        cardId,
+        taskType,
+        capture,
+        userQuestion: trimmedInput,
+        pdfId,
+      };
+
+      const committer = createTextDeltaCommitter((appended) => {
         setAiResults((prev) => {
           const idx = prev.findIndex((r) => r.id === cardId);
           if (idx === -1) return prev;
@@ -460,23 +520,110 @@ export default function ReaderPage() {
           updated[idx] = {
             ...updated[idx],
             messages: updated[idx].messages.map((m) =>
-              m.id === loadingId && capture
-                ? buildErrorMessage(loadingId, err, {
-                    kind: 'first_turn',
-                    cardId,
-                    taskType,
-                    capture,
-                    userQuestion: trimmedInput,
-                    pdfId,
-                  })
+              m.id === loadingId
+                ? { ...m, text: (m.text || '') + appended, isLoading: false, isStreaming: true }
                 : m,
             ),
           };
           return updated;
         });
-      } finally {
+      });
+
+      const finalize = () => {
+        committer.reset();
+        cardStreamsRef.current.delete(cardId);
         setIsAIWorking(false);
-      }
+      };
+
+      const callbacks: RunStreamCallbacks = {
+        onMeta: (meta: StreamMeta) => {
+          setAiResults((prev) => {
+            const idx = prev.findIndex((r) => r.id === cardId);
+            if (idx === -1) return prev;
+            const updated = [...prev];
+            updated[idx] = {
+              ...updated[idx],
+              sessionId: meta.session_id,
+              messages: updated[idx].messages.map((m) =>
+                m.id === loadingId
+                  ? { ...m, isLoading: false, isStreaming: true }
+                  : m,
+              ),
+            };
+            return updated;
+          });
+        },
+        onTextDelta: (delta) => committer.push(delta),
+        onUsage: () => { /* 本任务不在 UI 持久化 usage；后端落 DB 即可 */ },
+        onDone: () => {
+          committer.flushNow();
+          setAiResults((prev) => {
+            const idx = prev.findIndex((r) => r.id === cardId);
+            if (idx === -1) return prev;
+            const updated = [...prev];
+            updated[idx] = {
+              ...updated[idx],
+              messages: updated[idx].messages.map((m) =>
+                m.id === loadingId ? { ...m, isStreaming: false } : m,
+              ),
+            };
+            return updated;
+          });
+          finalize();
+        },
+        onError: (err, { partialTextKept }) => {
+          committer.flushNow();
+          const { display } = errorMessageFrom(err);
+          setAiError(display);
+          setAiResults((prev) => {
+            const idx = prev.findIndex((r) => r.id === cardId);
+            if (idx === -1) return prev;
+            const updated = [...prev];
+            const messages = updated[idx].messages;
+            const loadingIdx = messages.findIndex((m) => m.id === loadingId);
+            if (loadingIdx === -1) return prev;
+            const loadingMsg = messages[loadingIdx];
+            const hasPartial = partialTextKept && (loadingMsg.text || '').length > 0;
+            if (hasPartial) {
+              // 把流式气泡定型为正常 ai 文本（保留 partial），后面追加独立 error 气泡
+              const finalized: Message = {
+                ...loadingMsg,
+                isLoading: false,
+                isStreaming: false,
+              };
+              const errorMsg = buildErrorMessage(nextMsgId(), err, retryPayload);
+              updated[idx] = {
+                ...updated[idx],
+                messages: [
+                  ...messages.slice(0, loadingIdx),
+                  finalized,
+                  errorMsg,
+                  ...messages.slice(loadingIdx + 1),
+                ],
+              };
+            } else {
+              // 复用 loadingId 转 error
+              updated[idx] = {
+                ...updated[idx],
+                messages: messages.map((m) =>
+                  m.id === loadingId ? buildErrorMessage(loadingId, err, retryPayload) : m,
+                ),
+              };
+            }
+            return updated;
+          });
+          finalize();
+        },
+      };
+
+      const handle = runTaskStream(
+        taskType,
+        capture.selection,
+        { data: capture.base64, width: capture.width, height: capture.height },
+        { targetLang: 'zh-CN', userQuestion: trimmedInput, pdfId },
+        callbacks,
+      );
+      cardStreamsRef.current.set(cardId, handle);
     },
     [selectedArea, pdfDoc, captureImage, pdfId],
   );
@@ -490,6 +637,8 @@ export default function ReaderPage() {
       if (!card || !card.sessionId) return;
 
       const loadingId = nextMsgId();
+      const sessionId = card.sessionId;
+      const taskType = card.type;
 
       setAiResults((prev) => {
         const idx = prev.findIndex((r) => r.id === cardId);
@@ -500,31 +649,21 @@ export default function ReaderPage() {
           messages: [
             ...updated[idx].messages,
             { id: nextMsgId(), role: 'user', text: trimmed, timestamp: Date.now() },
-            { id: loadingId, role: 'ai', text: '', timestamp: Date.now(), isLoading: true },
+            loadingMessage(loadingId),
           ],
         };
         return updated;
       });
 
-      try {
-        const result = await runFollowUp(card.type, card.sessionId, trimmed, { targetLang: 'zh-CN' });
+      const retryPayload: RetryPayload = {
+        kind: 'follow_up',
+        cardId,
+        taskType,
+        sessionId,
+        userQuestion: trimmed,
+      };
 
-        setAiResults((prev) => {
-          const idx = prev.findIndex((r) => r.id === cardId);
-          if (idx === -1) return prev;
-          const updated = [...prev];
-          const filtered = updated[idx].messages.filter((m) => m.id !== loadingId);
-          updated[idx] = {
-            ...updated[idx],
-            messages: [
-              ...filtered,
-              { id: nextMsgId(), role: 'ai', text: result.text, timestamp: Date.now() },
-            ],
-          };
-          return updated;
-        });
-      } catch (err: unknown) {
-        const { display } = errorMessageFrom(err);
+      const committer = createTextDeltaCommitter((appended) => {
         setAiResults((prev) => {
           const idx = prev.findIndex((r) => r.id === cardId);
           if (idx === -1) return prev;
@@ -533,25 +672,106 @@ export default function ReaderPage() {
             ...updated[idx],
             messages: updated[idx].messages.map((m) =>
               m.id === loadingId
-                ? buildErrorMessage(loadingId, err, {
-                    kind: 'follow_up',
-                    cardId,
-                    taskType: card.type,
-                    sessionId: card.sessionId,
-                    userQuestion: trimmed,
-                  })
+                ? { ...m, text: (m.text || '') + appended, isLoading: false, isStreaming: true }
                 : m,
             ),
           };
           return updated;
         });
-      }
+      });
+
+      const finalize = () => {
+        committer.reset();
+        cardStreamsRef.current.delete(cardId);
+      };
+
+      const callbacks: RunStreamCallbacks = {
+        onMeta: () => {
+          setAiResults((prev) => {
+            const idx = prev.findIndex((r) => r.id === cardId);
+            if (idx === -1) return prev;
+            const updated = [...prev];
+            updated[idx] = {
+              ...updated[idx],
+              messages: updated[idx].messages.map((m) =>
+                m.id === loadingId
+                  ? { ...m, isLoading: false, isStreaming: true }
+                  : m,
+              ),
+            };
+            return updated;
+          });
+        },
+        onTextDelta: (delta) => committer.push(delta),
+        onUsage: () => {},
+        onDone: () => {
+          committer.flushNow();
+          setAiResults((prev) => {
+            const idx = prev.findIndex((r) => r.id === cardId);
+            if (idx === -1) return prev;
+            const updated = [...prev];
+            updated[idx] = {
+              ...updated[idx],
+              messages: updated[idx].messages.map((m) =>
+                m.id === loadingId ? { ...m, isStreaming: false } : m,
+              ),
+            };
+            return updated;
+          });
+          finalize();
+        },
+        onError: (err, { partialTextKept }) => {
+          committer.flushNow();
+          setAiResults((prev) => {
+            const idx = prev.findIndex((r) => r.id === cardId);
+            if (idx === -1) return prev;
+            const updated = [...prev];
+            const messages = updated[idx].messages;
+            const loadingIdx = messages.findIndex((m) => m.id === loadingId);
+            if (loadingIdx === -1) return prev;
+            const loadingMsg = messages[loadingIdx];
+            const hasPartial = partialTextKept && (loadingMsg.text || '').length > 0;
+            if (hasPartial) {
+              const finalized: Message = { ...loadingMsg, isLoading: false, isStreaming: false };
+              const errorMsg = buildErrorMessage(nextMsgId(), err, retryPayload);
+              updated[idx] = {
+                ...updated[idx],
+                messages: [
+                  ...messages.slice(0, loadingIdx),
+                  finalized,
+                  errorMsg,
+                  ...messages.slice(loadingIdx + 1),
+                ],
+              };
+            } else {
+              updated[idx] = {
+                ...updated[idx],
+                messages: messages.map((m) =>
+                  m.id === loadingId ? buildErrorMessage(loadingId, err, retryPayload) : m,
+                ),
+              };
+            }
+            return updated;
+          });
+          finalize();
+        },
+      };
+
+      const handle = runFollowUpStream(taskType, sessionId, trimmed, { targetLang: 'zh-CN' }, callbacks);
+      cardStreamsRef.current.set(cardId, handle);
     },
     [aiResults],
   );
 
   const handleClearCard = useCallback(
     async (cardId: number) => {
+      // 先 abort in-flight 流（如果正在流），避免回调对已删除卡片 setState
+      const inflight = cardStreamsRef.current.get(cardId);
+      if (inflight) {
+        inflight.abort();
+        cardStreamsRef.current.delete(cardId);
+        setIsAIWorking(false);
+      }
       const card = aiResults.find((r) => r.id === cardId);
       if (card?.sessionId) {
         try {
@@ -631,6 +851,12 @@ export default function ReaderPage() {
       const label = entry?.summary?.trim() ? entry.summary.slice(0, 40) : '该历史对话';
       const ok = window.confirm(`确定删除「${label}」？此操作不可撤销。`);
       if (!ok) return;
+      // 若该历史正在流式追问，先 abort
+      const inflight = historyStreamsRef.current.get(conversationId);
+      if (inflight) {
+        inflight.abort();
+        historyStreamsRef.current.delete(conversationId);
+      }
       try {
         await clearSession(conversationId);
       } catch {
@@ -643,7 +869,7 @@ export default function ReaderPage() {
     [history],
   );
 
-  // Continue a history conversation: append user/loading turns locally, then runFollowUp(conversation_id).
+  // Continue a history conversation: append user/loading turns locally, then stream follow-up.
   const handleHistoryFollowUp = useCallback(
     async (conversationId: string, text: string) => {
       const trimmed = text.trim();
@@ -652,6 +878,7 @@ export default function ReaderPage() {
       if (!entry) return;
 
       const loadingId = nextMsgId();
+      const taskType = entry.taskType;
 
       setHistory((prev) =>
         prev.map((h) =>
@@ -661,31 +888,21 @@ export default function ReaderPage() {
                 messages: [
                   ...h.messages,
                   { id: nextMsgId(), role: 'user', text: trimmed, timestamp: Date.now() },
-                  { id: loadingId, role: 'ai', text: '', timestamp: Date.now(), isLoading: true },
+                  loadingMessage(loadingId),
                 ],
               }
             : h,
         ),
       );
 
-      try {
-        const result = await runFollowUp(entry.taskType, conversationId, trimmed, { targetLang: 'zh-CN' });
-        setHistory((prev) =>
-          prev.map((h) => {
-            if (h.conversationId !== conversationId) return h;
-            const filtered = h.messages.filter((m) => m.id !== loadingId);
-            return {
-              ...h,
-              lastUsedAt: Math.floor(Date.now() / 1000),
-              messages: [
-                ...filtered,
-                { id: nextMsgId(), role: 'ai', text: result.text, timestamp: Date.now() },
-              ],
-            };
-          }),
-        );
-      } catch (err) {
-        const { display } = errorMessageFrom(err);
+      const retryPayload: RetryPayload = {
+        kind: 'history_follow_up',
+        conversationId,
+        taskType,
+        userQuestion: trimmed,
+      };
+
+      const committer = createTextDeltaCommitter((appended) => {
         setHistory((prev) =>
           prev.map((h) => {
             if (h.conversationId !== conversationId) return h;
@@ -693,18 +910,89 @@ export default function ReaderPage() {
               ...h,
               messages: h.messages.map((m) =>
                 m.id === loadingId
-                  ? buildErrorMessage(loadingId, err, {
-                      kind: 'history_follow_up',
-                      conversationId,
-                      taskType: entry.taskType,
-                      userQuestion: trimmed,
-                    })
+                  ? { ...m, text: (m.text || '') + appended, isLoading: false, isStreaming: true }
                   : m,
               ),
             };
           }),
         );
-      }
+      });
+
+      const finalize = () => {
+        committer.reset();
+        historyStreamsRef.current.delete(conversationId);
+      };
+
+      const callbacks: RunStreamCallbacks = {
+        onMeta: () => {
+          setHistory((prev) =>
+            prev.map((h) => {
+              if (h.conversationId !== conversationId) return h;
+              return {
+                ...h,
+                messages: h.messages.map((m) =>
+                  m.id === loadingId
+                    ? { ...m, isLoading: false, isStreaming: true }
+                    : m,
+                ),
+              };
+            }),
+          );
+        },
+        onTextDelta: (delta) => committer.push(delta),
+        onUsage: () => {},
+        onDone: () => {
+          committer.flushNow();
+          setHistory((prev) =>
+            prev.map((h) => {
+              if (h.conversationId !== conversationId) return h;
+              return {
+                ...h,
+                lastUsedAt: Math.floor(Date.now() / 1000),
+                messages: h.messages.map((m) =>
+                  m.id === loadingId ? { ...m, isStreaming: false } : m,
+                ),
+              };
+            }),
+          );
+          finalize();
+        },
+        onError: (err, { partialTextKept }) => {
+          committer.flushNow();
+          setHistory((prev) =>
+            prev.map((h) => {
+              if (h.conversationId !== conversationId) return h;
+              const loadingIdx = h.messages.findIndex((m) => m.id === loadingId);
+              if (loadingIdx === -1) return h;
+              const loadingMsg = h.messages[loadingIdx];
+              const hasPartial = partialTextKept && (loadingMsg.text || '').length > 0;
+              if (hasPartial) {
+                const finalized: Message = { ...loadingMsg, isLoading: false, isStreaming: false };
+                const errorMsg = buildErrorMessage(nextMsgId(), err, retryPayload);
+                return {
+                  ...h,
+                  messages: [
+                    ...h.messages.slice(0, loadingIdx),
+                    finalized,
+                    errorMsg,
+                    ...h.messages.slice(loadingIdx + 1),
+                  ],
+                };
+              }
+              return {
+                ...h,
+                messages: h.messages.map((m) =>
+                  m.id === loadingId ? buildErrorMessage(loadingId, err, retryPayload) : m,
+                ),
+              };
+            }),
+          );
+          finalize();
+        },
+      };
+
+      const handle = runFollowUpStream(taskType, conversationId, trimmed, { targetLang: 'zh-CN' }, callbacks);
+      historyStreamsRef.current.set(conversationId, handle);
     },
     [history],
   );
@@ -714,81 +1002,166 @@ export default function ReaderPage() {
       if (!msg.retry || retryInFlightRef.current) return;
       retryInFlightRef.current = true;
       const r = msg.retry;
-      const messageId = msg.id;
+      const errorId = msg.id;
+      const loadingId = nextMsgId();
+
+      // helper: 把当前 message 列表中"error 前紧邻的非 user/loading/error 的 ai message"视为 partial 一并删除，
+      // error 自身位置插入新 loading message。
+      const replaceErrorWithLoading = (messages: Message[]): Message[] => {
+        const errIdx = messages.findIndex((m) => m.id === errorId);
+        if (errIdx === -1) return messages;
+        // 检测前一条是不是 partial（role=ai 且无 isLoading/isError/isStreaming）
+        const prev = errIdx > 0 ? messages[errIdx - 1] : null;
+        const isPartial =
+          prev &&
+          prev.role === 'ai' &&
+          !prev.isLoading &&
+          !prev.isStreaming &&
+          !prev.isError &&
+          (prev.text || '').length > 0;
+        if (isPartial) {
+          return [
+            ...messages.slice(0, errIdx - 1),
+            loadingMessage(loadingId),
+            ...messages.slice(errIdx + 1),
+          ];
+        }
+        return messages.map((m) => (m.id === errorId ? loadingMessage(loadingId) : m));
+      };
 
       if (r.kind === 'first_turn') {
+        // 防御性：旧 in-flight 流 abort（极少触达，retryInFlight 已挡）
+        cardStreamsRef.current.get(r.cardId)?.abort();
+        cardStreamsRef.current.delete(r.cardId);
+
         setAiResults((prev) =>
           prev.map((card) =>
             card.id === r.cardId
-              ? {
-                  ...card,
-                  messages: card.messages.map((m) =>
-                    m.id === messageId ? loadingMessage(messageId) : m,
-                  ),
-                }
+              ? { ...card, messages: replaceErrorWithLoading(card.messages) }
               : card,
           ),
         );
         setAiError(null);
-        try {
-          const result = await runTask(
-            r.taskType,
-            r.capture.selection,
-            {
-              data: r.capture.base64,
-              width: r.capture.width,
-              height: r.capture.height,
-            },
-            { targetLang: 'zh-CN', userQuestion: r.userQuestion, pdfId: r.pdfId },
-          );
+        setIsAIWorking(true);
+
+        const committer = createTextDeltaCommitter((appended) => {
           setAiResults((prev) => {
             const idx = prev.findIndex((c) => c.id === r.cardId);
             if (idx === -1) return prev;
             const updated = [...prev];
             updated[idx] = {
               ...updated[idx],
-              sessionId: result.sessionId,
               messages: updated[idx].messages.map((m) =>
-                m.id === messageId
-                  ? { id: messageId, role: 'ai', text: result.text, timestamp: Date.now() }
+                m.id === loadingId
+                  ? { ...m, text: (m.text || '') + appended, isLoading: false, isStreaming: true }
                   : m,
               ),
             };
             return updated;
           });
-        } catch (err: unknown) {
-          const { display } = errorMessageFrom(err);
-          setAiError(display);
-          setAiResults((prev) => {
-            const idx = prev.findIndex((c) => c.id === r.cardId);
-            if (idx === -1) return prev;
-            const updated = [...prev];
-            updated[idx] = {
-              ...updated[idx],
-              messages: updated[idx].messages.map((m) =>
-                m.id === messageId ? buildErrorMessage(messageId, err, r) : m,
-              ),
-            };
-            return updated;
-          });
-        }
+        });
+
+        const finalize = () => {
+          committer.reset();
+          cardStreamsRef.current.delete(r.cardId);
+          setIsAIWorking(false);
+          retryInFlightRef.current = false;
+        };
+
+        const callbacks: RunStreamCallbacks = {
+          onMeta: (meta: StreamMeta) => {
+            setAiResults((prev) => {
+              const idx = prev.findIndex((c) => c.id === r.cardId);
+              if (idx === -1) return prev;
+              const updated = [...prev];
+              updated[idx] = {
+                ...updated[idx],
+                sessionId: meta.session_id,
+                messages: updated[idx].messages.map((m) =>
+                  m.id === loadingId ? { ...m, isLoading: false, isStreaming: true } : m,
+                ),
+              };
+              return updated;
+            });
+          },
+          onTextDelta: (delta) => committer.push(delta),
+          onUsage: () => {},
+          onDone: () => {
+            committer.flushNow();
+            setAiResults((prev) => {
+              const idx = prev.findIndex((c) => c.id === r.cardId);
+              if (idx === -1) return prev;
+              const updated = [...prev];
+              updated[idx] = {
+                ...updated[idx],
+                messages: updated[idx].messages.map((m) =>
+                  m.id === loadingId ? { ...m, isStreaming: false } : m,
+                ),
+              };
+              return updated;
+            });
+            finalize();
+          },
+          onError: (err, { partialTextKept }) => {
+            committer.flushNow();
+            const { display } = errorMessageFrom(err);
+            setAiError(display);
+            setAiResults((prev) => {
+              const idx = prev.findIndex((c) => c.id === r.cardId);
+              if (idx === -1) return prev;
+              const updated = [...prev];
+              const messages = updated[idx].messages;
+              const loadIdx = messages.findIndex((m) => m.id === loadingId);
+              if (loadIdx === -1) return prev;
+              const loadMsg = messages[loadIdx];
+              const hasPartial = partialTextKept && (loadMsg.text || '').length > 0;
+              if (hasPartial) {
+                const finalized: Message = { ...loadMsg, isLoading: false, isStreaming: false };
+                const errorMsg = buildErrorMessage(nextMsgId(), err, r);
+                updated[idx] = {
+                  ...updated[idx],
+                  messages: [
+                    ...messages.slice(0, loadIdx),
+                    finalized,
+                    errorMsg,
+                    ...messages.slice(loadIdx + 1),
+                  ],
+                };
+              } else {
+                updated[idx] = {
+                  ...updated[idx],
+                  messages: messages.map((m) =>
+                    m.id === loadingId ? buildErrorMessage(loadingId, err, r) : m,
+                  ),
+                };
+              }
+              return updated;
+            });
+            finalize();
+          },
+        };
+
+        const handle = runTaskStream(
+          r.taskType,
+          r.capture.selection,
+          { data: r.capture.base64, width: r.capture.width, height: r.capture.height },
+          { targetLang: 'zh-CN', userQuestion: r.userQuestion, pdfId: r.pdfId },
+          callbacks,
+        );
+        cardStreamsRef.current.set(r.cardId, handle);
       } else if (r.kind === 'follow_up') {
+        cardStreamsRef.current.get(r.cardId)?.abort();
+        cardStreamsRef.current.delete(r.cardId);
+
         setAiResults((prev) =>
           prev.map((card) =>
             card.id === r.cardId
-              ? {
-                  ...card,
-                  messages: card.messages.map((m) =>
-                    m.id === messageId ? loadingMessage(messageId) : m,
-                  ),
-                }
+              ? { ...card, messages: replaceErrorWithLoading(card.messages) }
               : card,
           ),
         );
-        try {
-          const result = await runFollowUp(r.taskType, r.sessionId, r.userQuestion, {
-            targetLang: 'zh-CN',
-          });
+
+        const committer = createTextDeltaCommitter((appended) => {
           setAiResults((prev) => {
             const idx = prev.findIndex((c) => c.id === r.cardId);
             if (idx === -1) return prev;
@@ -796,73 +1169,209 @@ export default function ReaderPage() {
             updated[idx] = {
               ...updated[idx],
               messages: updated[idx].messages.map((m) =>
-                m.id === messageId
-                  ? { id: messageId, role: 'ai', text: result.text, timestamp: Date.now() }
+                m.id === loadingId
+                  ? { ...m, text: (m.text || '') + appended, isLoading: false, isStreaming: true }
                   : m,
               ),
             };
             return updated;
           });
-        } catch (err: unknown) {
-          setAiResults((prev) => {
-            const idx = prev.findIndex((c) => c.id === r.cardId);
-            if (idx === -1) return prev;
-            const updated = [...prev];
-            updated[idx] = {
-              ...updated[idx],
-              messages: updated[idx].messages.map((m) =>
-                m.id === messageId ? buildErrorMessage(messageId, err, r) : m,
-              ),
-            };
-            return updated;
-          });
-        }
+        });
+
+        const finalize = () => {
+          committer.reset();
+          cardStreamsRef.current.delete(r.cardId);
+          retryInFlightRef.current = false;
+        };
+
+        const callbacks: RunStreamCallbacks = {
+          onMeta: () => {
+            setAiResults((prev) => {
+              const idx = prev.findIndex((c) => c.id === r.cardId);
+              if (idx === -1) return prev;
+              const updated = [...prev];
+              updated[idx] = {
+                ...updated[idx],
+                messages: updated[idx].messages.map((m) =>
+                  m.id === loadingId ? { ...m, isLoading: false, isStreaming: true } : m,
+                ),
+              };
+              return updated;
+            });
+          },
+          onTextDelta: (delta) => committer.push(delta),
+          onUsage: () => {},
+          onDone: () => {
+            committer.flushNow();
+            setAiResults((prev) => {
+              const idx = prev.findIndex((c) => c.id === r.cardId);
+              if (idx === -1) return prev;
+              const updated = [...prev];
+              updated[idx] = {
+                ...updated[idx],
+                messages: updated[idx].messages.map((m) =>
+                  m.id === loadingId ? { ...m, isStreaming: false } : m,
+                ),
+              };
+              return updated;
+            });
+            finalize();
+          },
+          onError: (err, { partialTextKept }) => {
+            committer.flushNow();
+            setAiResults((prev) => {
+              const idx = prev.findIndex((c) => c.id === r.cardId);
+              if (idx === -1) return prev;
+              const updated = [...prev];
+              const messages = updated[idx].messages;
+              const loadIdx = messages.findIndex((m) => m.id === loadingId);
+              if (loadIdx === -1) return prev;
+              const loadMsg = messages[loadIdx];
+              const hasPartial = partialTextKept && (loadMsg.text || '').length > 0;
+              if (hasPartial) {
+                const finalized: Message = { ...loadMsg, isLoading: false, isStreaming: false };
+                const errorMsg = buildErrorMessage(nextMsgId(), err, r);
+                updated[idx] = {
+                  ...updated[idx],
+                  messages: [
+                    ...messages.slice(0, loadIdx),
+                    finalized,
+                    errorMsg,
+                    ...messages.slice(loadIdx + 1),
+                  ],
+                };
+              } else {
+                updated[idx] = {
+                  ...updated[idx],
+                  messages: messages.map((m) =>
+                    m.id === loadingId ? buildErrorMessage(loadingId, err, r) : m,
+                  ),
+                };
+              }
+              return updated;
+            });
+            finalize();
+          },
+        };
+
+        const handle = runFollowUpStream(
+          r.taskType,
+          r.sessionId,
+          r.userQuestion,
+          { targetLang: 'zh-CN' },
+          callbacks,
+        );
+        cardStreamsRef.current.set(r.cardId, handle);
       } else {
+        // history_follow_up
+        historyStreamsRef.current.get(r.conversationId)?.abort();
+        historyStreamsRef.current.delete(r.conversationId);
+
         setHistory((prev) =>
           prev.map((h) =>
             h.conversationId === r.conversationId
-              ? {
-                  ...h,
-                  messages: h.messages.map((m) =>
-                    m.id === messageId ? loadingMessage(messageId) : m,
-                  ),
-                }
+              ? { ...h, messages: replaceErrorWithLoading(h.messages) }
               : h,
           ),
         );
-        try {
-          const result = await runFollowUp(r.taskType, r.conversationId, r.userQuestion, {
-            targetLang: 'zh-CN',
-          });
+
+        const committer = createTextDeltaCommitter((appended) => {
           setHistory((prev) =>
             prev.map((h) => {
               if (h.conversationId !== r.conversationId) return h;
               return {
                 ...h,
-                lastUsedAt: Math.floor(Date.now() / 1000),
                 messages: h.messages.map((m) =>
-                  m.id === messageId
-                    ? { id: messageId, role: 'ai', text: result.text, timestamp: Date.now() }
+                  m.id === loadingId
+                    ? { ...m, text: (m.text || '') + appended, isLoading: false, isStreaming: true }
                     : m,
                 ),
               };
             }),
           );
-        } catch (err: unknown) {
-          setHistory((prev) =>
-            prev.map((h) => {
-              if (h.conversationId !== r.conversationId) return h;
-              return {
-                ...h,
-                messages: h.messages.map((m) =>
-                  m.id === messageId ? buildErrorMessage(messageId, err, r) : m,
-                ),
-              };
-            }),
-          );
-        }
+        });
+
+        const finalize = () => {
+          committer.reset();
+          historyStreamsRef.current.delete(r.conversationId);
+          retryInFlightRef.current = false;
+        };
+
+        const callbacks: RunStreamCallbacks = {
+          onMeta: () => {
+            setHistory((prev) =>
+              prev.map((h) => {
+                if (h.conversationId !== r.conversationId) return h;
+                return {
+                  ...h,
+                  messages: h.messages.map((m) =>
+                    m.id === loadingId ? { ...m, isLoading: false, isStreaming: true } : m,
+                  ),
+                };
+              }),
+            );
+          },
+          onTextDelta: (delta) => committer.push(delta),
+          onUsage: () => {},
+          onDone: () => {
+            committer.flushNow();
+            setHistory((prev) =>
+              prev.map((h) => {
+                if (h.conversationId !== r.conversationId) return h;
+                return {
+                  ...h,
+                  lastUsedAt: Math.floor(Date.now() / 1000),
+                  messages: h.messages.map((m) =>
+                    m.id === loadingId ? { ...m, isStreaming: false } : m,
+                  ),
+                };
+              }),
+            );
+            finalize();
+          },
+          onError: (err, { partialTextKept }) => {
+            committer.flushNow();
+            setHistory((prev) =>
+              prev.map((h) => {
+                if (h.conversationId !== r.conversationId) return h;
+                const loadIdx = h.messages.findIndex((m) => m.id === loadingId);
+                if (loadIdx === -1) return h;
+                const loadMsg = h.messages[loadIdx];
+                const hasPartial = partialTextKept && (loadMsg.text || '').length > 0;
+                if (hasPartial) {
+                  const finalized: Message = { ...loadMsg, isLoading: false, isStreaming: false };
+                  const errorMsg = buildErrorMessage(nextMsgId(), err, r);
+                  return {
+                    ...h,
+                    messages: [
+                      ...h.messages.slice(0, loadIdx),
+                      finalized,
+                      errorMsg,
+                      ...h.messages.slice(loadIdx + 1),
+                    ],
+                  };
+                }
+                return {
+                  ...h,
+                  messages: h.messages.map((m) =>
+                    m.id === loadingId ? buildErrorMessage(loadingId, err, r) : m,
+                  ),
+                };
+              }),
+            );
+            finalize();
+          },
+        };
+
+        const handle = runFollowUpStream(
+          r.taskType,
+          r.conversationId,
+          r.userQuestion,
+          { targetLang: 'zh-CN' },
+          callbacks,
+        );
+        historyStreamsRef.current.set(r.conversationId, handle);
       }
-      retryInFlightRef.current = false;
     },
     [],
   );

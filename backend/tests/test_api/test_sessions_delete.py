@@ -12,7 +12,8 @@ from lumina.db.models import SelectionRow
 from lumina.main import create_app
 from lumina.projects.manager import auto_create_project
 from lumina.providers import get_provider, reset_provider
-from lumina.providers.base import LLMRequest, Provider, ProviderAuthError
+from lumina.providers.base import LLMRequest, LLMStreamEvent, Provider, ProviderAuthError
+from lumina.providers.errors import StreamUnsupportedError
 from lumina.sessions import SessionStore, get_session_store, reset_session_store
 
 PDF_BYTES = b"%PDF-1.4 delete test"
@@ -57,6 +58,10 @@ class CountingProvider(Provider):
     async def invoke(self, req: LLMRequest):
         self.invoke_count += 1
         raise ProviderAuthError("should not be called")
+
+    async def invoke_stream(self, req: LLMRequest):
+        raise StreamUnsupportedError("streaming not supported")
+        yield LLMStreamEvent(type="done")  # pragma: no cover
 
     async def health_check(self) -> bool:
         return True

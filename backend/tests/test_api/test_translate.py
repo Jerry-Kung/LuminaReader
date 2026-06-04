@@ -7,7 +7,8 @@ from lumina.api._run_core import is_payload_too_large
 from lumina.config import Settings, get_settings
 from lumina.main import create_app
 from lumina.providers import get_provider, reset_provider
-from lumina.providers.base import LLMRequest, LLMResponse, LLMUsage, Provider
+from lumina.providers.base import LLMRequest, LLMResponse, LLMStreamEvent, LLMUsage, Provider
+from lumina.providers.errors import StreamUnsupportedError
 from lumina.sessions import reset_session_store
 
 MINIMAL_PNG_B64 = (
@@ -52,6 +53,10 @@ class MockTranslateProvider(Provider):
             model="gpt-4o",
             usage=LLMUsage(prompt_tokens=10, completion_tokens=5, total_tokens=15),
         )
+
+    async def invoke_stream(self, req: LLMRequest):
+        raise StreamUnsupportedError("streaming not supported in mock translate provider")
+        yield LLMStreamEvent(type="done")  # pragma: no cover
 
     async def health_check(self) -> bool:
         return True

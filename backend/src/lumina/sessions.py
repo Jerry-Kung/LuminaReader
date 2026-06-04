@@ -20,6 +20,7 @@ from lumina.db.models import (
     list_messages,
     mark_conversation_cleared,
     count_messages,
+    update_assistant_message_at_turn,
     update_conversation_last_used,
 )
 from lumina.logging import get_logger, log_with_fields
@@ -229,6 +230,7 @@ class SessionStore:
         assistant_message: LLMMessage,
         turn_index: int | None = None,
         assistant_meta: dict | None = None,
+        interrupted: bool = False,
     ) -> Session | None:
         session = await self.get(session_id)
         if session is None:
@@ -241,12 +243,19 @@ class SessionStore:
         assistant_text = (
             assistant_message.content[0].text if assistant_message.content else ""
         )
-        meta = assistant_meta or {}
+        if interrupted:
+            assistant_text = f"{assistant_text}\n\n[interrupted]"
+        meta = dict(assistant_meta or {})
+        if interrupted:
+            meta["completion_tokens"] = None
         ts = int(time.time())
 
+        final_assistant = LLMMessage(
+            role="assistant", content=[TextPart(text=assistant_text)]
+        )
         async with self._lock:
             session.messages.append(user_message)
-            session.messages.append(assistant_message)
+            session.messages.append(final_assistant)
             session.last_used_at = time.time()
             self._touch_lru(session_id)
 
@@ -284,6 +293,61 @@ class SessionStore:
                     latency_ms=meta.get("latency_ms"),
                     created_at=ts,
                 ),
+            )
+            update_conversation_last_used(conn, session_id, ts)
+            conn.execute("COMMIT")
+            session.dirty = False
+        except Exception:
+            try:
+                conn.execute("ROLLBACK")
+            except Exception:
+                pass
+            session.dirty = True
+
+        return session
+
+    async def finalize_streaming_assistant(
+        self,
+        session_id: str,
+        *,
+        turn_index: int,
+        assistant_text: str,
+        interrupted: bool = False,
+        assistant_meta: dict | None = None,
+    ) -> Session | None:
+        session = await self.get(session_id)
+        if session is None:
+            return None
+
+        final_text = assistant_text
+        if interrupted:
+            final_text = f"{assistant_text}\n\n[interrupted]"
+        meta = dict(assistant_meta or {})
+        if interrupted:
+            meta["completion_tokens"] = None
+        ts = int(time.time())
+        assistant_idx = turn_index * 2 + 1
+
+        async with self._lock:
+            if assistant_idx < len(session.messages):
+                session.messages[assistant_idx] = LLMMessage(
+                    role="assistant", content=[TextPart(text=final_text)]
+                )
+            session.last_used_at = time.time()
+            self._touch_lru(session_id)
+
+        try:
+            conn = get_connection(session.project_id)
+            conn.execute("BEGIN")
+            update_assistant_message_at_turn(
+                conn,
+                session_id,
+                turn_index,
+                content=final_text,
+                model=meta.get("model"),
+                prompt_tokens=meta.get("prompt_tokens"),
+                completion_tokens=meta.get("completion_tokens"),
+                latency_ms=meta.get("latency_ms"),
             )
             update_conversation_last_used(conn, session_id, ts)
             conn.execute("COMMIT")

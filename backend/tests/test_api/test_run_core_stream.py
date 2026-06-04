@@ -1,0 +1,404 @@
+import asyncio
+from collections.abc import AsyncIterator
+
+import pytest
+
+from lumina.api._run_core import PreparedStreamRun, _stream_driver_events, prepare_stream_run
+from lumina.config import Settings
+from lumina.projects.manager import auto_create_project
+from lumina.providers.base import (
+    LLMMessage,
+    LLMRequest,
+    LLMResponse,
+    LLMStreamEvent,
+    LLMUsage,
+    Provider,
+    TextPart,
+)
+from lumina.providers.openai_compat import _is_qwen_base_url
+from lumina.schemas.selection import ImagePayload, Selection
+from lumina.sessions import SessionStore, get_session_store, init_session_store, reset_session_store
+from lumina.tasks.base import TaskContext
+from lumina.tasks.translate import TranslateTask
+from lumina import settings_store
+
+MINIMAL_PNG_B64 = (
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAD0lEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=="
+)
+PDF_BYTES = b"%PDF-1.4 stream core"
+
+
+class MockStreamProvider(Provider):
+    name = "mock_stream_core"
+
+    def __init__(self, events: list[LLMStreamEvent]) -> None:
+        self.events = events
+        self.invoke_count = 0
+        self.stream_invoke_count = 0
+        self.last_stream_request: LLMRequest | None = None
+        self.last_invoke_request: LLMRequest | None = None
+
+    async def invoke(self, req: LLMRequest) -> LLMResponse:
+        self.invoke_count += 1
+        self.last_invoke_request = req
+        return LLMResponse(text="extracted markdown", model="gpt-4o")
+
+    async def invoke_stream(self, req: LLMRequest) -> AsyncIterator[LLMStreamEvent]:
+        self.stream_invoke_count += 1
+        self.last_stream_request = req
+        for event in self.events:
+            yield event
+
+    async def health_check(self) -> bool:
+        return True
+
+
+def _selection() -> Selection:
+    return Selection(
+        pdf_id=None,
+        page=1,
+        x=0.0,
+        y=0.0,
+        w=10.0,
+        h=10.0,
+        dpi=144.0,
+    )
+
+
+def _image() -> ImagePayload:
+    return ImagePayload(mime="image/png", data=MINIMAL_PNG_B64, width=1, height=1)
+
+
+async def _collect_events(gen: AsyncIterator[LLMStreamEvent]) -> list[LLMStreamEvent]:
+    return [event async for event in gen]
+
+
+@pytest.fixture(autouse=True)
+def _session_env(data_root, monkeypatch):
+    settings_store._reset_state()
+    settings_store.bootstrap()
+    reset_session_store()
+    init_session_store(max_entries=50, ttl_seconds=3600)
+    yield
+    reset_session_store()
+    settings_store._reset_state()
+
+
+@pytest.mark.asyncio
+async def test_stream_success_persists_without_interrupted_marker(data_root) -> None:
+    created = auto_create_project(PDF_BYTES, "stream.pdf")
+    store = SessionStore()
+    session = await store.create(
+        conversation_id="conv_stream1",
+        project_id=created.project_id,
+        pdf_id=created.pdf_id,
+        selection_id="sel_1",
+        task_type="translate",
+        extracted_text="source",
+        selection_row=__import__("lumina.db.models", fromlist=["SelectionRow"]).SelectionRow(
+            id="sel_1",
+            pdf_id=created.pdf_id,
+            page=1,
+            x=0.0,
+            y=0.0,
+            w=10.0,
+            h=10.0,
+            dpi=144.0,
+            thumbnail_png=None,
+            created_at=1,
+        ),
+        first_user_question=None,
+        first_user_content="source",
+        first_assistant_text="",
+        first_assistant_meta={},
+    )
+    events = [
+        LLMStreamEvent(type="text_delta", delta="hello "),
+        LLMStreamEvent(type="text_delta", delta="world"),
+        LLMStreamEvent(type="usage", usage=LLMUsage(prompt_tokens=3, completion_tokens=2, total_tokens=5)),
+        LLMStreamEvent(type="done", model="gpt-4o", thinking_enabled=False),
+    ]
+    provider = MockStreamProvider(events)
+    prepared = PreparedStreamRun(
+        request_id="req_test",
+        start=__import__("time").perf_counter(),
+        task_type="translate",
+        page=1,
+        image_bytes=0,
+        project_id=created.project_id,
+        pdf_id=created.pdf_id,
+        conversation_id=session.session_id,
+        turn_index=0,
+        is_first_turn=True,
+        extract_latency_ms=10,
+        extracted_text_chars=6,
+        drive_ctx=TaskContext(
+            extracted_text="source",
+            options={"target_lang": "zh-CN"},
+            project_id=created.project_id,
+            pdf_id=created.pdf_id,
+        ),
+        task=TranslateTask(),
+        follow_up_user_question=None,
+        meta_payload={},
+    )
+    collected = await _collect_events(
+        _stream_driver_events(prepared=prepared, provider=provider)
+    )
+    assert [e.type for e in collected] == ["text_delta", "text_delta", "usage", "done"]
+
+    from lumina.db.engine import get_connection
+    from lumina.db.models import list_messages
+
+    conn = get_connection(created.project_id)
+    rows = list_messages(conn, session.session_id)
+    assistant = [r for r in rows if r.role == "assistant" and r.turn_index == 0][0]
+    assert assistant.content == "hello world"
+    assert "[interrupted]" not in assistant.content
+    assert assistant.completion_tokens == 2
+
+
+@pytest.mark.asyncio
+async def test_stream_error_persists_interrupted_marker(data_root) -> None:
+    created = auto_create_project(PDF_BYTES, "stream2.pdf")
+    store = SessionStore()
+    session = await store.create(
+        conversation_id="conv_stream2",
+        project_id=created.project_id,
+        pdf_id=created.pdf_id,
+        selection_id="sel_2",
+        task_type="translate",
+        extracted_text="source",
+        selection_row=__import__("lumina.db.models", fromlist=["SelectionRow"]).SelectionRow(
+            id="sel_2",
+            pdf_id=created.pdf_id,
+            page=1,
+            x=0.0,
+            y=0.0,
+            w=10.0,
+            h=10.0,
+            dpi=144.0,
+            thumbnail_png=None,
+            created_at=1,
+        ),
+        first_user_question=None,
+        first_user_content="source",
+        first_assistant_text="",
+        first_assistant_meta={},
+    )
+    provider = MockStreamProvider(
+        [
+            LLMStreamEvent(type="text_delta", delta="hello"),
+            LLMStreamEvent(type="error", code="PROVIDER_ERROR", message="fail", retriable=False),
+        ]
+    )
+    prepared = PreparedStreamRun(
+        request_id="req_test2",
+        start=__import__("time").perf_counter(),
+        task_type="translate",
+        page=1,
+        image_bytes=0,
+        project_id=created.project_id,
+        pdf_id=created.pdf_id,
+        conversation_id=session.session_id,
+        turn_index=0,
+        is_first_turn=True,
+        extract_latency_ms=None,
+        extracted_text_chars=None,
+        drive_ctx=TaskContext(
+            extracted_text="source",
+            options={"target_lang": "zh-CN"},
+            project_id=created.project_id,
+            pdf_id=created.pdf_id,
+        ),
+        task=TranslateTask(),
+        follow_up_user_question=None,
+        meta_payload={},
+    )
+    await _collect_events(_stream_driver_events(prepared=prepared, provider=provider))
+
+    from lumina.db.engine import get_connection
+    from lumina.db.models import list_messages
+
+    conn = get_connection(created.project_id)
+    assistant = [
+        r for r in list_messages(conn, session.session_id) if r.role == "assistant"
+    ][0]
+    assert assistant.content.endswith("[interrupted]")
+    assert assistant.completion_tokens is None
+
+
+@pytest.mark.asyncio
+async def test_stream_cancelled_persists_interrupted(data_root) -> None:
+    created = auto_create_project(PDF_BYTES, "stream3.pdf")
+    store = SessionStore()
+    session = await store.create(
+        conversation_id="conv_stream3",
+        project_id=created.project_id,
+        pdf_id=created.pdf_id,
+        selection_id="sel_3",
+        task_type="translate",
+        extracted_text="source",
+        selection_row=__import__("lumina.db.models", fromlist=["SelectionRow"]).SelectionRow(
+            id="sel_3",
+            pdf_id=created.pdf_id,
+            page=1,
+            x=0.0,
+            y=0.0,
+            w=10.0,
+            h=10.0,
+            dpi=144.0,
+            thumbnail_png=None,
+            created_at=1,
+        ),
+        first_user_question=None,
+        first_user_content="source",
+        first_assistant_text="",
+        first_assistant_meta={},
+    )
+
+    async def _aborting_stream(req: LLMRequest):
+        provider.last_stream_request = req
+        yield LLMStreamEvent(type="text_delta", delta="hello")
+        await asyncio.sleep(0)
+        raise asyncio.CancelledError()
+
+    provider = MockStreamProvider([])
+    provider.invoke_stream = _aborting_stream  # type: ignore[method-assign]
+    prepared = PreparedStreamRun(
+        request_id="req_test3",
+        start=__import__("time").perf_counter(),
+        task_type="translate",
+        page=1,
+        image_bytes=0,
+        project_id=created.project_id,
+        pdf_id=created.pdf_id,
+        conversation_id=session.session_id,
+        turn_index=0,
+        is_first_turn=True,
+        extract_latency_ms=None,
+        extracted_text_chars=None,
+        drive_ctx=TaskContext(
+            extracted_text="source",
+            options={"target_lang": "zh-CN"},
+        ),
+        task=TranslateTask(),
+        follow_up_user_question=None,
+        meta_payload={},
+    )
+    with pytest.raises(asyncio.CancelledError):
+        async for _ in _stream_driver_events(prepared=prepared, provider=provider):
+            pass
+
+    from lumina.db.engine import get_connection
+    from lumina.db.models import list_messages
+
+    conn = get_connection(created.project_id)
+    assistant = [
+        r for r in list_messages(conn, session.session_id) if r.role == "assistant"
+    ][0]
+    assert "hello" in assistant.content
+    assert assistant.content.endswith("[interrupted]")
+
+
+@pytest.mark.asyncio
+async def test_first_turn_extract_non_stream_then_driver_stream(monkeypatch) -> None:
+    from fastapi import Request
+    from lumina.schemas.api import TranslateRequest, TranslateOptions
+
+    created = auto_create_project(PDF_BYTES, "stream4.pdf")
+    provider = MockStreamProvider(
+        [
+            LLMStreamEvent(type="text_delta", delta="ok"),
+            LLMStreamEvent(type="done", model="gpt-4o"),
+        ]
+    )
+    scope = {"type": "http", "method": "POST", "headers": [], "path": "/"}
+    body = TranslateRequest(
+        task_type="translate",
+        pdf_id=created.pdf_id,
+        selection=_selection(),
+        image=_image(),
+        options=TranslateOptions(stream=True),
+    )
+    prep = await prepare_stream_run(
+        request=Request(scope),
+        body=body,
+        provider=provider,
+        settings=Settings(openai_api_key="sk-test", openai_model="gpt-4o"),
+        request_id="req_first",
+    )
+    assert not isinstance(prep, __import__("fastapi").responses.JSONResponse)
+    assert provider.invoke_count == 1
+    assert provider.last_invoke_request is not None
+    assert provider.last_invoke_request.thinking is False
+    assert provider.last_invoke_request.stream is False
+    await _collect_events(_stream_driver_events(prepared=prep, provider=provider))
+    assert provider.stream_invoke_count == 1
+    assert provider.last_stream_request is not None
+    assert provider.last_stream_request.stream is True
+
+
+@pytest.mark.asyncio
+async def test_stream_injects_thinking_when_enabled(data_root, monkeypatch) -> None:
+    store = SessionStore()
+    created = auto_create_project(PDF_BYTES, "think.pdf")
+    session = await store.create(
+        conversation_id="conv_think",
+        project_id=created.project_id,
+        pdf_id=created.pdf_id,
+        selection_id="sel_t",
+        task_type="translate",
+        extracted_text="source",
+        selection_row=__import__("lumina.db.models", fromlist=["SelectionRow"]).SelectionRow(
+            id="sel_t",
+            pdf_id=created.pdf_id,
+            page=1,
+            x=0.0,
+            y=0.0,
+            w=10.0,
+            h=10.0,
+            dpi=144.0,
+            thumbnail_png=None,
+            created_at=1,
+        ),
+        first_user_question=None,
+        first_user_content="source",
+        first_assistant_text="",
+        first_assistant_meta={},
+    )
+    settings_store.apply_update(
+        {
+            "provider": {
+                "kind": "openai_compat",
+                "base_url": "https://dashscope.aliyuncs.com/compatible-mode/v1",
+                "api_key": "sk-fake12345678",
+                "default_model": "qwen-max",
+                "timeout_seconds": 60,
+            },
+            "task_models": {"extract": None, "translate": None, "explain": None},
+            "thinking": {"enabled": True},
+        }
+    )
+    provider = MockStreamProvider([LLMStreamEvent(type="done", model="qwen-max")])
+    prepared = PreparedStreamRun(
+        request_id="req_think",
+        start=__import__("time").perf_counter(),
+        task_type="translate",
+        page=1,
+        image_bytes=0,
+        project_id=created.project_id,
+        pdf_id=created.pdf_id,
+        conversation_id=session.session_id,
+        turn_index=0,
+        is_first_turn=True,
+        extract_latency_ms=None,
+        extracted_text_chars=None,
+        drive_ctx=TaskContext(extracted_text="source", options={"target_lang": "zh-CN"}),
+        task=TranslateTask(),
+        follow_up_user_question=None,
+        meta_payload={},
+    )
+    await _collect_events(_stream_driver_events(prepared=prepared, provider=provider))
+    assert provider.last_stream_request is not None
+    assert provider.last_stream_request.thinking is True

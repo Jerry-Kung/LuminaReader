@@ -10,6 +10,7 @@ DataT = TypeVar("DataT")
 class TranslateOptions(BaseModel):
     target_lang: str = "zh-CN"
     user_question: str | None = None
+    stream: bool = False
 
 
 class TranslateRequest(BaseModel):
@@ -35,9 +36,14 @@ class SettingsProviderOut(BaseModel):
     timeout_seconds: int
 
 
+class ThinkingSettingsOut(BaseModel):
+    enabled: bool = False
+
+
 class SettingsResponse(BaseModel):
     provider: SettingsProviderOut
     task_models: dict[Literal["extract", "translate", "explain"], str | None]
+    thinking: ThinkingSettingsOut = Field(default_factory=ThinkingSettingsOut)
     source: Literal["user_data", "env_fallback"]
     writable: bool
     provider_ready: bool
@@ -61,6 +67,7 @@ class TranslateMeta(BaseModel):
     usage: TranslateUsage | None = None
     task_type: str | None = None
     turn_index: int | None = None
+    thinking_enabled: bool = False
 
 
 class TranslateData(BaseModel):
