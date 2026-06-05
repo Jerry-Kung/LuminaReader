@@ -162,6 +162,64 @@ export const mockHistory: HistoryConversation[] = [
       },
     ],
   },
+  {
+    id: 106,
+    book_id: 'book-001',
+    type: 'dictionary',
+    thumbnail: thumbs[5],
+    first_question: 'Look up this word',
+    created_at: ago(6),
+    updated_at: ago(6),
+    messages: [
+      {
+        id: 1015,
+        role: 'user',
+        text: 'Look up this word',
+        timestamp: new Date(ago(6)).getTime(),
+      },
+      {
+        id: 1016,
+        role: 'ai',
+        text: '### isomorphism\n\n**Pronunciation**: /ˌaɪsəˈmɔːrfɪzəm/\n\n**Part of Speech**: noun (countable)\n\n**Definition**:\n1. *(Mathematics)* A bijective structure-preserving map between two algebraic structures of the same type.\n2. *(Biology)* Similarity in form or structure between organisms of different species.\n\n**Etymology**: From Greek *isos* (equal) + *morphe* (form)\n\n**Example**: The isomorphism $f: \mathbb{Z} \to 2\mathbb{Z}$ defined by $f(n) = 2n$ preserves the group structure of integers under addition.',
+        timestamp: new Date(ago(6)).getTime() + 2000,
+      },
+    ],
+  },
+  {
+    id: 107,
+    book_id: 'book-002',
+    type: 'chat',
+    thumbnail: thumbs[6],
+    first_question: 'Can you summarize the key ideas in this section?',
+    created_at: ago(4),
+    updated_at: ago(3),
+    messages: [
+      {
+        id: 1017,
+        role: 'user',
+        text: 'Can you summarize the key ideas in this section?',
+        timestamp: new Date(ago(4)).getTime(),
+      },
+      {
+        id: 1018,
+        role: 'ai',
+        text: '### Section Summary\n\nThis section covers three main concepts:\n\n1. **Topological Spaces** — A generalization of metric spaces where continuity is defined in terms of open sets rather than distance.\n\n2. **Compactness** — A property where every open cover has a finite subcover. Compact sets behave like finite sets in many important ways.\n\n3. **Connectedness** — A space is connected if it cannot be split into two disjoint non-empty open sets.',
+        timestamp: new Date(ago(4)).getTime() + 2500,
+      },
+      {
+        id: 1019,
+        role: 'user',
+        text: 'Give me a concrete example of compactness',
+        timestamp: new Date(ago(3)).getTime(),
+      },
+      {
+        id: 1020,
+        role: 'ai',
+        text: 'A classic example: the **closed interval** $[0, 1]$ in $\mathbb{R}$ is compact.\n\nHere\'s why it matters: every sequence in $[0, 1]$ has a convergent subsequence whose limit is also in $[0, 1]$ (Bolzano-Weierstrass theorem).\n\nContrast this with the **open interval** $(0, 1)$: the sequence $a_n = 1/n$ converges to 0, which is *not* in $(0, 1)$, so $(0, 1)$ is not compact.',
+        timestamp: new Date(ago(3)).getTime() + 2000,
+      },
+    ],
+  },
 ];
 
 export async function fetchHistoryConversations(bookId: string): Promise<HistoryConversation[]> {

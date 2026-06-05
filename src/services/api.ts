@@ -1,6 +1,6 @@
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '';
 
-export type TaskType = 'translate' | 'explain';
+export type TaskType = 'translate' | 'explain' | 'dictionary' | 'chat';
 
 export interface ConversationMessage {
   role: 'user' | 'assistant';
@@ -101,6 +101,36 @@ $$V - E + F = 2$$
 
 这一结论的意义在于，无论图的形状多么复杂，这三个量之间的约束关系**永远不变**。`;
 
+const MOCK_DICTIONARY = `### isomorphism 同构
+
+**发音**: /ˌaɪsəˈmɔːrfɪzəm/
+
+**词性**: 名词
+
+**释义**:
+
+1. **（数学）** 两个同类型代数结构之间的双射且保持结构的映射。若群 $G$ 与 $H$ 之间存在同构映射，则称 $G$ 与 $H$ 同构，记作 $G \cong H$。
+
+2. **（生物学）** 不同物种生物体之间在形态或结构上的相似性。
+
+**词源**: 希腊语 *isos*（相等的）+ *morphe*（形态）
+
+**例句**: 恒等映射 $\text{id}: G \to G$ 是一个平凡的同构。`;
+
+const MOCK_CHAT = `当然！这段内容讨论了一个非常重要的拓扑学概念：**紧致性**（Compactness）。
+
+### 直观理解
+
+想象一个**闭区间** $[0, 1]$：无论你如何用无限多个小开区间去覆盖它，你总能从中挑出**有限个**来完成任务。这就是紧致性的本质——"无限覆盖必有有限子覆盖"。
+
+### 为什么重要
+
+紧致空间在许多方面表现得像**有限集合**：
+- 紧致集合上的连续函数一定有界，并能取到最大值和最小值
+- 紧致空间上的连续函数一定是**一致连续**的
+
+这使其成为分析和拓扑中最重要的性质之一。`;
+
 const MOCK_FOLLOWUP_TRANSLATE = [
   `**追问回答**：这是一个很好的问题。\n\n您提到的这个词在上下文中指的是"映射"（Mapping）——一种将一个集合的元素对应到另一个集合的规则。\n\n在翻译领域，它特指\`one-to-one correspondence\`，即**一一对应**关系。`,
   `**深入解释**：这一步推导的关键在于，每增加一条边时有两种情况：\n\n- 若连接两个已有顶点：$E+1$，$F+1$，$V$ 不变\n- 若引入新顶点：$E+1$，$V+1$，$F$ 不变\n\n两种情况下 $V - E + F$ 的值都不变，证明完毕。`,
@@ -119,6 +149,10 @@ function mockAI(
     followupIndex += 1;
   } else if (taskType === 'explain') {
     text = MOCK_EXPLAIN;
+  } else if (taskType === 'dictionary') {
+    text = MOCK_DICTIONARY;
+  } else if (taskType === 'chat') {
+    text = MOCK_CHAT;
   } else {
     text = MOCK_TRANSLATE;
   }

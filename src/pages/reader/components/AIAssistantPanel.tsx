@@ -3,6 +3,11 @@ import type { AIResult, Message } from '../page';
 import type { TaskType, HistoryConversation } from '@/services/api';
 import MarkdownRenderer from './MarkdownRenderer';
 
+interface ChipStateItem {
+  state: 'available' | 'disabled';
+  reason?: string;
+}
+
 interface AIAssistantPanelProps {
   results: AIResult[];
   historyConversations: HistoryConversation[];
@@ -10,30 +15,67 @@ interface AIAssistantPanelProps {
   isAIWorking: boolean;
   error: string | null;
   hasSelection: boolean;
-  activeTaskType: TaskType;
+  activeTaskTypes: TaskType[];
   userInput: string;
   panelMode: 'narrow' | 'wide' | 'overlay';
+  chipsState: Record<string, ChipStateItem>;
   onFollowUp: (cardId: number, text: string) => void;
   onClearCard: (cardId: number) => void;
-  onAIRequest: (taskType: TaskType, userInput?: string) => void;
-  onTaskTypeChange: (type: TaskType) => void;
+  onAIRequest: (taskTypes: TaskType[], userInput?: string) => void;
+  onTaskTypeToggle: (type: TaskType) => void;
   onUserInputChange: (text: string) => void;
   onPanelModeChange: (mode: 'narrow' | 'wide' | 'overlay') => void;
   onHistoryFollowUp: (historyId: number, text: string) => void;
 }
 
-const taskLabelConfig = {
+const taskLabelConfig: Record<TaskType, { label: string; icon: string; bgClass: string; textClass: string }> = {
   translate: {
-    label: 'Translate',
+    label: '翻译',
     icon: 'ri-translate-2',
     bgClass: 'bg-amber-100',
     textClass: 'text-amber-700',
   },
   explain: {
-    label: 'Explain',
+    label: '解释',
     icon: 'ri-lightbulb-line',
     bgClass: 'bg-teal-50',
     textClass: 'text-teal-700',
+  },
+  dictionary: {
+    label: '词典',
+    icon: 'ri-book-open-line',
+    bgClass: 'bg-violet-50',
+    textClass: 'text-violet-700',
+  },
+  chat: {
+    label: '对话',
+    icon: 'ri-chat-3-line',
+    bgClass: 'bg-stone-100',
+    textClass: 'text-stone-600',
+  },
+};
+
+interface ChipColorClasses {
+  selectedBg: string;
+  selectedText: string;
+  selectedBorder: string;
+}
+
+const chipColorMap: Record<string, ChipColorClasses> = {
+  translate: {
+    selectedBg: 'bg-amber-100',
+    selectedText: 'text-amber-700',
+    selectedBorder: 'border-amber-300',
+  },
+  explain: {
+    selectedBg: 'bg-teal-50',
+    selectedText: 'text-teal-700',
+    selectedBorder: 'border-teal-300',
+  },
+  dictionary: {
+    selectedBg: 'bg-violet-50',
+    selectedText: 'text-violet-700',
+    selectedBorder: 'border-violet-300',
   },
 };
 
@@ -221,99 +263,179 @@ function HistoryItem({
 
 function LaunchInputArea({
   hasSelection,
-  activeTaskType,
+  activeTaskTypes,
   userInput,
   isAIWorking,
+  chipsState,
   onAIRequest,
-  onTaskTypeChange,
+  onTaskTypeToggle,
   onUserInputChange,
 }: {
   hasSelection: boolean;
-  activeTaskType: TaskType;
+  activeTaskTypes: TaskType[];
   userInput: string;
   isAIWorking: boolean;
-  onAIRequest: (taskType: TaskType, userInput?: string) => void;
-  onTaskTypeChange: (type: TaskType) => void;
+  chipsState: Record<string, ChipStateItem>;
+  onAIRequest: (taskTypes: TaskType[], userInput?: string) => void;
+  onTaskTypeToggle: (type: TaskType) => void;
   onUserInputChange: (text: string) => void;
 }) {
-  const handleRun = () => {
-    onAIRequest(activeTaskType, userInput);
+  const handleSend = () => {
+    onAIRequest(activeTaskTypes, userInput);
     onUserInputChange('');
   };
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault();
-      if (hasSelection && !isAIWorking) {
-        handleRun();
+      const canSend = activeTaskTypes.length > 0 || userInput.trim().length > 0;
+      if (canSend && !isAIWorking) {
+        handleSend();
       }
     }
   };
 
-  const isDisabled = !hasSelection || isAIWorking;
+  const canSend = hasSelection && (activeTaskTypes.length > 0 || userInput.trim().length > 0);
+  const sendDisabled = !canSend || isAIWorking;
+
+  const chips: { type: TaskType; icon: string; label: string }[] = [
+    { type: 'translate', icon: 'ri-translate-2', label: '翻译' },
+    { type: 'explain', icon: 'ri-lightbulb-line', label: '解释' },
+    { type: 'dictionary', icon: 'ri-book-open-line', label: '词典' },
+  ];
 
   return (
     <div className="border-t border-stone-100 p-4 bg-white">
       {!hasSelection && (
         <div className="flex items-center gap-2 text-stone-400 mb-2">
           <i className="ri-cursor-line text-xs"></i>
-          <span className="text-xs">Select an area on the PDF to start</span>
+          <span className="text-xs">请先在 PDF 上框选一段内容</span>
         </div>
       )}
-      <div className="space-y-2">
+      <div className="space-y-2.5">
         <textarea
           value={userInput}
           onChange={(e) => onUserInputChange(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="Ask something optional (e.g. explain this formula, translate this paragraph)..."
-          disabled={isDisabled}
-          className="w-full h-20 text-sm text-stone-700 bg-stone-50 border border-stone-200 rounded-lg px-3 py-2.5 resize-none focus:outline-none focus:border-amber-400 placeholder:text-stone-400 leading-relaxed disabled:bg-stone-100 disabled:text-stone-400"
+          placeholder="想问点什么？或选择下方能力一键运行"
+          disabled={isAIWorking}
+          className="w-full h-[68px] text-sm text-stone-700 bg-stone-50 border border-stone-200 rounded-lg px-3 py-2.5 resize-none focus:outline-none focus:border-amber-400 placeholder:text-stone-400 leading-relaxed disabled:bg-stone-100 disabled:text-stone-400"
           rows={2}
         />
-        <div className="flex items-center justify-between">
-          <div className="flex items-center bg-stone-100 rounded-md p-0.5">
-            <button
-              onClick={() => onTaskTypeChange('translate')}
-              disabled={isDisabled}
-              className={`whitespace-nowrap px-3 py-1.5 text-xs font-medium rounded-md transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${
-                activeTaskType === 'translate'
-                  ? 'bg-white text-amber-700 shadow-sm'
-                  : 'text-stone-500 hover:text-stone-700'
-              }`}
-            >
-              Translate
-            </button>
-            <button
-              onClick={() => onTaskTypeChange('explain')}
-              disabled={isDisabled}
-              className={`whitespace-nowrap px-3 py-1.5 text-xs font-medium rounded-md transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed ${
-                activeTaskType === 'explain'
-                  ? 'bg-white text-teal-700 shadow-sm'
-                  : 'text-stone-500 hover:text-stone-700'
-              }`}
-            >
-              Explain
-            </button>
+        <div className="flex items-center justify-between gap-2">
+          <div className="flex items-center gap-1.5 flex-wrap">
+            {chips.map((chip) => {
+              const cs = chipsState[chip.type];
+              const chipUnavailable = cs?.state === 'disabled';
+              const isSelected = activeTaskTypes.includes(chip.type);
+              const colors = chipColorMap[chip.type];
+
+              if (!hasSelection) {
+                return (
+                  <CapabilityChip
+                    key={chip.type}
+                    icon={chip.icon}
+                    label={chip.label}
+                    isSelected={isSelected}
+                    isDisabled={false}
+                    isFaded={true}
+                    disabledReason={undefined}
+                    colors={colors}
+                    onClick={() => onTaskTypeToggle(chip.type)}
+                  />
+                );
+              }
+
+              return (
+                <CapabilityChip
+                  key={chip.type}
+                  icon={chip.icon}
+                  label={chip.label}
+                  isSelected={isSelected}
+                  isDisabled={chipUnavailable}
+                  isFaded={false}
+                  disabledReason={cs?.reason}
+                  colors={colors}
+                  onClick={() => onTaskTypeToggle(chip.type)}
+                />
+              );
+            })}
           </div>
           <button
-            onClick={handleRun}
-            disabled={isDisabled}
-            className="whitespace-nowrap flex items-center gap-2 px-4 py-2 text-sm font-medium text-white bg-amber-600 rounded-md hover:bg-amber-700 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer transition-colors"
+            onClick={handleSend}
+            disabled={sendDisabled}
+            className="flex-shrink-0 w-8 h-8 flex items-center justify-center rounded-lg bg-amber-600 text-white hover:bg-amber-700 disabled:opacity-30 disabled:cursor-not-allowed cursor-pointer transition-colors"
+            title="发送"
           >
             {isAIWorking ? (
-              <>
-                <i className="ri-loader-4-line animate-spin"></i>
-                {activeTaskType === 'translate' ? 'Translating...' : 'Explaining...'}
-              </>
+              <i className="ri-loader-4-line animate-spin text-sm"></i>
             ) : (
-              <>
-                <i className="ri-sparkling-line"></i>
-                Run
-              </>
+              <i className="ri-arrow-up-line text-sm"></i>
             )}
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+function CapabilityChip({
+  icon,
+  label,
+  isSelected,
+  isDisabled,
+  isFaded,
+  disabledReason,
+  colors,
+  onClick,
+}: {
+  icon: string;
+  label: string;
+  isSelected: boolean;
+  isDisabled: boolean;
+  isFaded?: boolean;
+  disabledReason?: string;
+  colors: ChipColorClasses;
+  onClick: () => void;
+}) {
+  const [showTooltip, setShowTooltip] = useState(false);
+
+  const handleClick = () => {
+    if (!isDisabled) onClick();
+  };
+
+  const reallyDisabled = isDisabled && !isFaded;
+
+  return (
+    <div
+      className="relative"
+      onMouseEnter={() => {
+        if (isDisabled && disabledReason) setShowTooltip(true);
+      }}
+      onMouseLeave={() => setShowTooltip(false)}
+    >
+      <button
+        onClick={handleClick}
+        disabled={reallyDisabled}
+        className={`whitespace-nowrap inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium rounded-full border transition-all duration-150 cursor-pointer ${
+          isFaded
+            ? 'border-stone-200/40 text-stone-300 bg-stone-50/60 opacity-50 hover:opacity-60'
+            : isDisabled
+              ? 'border-stone-200/50 text-stone-300 bg-stone-50/50 cursor-not-allowed'
+              : isSelected
+                ? `${colors.selectedBg} ${colors.selectedText} ${colors.selectedBorder}`
+                : 'bg-white text-stone-500 border-stone-200 hover:border-stone-300 hover:text-stone-600'
+        }`}
+      >
+        <i className={`${icon} text-xs`}></i>
+        {label}
+      </button>
+      {showTooltip && isDisabled && disabledReason && (
+        <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1.5 px-2 py-1 bg-stone-800 text-white text-[10px] rounded-md whitespace-nowrap shadow-lg z-30 pointer-events-none">
+          {disabledReason}
+          <div className="absolute top-full left-1/2 -translate-x-1/2 w-0 h-0 border-l-4 border-r-4 border-t-4 border-transparent border-t-stone-800"></div>
+        </div>
+      )}
     </div>
   );
 }
@@ -343,13 +465,14 @@ export default function AIAssistantPanel({
   isAIWorking,
   error,
   hasSelection,
-  activeTaskType,
+  activeTaskTypes,
   userInput,
   panelMode,
+  chipsState,
   onFollowUp,
   onClearCard,
   onAIRequest,
-  onTaskTypeChange,
+  onTaskTypeToggle,
   onUserInputChange,
   onPanelModeChange,
   onHistoryFollowUp,
@@ -563,11 +686,12 @@ export default function AIAssistantPanel({
         <div className="flex-shrink-0">
           <LaunchInputArea
             hasSelection={hasSelection}
-            activeTaskType={activeTaskType}
+            activeTaskTypes={activeTaskTypes}
             userInput={userInput}
             isAIWorking={isAIWorking}
+            chipsState={chipsState}
             onAIRequest={onAIRequest}
-            onTaskTypeChange={onTaskTypeChange}
+            onTaskTypeToggle={onTaskTypeToggle}
             onUserInputChange={onUserInputChange}
           />
         </div>

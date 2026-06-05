@@ -57,14 +57,30 @@ export default function ReaderPage() {
   const [aiResults, setAiResults] = useState<AIResult[]>([]);
   const [isAIWorking, setIsAIWorking] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
-  const [activeTaskType, setActiveTaskType] = useState<TaskType>('translate');
+  const [activeTaskTypes, setActiveTaskTypes] = useState<TaskType[]>([]);
   const [userInput, setUserInput] = useState('');
   const [panelMode, setPanelMode] = useState<'narrow' | 'wide' | 'overlay'>('narrow');
   const [historyConversations, setHistoryConversations] = useState<HistoryConversation[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const activeCardIdRef = useRef<number | null>(null);
   const historyRef = useRef<HistoryConversation[]>([]);
+
+  const handleTaskTypeToggle = useCallback((type: TaskType) => {
+    setActiveTaskTypes((prev) =>
+      prev.includes(type) ? prev.filter((t) => t !== type) : [...prev, type]
+    );
+  }, []);
+
+  const hasSelection = !!selectedArea;
+
+  const chipsState: Record<string, { state: 'available' | 'disabled'; reason?: string }> = {
+    translate: { state: hasSelection ? 'available' : 'disabled' },
+    explain: { state: hasSelection ? 'available' : 'disabled' },
+    dictionary: {
+      state: 'disabled',
+      reason: '仅支持 3 个词以内的文字选区',
+    },
+  };
 
   // Keep ref in sync with history state for async callbacks
   useEffect(() => {
@@ -173,8 +189,11 @@ export default function ReaderPage() {
   }, [selectedArea, pdfDoc, currentPage]);
 
   const handleAIRequest = useCallback(
-    async (taskType: TaskType, inputText?: string) => {
+    async (taskTypes: TaskType[], inputText?: string) => {
       if (!selectedArea || !pdfDoc) return;
+
+      const types = taskTypes.length > 0 ? taskTypes : (inputText?.trim() ? (['chat'] as TaskType[]) : []);
+      if (types.length === 0) return;
 
       setIsAIWorking(true);
       setAiError(null);
@@ -183,79 +202,79 @@ export default function ReaderPage() {
         const imageBase64 = await captureImage();
         if (!imageBase64) throw new Error('Failed to capture image');
 
-        const cardId = Date.now();
-        activeCardIdRef.current = cardId;
-
-        const initialMessages: Message[] = [];
-        if (inputText && inputText.trim().length > 0) {
-          initialMessages.push({
-            id: cardId + 1,
-            role: 'user',
-            text: inputText.trim(),
-            timestamp: Date.now(),
-          });
-        }
-
-        setAiResults((prev) => [
-          {
+        // Create all cards at once
+        const baseId = Date.now();
+        const cards: AIResult[] = types.map((taskType, i) => {
+          const cardId = baseId + i;
+          const initialMessages: Message[] = [];
+          if (inputText && inputText.trim().length > 0) {
+            initialMessages.push({
+              id: cardId + 100,
+              role: 'user',
+              text: inputText.trim(),
+              timestamp: Date.now(),
+            });
+          }
+          return {
             id: cardId,
             type: taskType,
             imageBase64,
             messages: [...initialMessages],
             timestamp: Date.now(),
-          },
-          ...prev,
-        ]);
-
-        const result = await translateSelection(imageBase64, 'zh-CN', taskType, inputText);
-
-        setAiResults((prev) => {
-          const idx = prev.findIndex((r) => r.id === cardId);
-          if (idx === -1) return prev;
-          const updated = [...prev];
-          const card = updated[idx];
-          updated[idx] = {
-            ...card,
-            messages: [
-              ...card.messages,
-              {
-                id: cardId + 2,
-                role: 'ai',
-                text: result.translated_text,
-                timestamp: Date.now(),
-              },
-            ],
           };
-          return updated;
         });
-        activeCardIdRef.current = null;
+
+        setAiResults((prev) => [...cards, ...prev]);
+
+        // Process each card sequentially
+        for (const card of cards) {
+          try {
+            const result = await translateSelection(imageBase64, 'zh-CN', card.type, inputText);
+            setAiResults((prev) => {
+              const idx = prev.findIndex((r) => r.id === card.id);
+              if (idx === -1) return prev;
+              const updated = [...prev];
+              const c = updated[idx];
+              updated[idx] = {
+                ...c,
+                messages: [
+                  ...c.messages,
+                  {
+                    id: card.id + 200,
+                    role: 'ai',
+                    text: result.translated_text,
+                    timestamp: Date.now(),
+                  },
+                ],
+              };
+              return updated;
+            });
+          } catch (err: any) {
+            setAiResults((prev) => {
+              const idx = prev.findIndex((r) => r.id === card.id);
+              if (idx === -1) return prev;
+              const updated = [...prev];
+              const c = updated[idx];
+              updated[idx] = {
+                ...c,
+                messages: [
+                  ...c.messages,
+                  {
+                    id: card.id + 200,
+                    role: 'ai',
+                    text: 'Request failed',
+                    timestamp: Date.now(),
+                    isError: true,
+                    errorText: err.message || 'AI request failed. Please try again.',
+                  },
+                ],
+              };
+              return updated;
+            });
+          }
+        }
       } catch (err: any) {
         setAiError(err.message || 'AI request failed. Please try again.');
-        if (activeCardIdRef.current) {
-          const failedCardId = activeCardIdRef.current;
-          setAiResults((prev) => {
-            const idx = prev.findIndex((r) => r.id === failedCardId);
-            if (idx === -1) return prev;
-            const updated = [...prev];
-            const card = updated[idx];
-            updated[idx] = {
-              ...card,
-              messages: [
-                ...card.messages,
-                {
-                  id: failedCardId + 2,
-                  role: 'ai',
-                  text: 'Request failed',
-                  timestamp: Date.now(),
-                  isError: true,
-                  errorText: err.message || 'AI request failed. Please try again.',
-                },
-              ],
-            };
-            return updated;
-          });
-        }
-        activeCardIdRef.current = null;
       } finally {
         setIsAIWorking(false);
       }
@@ -521,14 +540,15 @@ export default function ReaderPage() {
           historyLoading={historyLoading}
           isAIWorking={isAIWorking}
           error={aiError}
-          hasSelection={!!selectedArea}
-          activeTaskType={activeTaskType}
+          hasSelection={hasSelection}
+          activeTaskTypes={activeTaskTypes}
           userInput={userInput}
           panelMode={panelMode}
+          chipsState={chipsState}
           onFollowUp={handleFollowUp}
           onClearCard={handleClearCard}
           onAIRequest={handleAIRequest}
-          onTaskTypeChange={setActiveTaskType}
+          onTaskTypeToggle={handleTaskTypeToggle}
           onUserInputChange={setUserInput}
           onPanelModeChange={setPanelMode}
           onHistoryFollowUp={handleHistoryFollowUp}
