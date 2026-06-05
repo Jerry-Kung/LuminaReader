@@ -3,6 +3,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from lumina.api._run_core import execute_run, iter_run_sse_bytes, prepare_stream_run
 from lumina.config import Settings, get_settings
+from lumina.plugins import PluginRegistry, get_plugin_registry
 from lumina.providers import get_provider
 from lumina.providers.base import Provider
 from lumina.request_id import generate_request_id
@@ -23,6 +24,7 @@ async def run(
     body: TranslateRequest,
     provider: Provider = Depends(get_provider),
     settings: Settings = Depends(get_settings),
+    registry: PluginRegistry = Depends(get_plugin_registry),
 ):
     if body.options.stream:
         request_id = generate_request_id()
@@ -31,6 +33,7 @@ async def run(
             body=body,
             provider=provider,
             settings=settings,
+            registry=registry,
             request_id=request_id,
             allowed_task_types=None,
         )
@@ -47,5 +50,6 @@ async def run(
         body=body,
         provider=provider,
         settings=settings,
+        registry=registry,
         allowed_task_types=None,
     )

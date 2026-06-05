@@ -5,6 +5,8 @@ import pytest
 
 from lumina.api._run_core import PreparedStreamRun, _stream_driver_events, prepare_stream_run
 from lumina.config import Settings
+from lumina.plugins import PluginPipeline, PluginRegistry, get_plugins_root
+from lumina.plugins.base import PluginContext
 from lumina.projects.manager import auto_create_project
 from lumina.providers.base import (
     LLMMessage,
@@ -18,8 +20,6 @@ from lumina.providers.base import (
 from lumina.providers.openai_compat import _is_qwen_base_url
 from lumina.schemas.selection import ImagePayload, Selection
 from lumina.sessions import SessionStore, get_session_store, init_session_store, reset_session_store
-from lumina.tasks.base import TaskContext
-from lumina.tasks.translate import TranslateTask
 from lumina import settings_store
 
 MINIMAL_PNG_B64 = (
@@ -67,6 +67,47 @@ def _selection() -> Selection:
 
 def _image() -> ImagePayload:
     return ImagePayload(mime="image/png", data=MINIMAL_PNG_B64, width=1, height=1)
+
+
+def _stream_prepared(
+    *,
+    provider: MockStreamProvider,
+    conversation_id: str,
+    project_id: str | None = None,
+    pdf_id: str | None = None,
+    plugin_ids: list[str] | None = None,
+    settings_thinking_enabled: bool = False,
+    **kwargs: object,
+) -> PreparedStreamRun:
+    registry = PluginRegistry.load_all(get_plugins_root())
+    pipeline = PluginPipeline(
+        registry=registry,
+        provider=provider,
+        settings_thinking_enabled=settings_thinking_enabled,
+    )
+    ids = plugin_ids if plugin_ids is not None else ["translate"]
+    plugin_ctx = PluginContext(selection_text="source", target_lang="zh-CN")
+    defaults: dict[str, object] = {
+        "request_id": "req_test",
+        "start": __import__("time").perf_counter(),
+        "task_type": ids[0] if ids else "chat",
+        "page": 1,
+        "image_bytes": 0,
+        "project_id": project_id,
+        "pdf_id": pdf_id,
+        "conversation_id": conversation_id,
+        "turn_index": 0,
+        "is_first_turn": True,
+        "extract_latency_ms": None,
+        "extracted_text_chars": None,
+        "plugin_ids": ids,
+        "plugin_ctx": plugin_ctx,
+        "pipeline": pipeline,
+        "follow_up_user_input": None,
+        "meta_payload": {},
+    }
+    defaults.update(kwargs)
+    return PreparedStreamRun(**defaults)  # type: ignore[arg-type]
 
 
 async def _collect_events(gen: AsyncIterator[LLMStreamEvent]) -> list[LLMStreamEvent]:
@@ -119,28 +160,14 @@ async def test_stream_success_persists_without_interrupted_marker(data_root) -> 
         LLMStreamEvent(type="done", model="gpt-4o", thinking_enabled=False),
     ]
     provider = MockStreamProvider(events)
-    prepared = PreparedStreamRun(
-        request_id="req_test",
-        start=__import__("time").perf_counter(),
-        task_type="translate",
-        page=1,
-        image_bytes=0,
+    prepared = _stream_prepared(
+        provider=provider,
+        conversation_id=session.session_id,
         project_id=created.project_id,
         pdf_id=created.pdf_id,
-        conversation_id=session.session_id,
-        turn_index=0,
-        is_first_turn=True,
+        request_id="req_test",
         extract_latency_ms=10,
         extracted_text_chars=6,
-        drive_ctx=TaskContext(
-            extracted_text="source",
-            options={"target_lang": "zh-CN"},
-            project_id=created.project_id,
-            pdf_id=created.pdf_id,
-        ),
-        task=TranslateTask(),
-        follow_up_user_question=None,
-        meta_payload={},
     )
     collected = await _collect_events(
         _stream_driver_events(prepared=prepared, provider=provider)
@@ -192,28 +219,12 @@ async def test_stream_error_persists_interrupted_marker(data_root) -> None:
             LLMStreamEvent(type="error", code="PROVIDER_ERROR", message="fail", retriable=False),
         ]
     )
-    prepared = PreparedStreamRun(
-        request_id="req_test2",
-        start=__import__("time").perf_counter(),
-        task_type="translate",
-        page=1,
-        image_bytes=0,
+    prepared = _stream_prepared(
+        provider=provider,
+        conversation_id=session.session_id,
         project_id=created.project_id,
         pdf_id=created.pdf_id,
-        conversation_id=session.session_id,
-        turn_index=0,
-        is_first_turn=True,
-        extract_latency_ms=None,
-        extracted_text_chars=None,
-        drive_ctx=TaskContext(
-            extracted_text="source",
-            options={"target_lang": "zh-CN"},
-            project_id=created.project_id,
-            pdf_id=created.pdf_id,
-        ),
-        task=TranslateTask(),
-        follow_up_user_question=None,
-        meta_payload={},
+        request_id="req_test2",
     )
     await _collect_events(_stream_driver_events(prepared=prepared, provider=provider))
 
@@ -265,26 +276,12 @@ async def test_stream_cancelled_persists_interrupted(data_root) -> None:
 
     provider = MockStreamProvider([])
     provider.invoke_stream = _aborting_stream  # type: ignore[method-assign]
-    prepared = PreparedStreamRun(
-        request_id="req_test3",
-        start=__import__("time").perf_counter(),
-        task_type="translate",
-        page=1,
-        image_bytes=0,
+    prepared = _stream_prepared(
+        provider=provider,
+        conversation_id=session.session_id,
         project_id=created.project_id,
         pdf_id=created.pdf_id,
-        conversation_id=session.session_id,
-        turn_index=0,
-        is_first_turn=True,
-        extract_latency_ms=None,
-        extracted_text_chars=None,
-        drive_ctx=TaskContext(
-            extracted_text="source",
-            options={"target_lang": "zh-CN"},
-        ),
-        task=TranslateTask(),
-        follow_up_user_question=None,
-        meta_payload={},
+        request_id="req_test3",
     )
     with pytest.raises(asyncio.CancelledError):
         async for _ in _stream_driver_events(prepared=prepared, provider=provider):
@@ -321,11 +318,13 @@ async def test_first_turn_extract_non_stream_then_driver_stream(monkeypatch) -> 
         image=_image(),
         options=TranslateOptions(stream=True),
     )
+    registry = PluginRegistry.load_all(get_plugins_root())
     prep = await prepare_stream_run(
         request=Request(scope),
         body=body,
         provider=provider,
         settings=Settings(openai_api_key="sk-test", openai_model="gpt-4o"),
+        registry=registry,
         request_id="req_first",
     )
     assert not isinstance(prep, __import__("fastapi").responses.JSONResponse)
@@ -381,23 +380,15 @@ async def test_stream_injects_thinking_when_enabled(data_root, monkeypatch) -> N
         }
     )
     provider = MockStreamProvider([LLMStreamEvent(type="done", model="qwen-max")])
-    prepared = PreparedStreamRun(
-        request_id="req_think",
-        start=__import__("time").perf_counter(),
-        task_type="translate",
-        page=1,
-        image_bytes=0,
+    prepared = _stream_prepared(
+        provider=provider,
+        conversation_id=session.session_id,
         project_id=created.project_id,
         pdf_id=created.pdf_id,
-        conversation_id=session.session_id,
-        turn_index=0,
-        is_first_turn=True,
-        extract_latency_ms=None,
-        extracted_text_chars=None,
-        drive_ctx=TaskContext(extracted_text="source", options={"target_lang": "zh-CN"}),
-        task=TranslateTask(),
-        follow_up_user_question=None,
-        meta_payload={},
+        request_id="req_think",
+        plugin_ids=["explain"],
+        task_type="explain",
+        settings_thinking_enabled=True,
     )
     await _collect_events(_stream_driver_events(prepared=prepared, provider=provider))
     assert provider.last_stream_request is not None

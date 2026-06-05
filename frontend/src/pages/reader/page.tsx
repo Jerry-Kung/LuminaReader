@@ -22,7 +22,7 @@ import {
 } from '@/services/api';
 import Toolbar from './components/Toolbar';
 import PDFViewer from './components/PDFViewer';
-import AIAssistantPanel from './components/AIAssistantPanel';
+import AIAssistantPanel, { type ChipPluginType, type ChipsState } from './components/AIAssistantPanel';
 import ThumbnailPanel from './components/ThumbnailPanel';
 
 type RetryPayload =
@@ -30,22 +30,25 @@ type RetryPayload =
       kind: 'first_turn';
       cardId: number;
       taskType: TaskType;
+      plugins: ChipPluginType[];
       capture: CaptureResult;
-      userQuestion?: string;
+      userInput?: string;
       pdfId?: string;
     }
   | {
       kind: 'follow_up';
       cardId: number;
       taskType: TaskType;
+      plugins: ChipPluginType[];
       sessionId: string;
-      userQuestion: string;
+      userInput: string;
     }
   | {
       kind: 'history_follow_up';
       conversationId: string;
       taskType: TaskType;
-      userQuestion: string;
+      plugins: ChipPluginType[];
+      userInput: string;
     };
 
 export interface Message {
@@ -139,6 +142,14 @@ function nextMsgId(): number {
   return Date.now() * 1000 + (msgSeq++ % 1000);
 }
 
+// 把卡片/历史保存的单一 TaskType 还原为 plugins 数组：
+// 'chat' → []（自由 Chat 模式）；其它三类 → [type]。
+// 追问轮后端允许跨插件，但前端默认沿用本卡的 type，无 UI 让用户改。
+function taskTypeToPlugins(t: TaskType): ChipPluginType[] {
+  if (t === 'chat') return [];
+  return [t];
+}
+
 interface TextDeltaCommitter {
   push: (delta: string) => void;
   flushNow: () => void;
@@ -223,7 +234,7 @@ export default function ReaderPage() {
   const [aiResults, setAiResults] = useState<AIResult[]>([]);
   const [isAIWorking, setIsAIWorking] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
-  const [activeTaskType, setActiveTaskType] = useState<TaskType>('translate');
+  const [activeTaskTypes, setActiveTaskTypes] = useState<ChipPluginType[]>([]);
   const [userInput, setUserInput] = useState('');
   const [panelMode, setPanelMode] = useState<'narrow' | 'wide' | 'overlay'>('narrow');
   const [history, setHistory] = useState<HistoryEntry[]>([]);
@@ -404,6 +415,22 @@ export default function ReaderPage() {
     setSelectedArea(area);
   }, []);
 
+  const handleTaskTypeToggle = useCallback((type: ChipPluginType) => {
+    setActiveTaskTypes((prev) =>
+      prev.includes(type) ? prev.filter((t) => t !== type) : [...prev, type],
+    );
+  }, []);
+
+  // chipsState：首轮发起前，前端无法本地求字数（OCR 文本由首轮 extract 任务产出），
+  // 因此 dictionary 在 UI 上默认 disabled + tooltip，仅作引导；用户即便绕过前端发请求，
+  // 后端 applicable_when（max=3）会兜底返回 400 INVALID_REQUEST。
+  const hasSelection = !!selectedArea;
+  const chipsState: ChipsState = {
+    translate: { state: hasSelection ? 'available' : 'disabled' },
+    explain: { state: hasSelection ? 'available' : 'disabled' },
+    dictionary: { state: 'disabled', reason: '仅支持 3 个词以内的文字选区' },
+  };
+
   const captureImage = useCallback(async (): Promise<CaptureResult | null> => {
     if (!selectedArea || !pdfDoc) return null;
     const page = await pdfDoc.getPage(currentPage);
@@ -457,15 +484,17 @@ export default function ReaderPage() {
   }, [selectedArea, pdfDoc, currentPage]);
 
   const handleAIRequest = useCallback(
-    async (taskType: TaskType, inputText?: string) => {
+    async (taskTypes: ChipPluginType[], inputText?: string) => {
       if (!selectedArea || !pdfDoc) return;
+      const trimmedInput = inputText?.trim();
+      // V1.1.1：空 chip 列表时需有用户输入才能成立（自由 Chat 模式）
+      if (taskTypes.length === 0 && !trimmedInput) return;
 
       setIsAIWorking(true);
       setAiError(null);
 
       const cardId = nextMsgId();
       const loadingId = nextMsgId();
-      const trimmedInput = inputText?.trim();
 
       let capture: CaptureResult;
       try {
@@ -490,11 +519,14 @@ export default function ReaderPage() {
       }
       initialMessages.push(loadingMessage(loadingId));
 
+      // 卡片头部徽章用 plugins[0]；plugins 为空（自由 Chat）走 'chat' 徽章
+      const cardTaskType: TaskType = taskTypes[0] ?? 'chat';
+
       setAiResults((prev) => [
         ...prev.map((r) => (r.collapsed ? r : { ...r, collapsed: true })),
         {
           id: cardId,
-          type: taskType,
+          type: cardTaskType,
           sessionId: '',
           imageBase64: capture.dataUrl,
           messages: initialMessages,
@@ -506,9 +538,10 @@ export default function ReaderPage() {
       const retryPayload: RetryPayload = {
         kind: 'first_turn',
         cardId,
-        taskType,
+        taskType: cardTaskType,
+        plugins: [...taskTypes],
         capture,
-        userQuestion: trimmedInput,
+        userInput: trimmedInput,
         pdfId,
       };
 
@@ -617,10 +650,10 @@ export default function ReaderPage() {
       };
 
       const handle = runTaskStream(
-        taskType,
+        taskTypes,
         capture.selection,
         { data: capture.base64, width: capture.width, height: capture.height },
-        { targetLang: 'zh-CN', userQuestion: trimmedInput, pdfId },
+        { targetLang: 'zh-CN', userInput: trimmedInput, pdfId },
         callbacks,
       );
       cardStreamsRef.current.set(cardId, handle);
@@ -659,8 +692,9 @@ export default function ReaderPage() {
         kind: 'follow_up',
         cardId,
         taskType,
+        plugins: taskTypeToPlugins(taskType),
         sessionId,
-        userQuestion: trimmed,
+        userInput: trimmed,
       };
 
       const committer = createTextDeltaCommitter((appended) => {
@@ -757,7 +791,7 @@ export default function ReaderPage() {
         },
       };
 
-      const handle = runFollowUpStream(taskType, sessionId, trimmed, { targetLang: 'zh-CN' }, callbacks);
+      const handle = runFollowUpStream(taskTypeToPlugins(taskType), sessionId, trimmed, { targetLang: 'zh-CN' }, callbacks);
       cardStreamsRef.current.set(cardId, handle);
     },
     [aiResults],
@@ -899,7 +933,8 @@ export default function ReaderPage() {
         kind: 'history_follow_up',
         conversationId,
         taskType,
-        userQuestion: trimmed,
+        plugins: taskTypeToPlugins(taskType),
+        userInput: trimmed,
       };
 
       const committer = createTextDeltaCommitter((appended) => {
@@ -991,7 +1026,7 @@ export default function ReaderPage() {
         },
       };
 
-      const handle = runFollowUpStream(taskType, conversationId, trimmed, { targetLang: 'zh-CN' }, callbacks);
+      const handle = runFollowUpStream(taskTypeToPlugins(taskType), conversationId, trimmed, { targetLang: 'zh-CN' }, callbacks);
       historyStreamsRef.current.set(conversationId, handle);
     },
     [history],
@@ -1142,10 +1177,10 @@ export default function ReaderPage() {
         };
 
         const handle = runTaskStream(
-          r.taskType,
+          r.plugins,
           r.capture.selection,
           { data: r.capture.base64, width: r.capture.width, height: r.capture.height },
-          { targetLang: 'zh-CN', userQuestion: r.userQuestion, pdfId: r.pdfId },
+          { targetLang: 'zh-CN', userInput: r.userInput, pdfId: r.pdfId },
           callbacks,
         );
         cardStreamsRef.current.set(r.cardId, handle);
@@ -1255,9 +1290,9 @@ export default function ReaderPage() {
         };
 
         const handle = runFollowUpStream(
-          r.taskType,
+          r.plugins,
           r.sessionId,
-          r.userQuestion,
+          r.userInput,
           { targetLang: 'zh-CN' },
           callbacks,
         );
@@ -1364,9 +1399,9 @@ export default function ReaderPage() {
         };
 
         const handle = runFollowUpStream(
-          r.taskType,
+          r.plugins,
           r.conversationId,
-          r.userQuestion,
+          r.userInput,
           { targetLang: 'zh-CN' },
           callbacks,
         );
@@ -1478,14 +1513,15 @@ export default function ReaderPage() {
           isAIWorking={isAIWorking}
           error={aiError}
           hasSelection={!!selectedArea}
-          activeTaskType={activeTaskType}
+          activeTaskTypes={activeTaskTypes}
           userInput={userInput}
           panelMode={panelMode}
+          chipsState={chipsState}
           onFollowUp={handleFollowUp}
           onClearCard={handleClearCard}
           onToggleCollapse={handleToggleCollapse}
           onAIRequest={handleAIRequest}
-          onTaskTypeChange={setActiveTaskType}
+          onTaskTypeToggle={handleTaskTypeToggle}
           onUserInputChange={setUserInput}
           onPanelModeChange={setPanelMode}
           onRetry={handleRetry}

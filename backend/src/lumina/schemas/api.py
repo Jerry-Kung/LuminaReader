@@ -19,6 +19,8 @@ class TranslateRequest(BaseModel):
     pdf_id: str | None = None
     selection: Selection | None = None
     image: ImagePayload | None = None
+    plugins: list[str] = Field(default_factory=list)
+    user_input: str | None = None
     options: TranslateOptions = Field(default_factory=TranslateOptions)
 
 
@@ -68,6 +70,7 @@ class TranslateMeta(BaseModel):
     task_type: str | None = None
     turn_index: int | None = None
     thinking_enabled: bool = False
+    plugins: list[str] = Field(default_factory=list)
 
 
 class TranslateData(BaseModel):

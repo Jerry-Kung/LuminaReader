@@ -32,8 +32,10 @@ from lumina.providers.base import (
     TextPart,
 )
 from lumina.providers.errors import StreamUnsupportedError
+from lumina.plugins import PluginPipeline
+from lumina.plugins.base import PluginContext, estimate_word_count
+from lumina.plugins.registry import PluginRegistry
 from lumina.providers.openai_compat import _is_qwen_base_url
-from lumina.tasks.base import Task
 from lumina.schemas.api import (
     TranslateData,
     TranslateMeta,
@@ -43,8 +45,7 @@ from lumina.schemas.api import (
     ok_response,
 )
 from lumina.sessions import get_session_store
-from lumina.tasks import get_task
-from lumina.tasks.base import TaskContext, UnsupportedTaskError
+from lumina.tasks.base import TaskContext, TaskResult, UnsupportedTaskError
 from lumina.tasks.extract import EXTRACT_TASK
 
 MAX_BODY_BYTES = 8 * 1024 * 1024
@@ -52,6 +53,18 @@ ALLOWED_IMAGE_MIME = "image/png"
 API_VERSION = "v1"
 
 logger = get_logger("lumina.run")
+
+
+class RunInvalidRequestError(Exception):
+    def __init__(
+        self,
+        message: str,
+        field_errors: list[dict[str, str]] | None = None,
+    ) -> None:
+        self.message = message
+        self.field_errors = field_errors or []
+        super().__init__(message)
+
 
 STREAM_HEARTBEAT_SECONDS = 15.0
 _SSE_KEEP_ALIVE = b":keep-alive\n\n"
@@ -72,16 +85,98 @@ def _usage_to_dict(usage: LLMUsage | None) -> dict:
     }
 
 
-def _thinking_enabled_for_meta() -> bool:
+def _thinking_enabled_for_meta(
+    pipeline: PluginPipeline,
+    plugin_ids: list[str],
+) -> bool:
+    if not pipeline.decide_thinking(plugin_ids):
+        return False
     try:
         current = settings_store.get_current()
-        return current.thinking.enabled and _is_qwen_base_url(current.base_url)
+        return _is_qwen_base_url(current.base_url)
     except RuntimeError:
         return False
 
 
-def _task_supports_stream(_task: Task) -> bool:
-    return True
+def _plugins_log_value(plugin_ids: list[str]) -> str:
+    return ",".join(plugin_ids) if plugin_ids else "chat"
+
+
+def _conversation_task_type(plugin_ids: list[str]) -> str:
+    return plugin_ids[0] if plugin_ids else "chat"
+
+
+def _model_override_task(plugin_ids: list[str]) -> str | None:
+    if not plugin_ids:
+        return None
+    return plugin_ids[0]
+
+
+def _make_pipeline(
+    registry: PluginRegistry,
+    provider: Provider,
+) -> PluginPipeline:
+    return PluginPipeline(
+        registry=registry,
+        provider=provider,
+        settings_thinking_enabled=_thinking_enabled_from_settings(),
+    )
+
+
+def resolve_plugin_routing(
+    body: TranslateRequest,
+    registry: PluginRegistry,
+    ctx: PluginContext,
+) -> tuple[list[str], str | None]:
+    if body.plugins:
+        plugin_ids = list(body.plugins)
+        field_errors: list[dict[str, str]] = []
+        for i, pid in enumerate(plugin_ids):
+            if pid not in registry.plugins:
+                field_errors.append(
+                    {
+                        "path": f"plugins[{i}]",
+                        "reason": f"unknown plugin id: {pid}",
+                    }
+                )
+        if field_errors:
+            raise RunInvalidRequestError(
+                "plugins contain unknown ids",
+                field_errors=field_errors,
+            )
+    elif body.task_type == "translate":
+        plugin_ids = ["translate"]
+    elif body.task_type == "explain":
+        plugin_ids = ["explain"]
+    elif body.task_type == "chat":
+        plugin_ids = []
+    else:
+        raise UnsupportedTaskError(body.task_type)
+
+    user_input = body.user_input if body.user_input else body.options.user_question
+
+    if not plugin_ids and not user_input:
+        raise RunInvalidRequestError("either plugins or user_input is required")
+
+    field_errors = []
+    for i, pid in enumerate(plugin_ids):
+        plugin = registry.get(pid)
+        if not plugin.is_applicable(ctx):
+            field_errors.append(
+                {
+                    "path": f"plugins[{i}]",
+                    "reason": (
+                        f"plugin {pid} is not applicable to the current selection"
+                    ),
+                }
+            )
+    if field_errors:
+        raise RunInvalidRequestError(
+            "plugin not applicable",
+            field_errors=field_errors,
+        )
+
+    return plugin_ids, user_input
 
 
 @dataclass
@@ -98,9 +193,10 @@ class PreparedStreamRun:
     is_first_turn: bool
     extract_latency_ms: int | None
     extracted_text_chars: int | None
-    drive_ctx: TaskContext
-    task: Task
-    follow_up_user_question: str | None
+    plugin_ids: list[str]
+    plugin_ctx: PluginContext
+    pipeline: PluginPipeline
+    follow_up_user_input: str | None
     meta_payload: dict
     meta_ready: asyncio.Event = field(default_factory=asyncio.Event)
 
@@ -150,6 +246,7 @@ def _log_run_call(
     pdf_id: str | None = None,
     conversation_id: str | None = None,
     thinking_enabled: bool | None = None,
+    plugins: str | None = None,
 ) -> None:
     log_with_fields(
         logger,
@@ -158,6 +255,7 @@ def _log_run_call(
         request_id=request_id,
         api_version=api_version,
         task_type=task_type,
+        plugins=plugins if plugins is not None else "",
         page=page,
         image_bytes=image_bytes,
         model=model or "",
@@ -197,6 +295,7 @@ def _error_json(
     project_id: str | None = None,
     pdf_id: str | None = None,
     conversation_id: str | None = None,
+    field_errors: list[dict[str, str]] | None = None,
 ) -> JSONResponse:
     _log_run_call(
         request_id=request_id,
@@ -218,24 +317,32 @@ def _error_json(
         pdf_id=pdf_id,
         conversation_id=conversation_id,
     )
+    error_kwargs: dict[str, object] = {}
+    if field_errors:
+        error_kwargs["field_errors"] = field_errors
     return JSONResponse(
         status_code=status_code,
-        content=error_response(code=code, message=message, request_id=request_id),
+        content=error_response(
+            code=code,
+            message=message,
+            request_id=request_id,
+            **error_kwargs,
+        ),
     )
 
 
-def _resolve_task(
+def _routing_error_response(
     *,
-    body: TranslateRequest,
-    allowed_task_types: set[str] | None,
+    exc: Exception,
     request_id: str,
     api_version: str,
+    task_type: str,
     page: int,
     image_bytes: int,
-):
-    task_type = body.task_type
-    if allowed_task_types is not None and task_type not in allowed_task_types:
-        return None, _error_json(
+    **log_kwargs: object,
+) -> JSONResponse:
+    if isinstance(exc, UnsupportedTaskError):
+        return _error_json(
             status_code=400,
             code="UNSUPPORTED_TASK",
             message="Unsupported task type.",
@@ -244,20 +351,22 @@ def _resolve_task(
             task_type=task_type,
             page=page,
             image_bytes=image_bytes,
+            **log_kwargs,
         )
-    try:
-        return get_task(body.task_type), None
-    except UnsupportedTaskError:
-        return None, _error_json(
+    if isinstance(exc, RunInvalidRequestError):
+        return _error_json(
             status_code=400,
-            code="UNSUPPORTED_TASK",
-            message="Unsupported task type.",
+            code="INVALID_REQUEST",
+            message=exc.message,
             request_id=request_id,
             api_version=api_version,
             task_type=task_type,
             page=page,
             image_bytes=image_bytes,
+            field_errors=exc.field_errors,
+            **log_kwargs,
         )
+    raise exc
 
 
 def _validate_image_payload(
@@ -346,7 +455,37 @@ def _inject_model_override(req: LLMRequest, override_task_type: str) -> LLMReque
     return req
 
 
-async def _invoke_task(
+async def _invoke_extract_task(
+    *,
+    ctx: TaskContext,
+    provider: Provider,
+    request_id: str,
+    api_version: str,
+    task_type: str,
+    page: int,
+    image_bytes: int,
+    start: float,
+    project_id: str | None = None,
+    pdf_id: str | None = None,
+):
+    return await _invoke_task_legacy(
+        task=EXTRACT_TASK,
+        ctx=ctx,
+        provider=provider,
+        request_id=request_id,
+        api_version=api_version,
+        task_type=task_type,
+        page=page,
+        image_bytes=image_bytes,
+        start=start,
+        model_override_task="extract",
+        apply_thinking=False,
+        project_id=project_id,
+        pdf_id=pdf_id,
+    )
+
+
+async def _invoke_task_legacy(
     *,
     task,
     ctx: TaskContext,
@@ -430,6 +569,86 @@ async def _invoke_task(
         )
 
 
+async def _invoke_pipeline(
+    *,
+    pipeline: PluginPipeline,
+    plugin_ids: list[str],
+    plugin_ctx: PluginContext,
+    provider: Provider,
+    request_id: str,
+    api_version: str,
+    task_type: str,
+    page: int,
+    image_bytes: int,
+    start: float,
+    model_override_task: str | None = None,
+    session_id: str | None = None,
+    turn_index: int | None = None,
+    extract_latency_ms: int | None = None,
+    extracted_text_chars: int | None = None,
+    project_id: str | None = None,
+    pdf_id: str | None = None,
+    conversation_id: str | None = None,
+):
+    try:
+        llm_req = pipeline.build_request(plugin_ids, plugin_ctx)
+        if model_override_task is not None:
+            llm_req = _inject_model_override(llm_req, model_override_task)
+        llm_resp = await provider.invoke(llm_req)
+        return TaskResult(text=llm_resp.text), llm_resp, None
+    except ProviderTimeout:
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        return None, None, _error_json(
+            status_code=504,
+            code="PROVIDER_TIMEOUT",
+            message="Upstream LLM request timed out.",
+            request_id=request_id,
+            api_version=api_version,
+            task_type=task_type,
+            page=page,
+            image_bytes=image_bytes,
+            latency_ms=latency_ms,
+            session_id=session_id,
+            turn_index=turn_index,
+            extract_latency_ms=extract_latency_ms,
+            extracted_text_chars=extracted_text_chars,
+        )
+    except (ProviderAuthError, ProviderUpstreamError):
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        return None, None, _error_json(
+            status_code=502,
+            code="PROVIDER_ERROR",
+            message="Upstream LLM request failed.",
+            request_id=request_id,
+            api_version=api_version,
+            task_type=task_type,
+            page=page,
+            image_bytes=image_bytes,
+            latency_ms=latency_ms,
+            session_id=session_id,
+            turn_index=turn_index,
+            extract_latency_ms=extract_latency_ms,
+            extracted_text_chars=extracted_text_chars,
+        )
+    except ProviderConfigError:
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        return None, None, _error_json(
+            status_code=500,
+            code="INTERNAL_ERROR",
+            message="An internal server error occurred.",
+            request_id=request_id,
+            api_version=api_version,
+            task_type=task_type,
+            page=page,
+            image_bytes=image_bytes,
+            latency_ms=latency_ms,
+            session_id=session_id,
+            turn_index=turn_index,
+            extract_latency_ms=extract_latency_ms,
+            extracted_text_chars=extracted_text_chars,
+        )
+
+
 def _build_success_response(
     *,
     request_id: str,
@@ -447,6 +666,7 @@ def _build_success_response(
     project_id: str | None = None,
     pdf_id: str | None = None,
     conversation_id: str | None = None,
+    plugins: list[str] | None = None,
 ):
     latency_ms = int((time.perf_counter() - start) * 1000)
     usage = None
@@ -463,6 +683,7 @@ def _build_success_response(
         "latency_ms": latency_ms,
         "usage": usage,
         "task_type": task_type,
+        "plugins": plugins or [],
     }
     if turn_index is not None:
         meta_kwargs["turn_index"] = turn_index
@@ -496,6 +717,7 @@ def _build_success_response(
         pdf_id=pdf_id,
         conversation_id=conversation_id,
         thinking_enabled=llm_resp.thinking_enabled,
+        plugins=_plugins_log_value(plugins or []),
     )
     return ok_response(data)
 
@@ -506,12 +728,14 @@ async def _execute_first_turn_v1(
     body: TranslateRequest,
     provider: Provider,
     settings: Settings,
+    registry: PluginRegistry,
     request_id: str,
     start: float,
     allowed_task_types: set[str] | None,
 ) -> JSONResponse | dict[str, object]:
     task_type = body.task_type
     page = body.selection.page if body.selection is not None else 0
+    pipeline = _make_pipeline(registry, provider)
 
     if not body.pdf_id:
         return _error_json(
@@ -567,17 +791,6 @@ async def _execute_first_turn_v1(
     if image_error is not None:
         return image_error
 
-    task, task_error = _resolve_task(
-        body=body,
-        allowed_task_types=allowed_task_types,
-        request_id=request_id,
-        api_version="v1",
-        page=page,
-        image_bytes=image_bytes,
-    )
-    if task_error is not None:
-        return task_error
-
     extract_ctx = TaskContext(
         selection=body.selection,
         image=body.image,
@@ -586,8 +799,7 @@ async def _execute_first_turn_v1(
         pdf_id=pdf_id,
     )
     extract_start = time.perf_counter()
-    extract_result, extract_resp, extract_error = await _invoke_task(
-        task=EXTRACT_TASK,
+    extract_result, extract_resp, extract_error = await _invoke_extract_task(
         ctx=extract_ctx,
         provider=provider,
         request_id=request_id,
@@ -596,8 +808,6 @@ async def _execute_first_turn_v1(
         page=page,
         image_bytes=image_bytes,
         start=start,
-        model_override_task="extract",
-        apply_thinking=False,
         project_id=project_id,
         pdf_id=pdf_id,
     )
@@ -608,31 +818,42 @@ async def _execute_first_turn_v1(
     extracted_text = extract_result.text
     extracted_text_chars = len(extracted_text)
 
-    drive_ctx = TaskContext(
-        selection=None,
-        image=None,
-        extracted_text=extracted_text,
-        user_question=body.options.user_question,
+    plugin_ctx = PluginContext(
+        selection_text=extracted_text,
+        selection_type="image",
+        selection_word_count=estimate_word_count(extracted_text),
+        target_lang=body.options.target_lang,
         history=[],
-        options={
-            "target_lang": body.options.target_lang,
-            "temperature": settings.llm_temperature,
-        },
-        project_id=project_id,
-        pdf_id=pdf_id,
     )
+    try:
+        plugin_ids, user_input = resolve_plugin_routing(body, registry, plugin_ctx)
+    except (UnsupportedTaskError, RunInvalidRequestError) as exc:
+        return _routing_error_response(
+            exc=exc,
+            request_id=request_id,
+            api_version="v1",
+            task_type=task_type,
+            page=page,
+            image_bytes=image_bytes,
+            project_id=project_id,
+            pdf_id=pdf_id,
+        )
 
-    result, llm_resp, invoke_error = await _invoke_task(
-        task=task,
-        ctx=drive_ctx,
+    plugin_ctx = plugin_ctx.model_copy(update={"user_input": user_input})
+    conversation_task_type = _conversation_task_type(plugin_ids)
+
+    result, llm_resp, invoke_error = await _invoke_pipeline(
+        pipeline=pipeline,
+        plugin_ids=plugin_ids,
+        plugin_ctx=plugin_ctx,
         provider=provider,
         request_id=request_id,
         api_version="v1",
-        task_type=task_type,
+        task_type=conversation_task_type,
         page=page,
         image_bytes=image_bytes,
         start=start,
-        model_override_task=task_type,
+        model_override_task=_model_override_task(plugin_ids),
         turn_index=0,
         extract_latency_ms=extract_latency_ms,
         extracted_text_chars=extracted_text_chars,
@@ -644,9 +865,7 @@ async def _execute_first_turn_v1(
 
     conversation_id = f"conv_{ULID()}"
     selection_id = f"sel_{ULID()}"
-    user_history_text = _compose_user_history_text(
-        extracted_text, body.options.user_question
-    )
+    user_history_text = _compose_user_history_text(extracted_text, user_input)
 
     store = get_session_store()
     meta = {
@@ -688,10 +907,10 @@ async def _execute_first_turn_v1(
             project_id=project_id,
             pdf_id=pdf_id,
             selection_id=selection_id,
-            task_type=task_type,
+            task_type=conversation_task_type,
             extracted_text=extracted_text,
             selection_row=selection_row,
-            first_user_question=body.options.user_question,
+            first_user_question=user_input,
             first_user_content=user_history_text,
             first_assistant_text=result.text,
             first_assistant_meta=assistant_meta,
@@ -704,7 +923,7 @@ async def _execute_first_turn_v1(
             message="An internal server error occurred.",
             request_id=request_id,
             api_version="v1",
-            task_type=task_type,
+            task_type=conversation_task_type,
             page=page,
             image_bytes=image_bytes,
             project_id=project_id,
@@ -724,7 +943,7 @@ async def _execute_first_turn_v1(
     return _build_success_response(
         request_id=request_id,
         api_version="v1",
-        task_type=task_type,
+        task_type=conversation_task_type,
         page=page,
         image_bytes=image_bytes,
         start=start,
@@ -737,6 +956,7 @@ async def _execute_first_turn_v1(
         project_id=project_id,
         pdf_id=pdf_id,
         conversation_id=conversation_id,
+        plugins=plugin_ids,
     )
 
 
@@ -745,12 +965,14 @@ async def _execute_follow_up_v1(
     body: TranslateRequest,
     provider: Provider,
     settings: Settings,
+    registry: PluginRegistry,
     request_id: str,
     start: float,
     allowed_task_types: set[str] | None,
 ) -> JSONResponse | dict[str, object]:
     task_type = body.task_type
     page = body.selection.page if body.selection is not None else 0
+    pipeline = _make_pipeline(registry, provider)
 
     if body.image is not None:
         return _error_json(
@@ -764,31 +986,6 @@ async def _execute_follow_up_v1(
             image_bytes=0,
             session_id=body.session_id,
         )
-
-    user_question = body.options.user_question
-    if not user_question:
-        return _error_json(
-            status_code=400,
-            code="INVALID_REQUEST",
-            message="Follow-up turn requires options.user_question.",
-            request_id=request_id,
-            api_version="v1",
-            task_type=task_type,
-            page=page,
-            image_bytes=0,
-            session_id=body.session_id,
-        )
-
-    task, task_error = _resolve_task(
-        body=body,
-        allowed_task_types=allowed_task_types,
-        request_id=request_id,
-        api_version="v1",
-        page=page,
-        image_bytes=0,
-    )
-    if task_error is not None:
-        return task_error
 
     store = get_session_store()
     session = await store.get(body.session_id)
@@ -805,11 +1002,22 @@ async def _execute_follow_up_v1(
             session_id=body.session_id,
         )
 
-    if session.task_type != body.task_type:
-        return _error_json(
-            status_code=400,
-            code="SESSION_TASK_MISMATCH",
-            message="Task type does not match session.",
+    # V1.1.1: cross-plugin follow-up allowed; SESSION_TASK_MISMATCH check removed.
+
+    turn_index = len(session.messages) // 2
+
+    plugin_ctx = PluginContext(
+        selection_text=session.extracted_text,
+        selection_type="image",
+        selection_word_count=estimate_word_count(session.extracted_text),
+        target_lang=body.options.target_lang,
+        history=list(session.messages),
+    )
+    try:
+        plugin_ids, user_input = resolve_plugin_routing(body, registry, plugin_ctx)
+    except (UnsupportedTaskError, RunInvalidRequestError) as exc:
+        return _routing_error_response(
+            exc=exc,
             request_id=request_id,
             api_version="v1",
             task_type=task_type,
@@ -818,33 +1026,21 @@ async def _execute_follow_up_v1(
             session_id=body.session_id,
         )
 
-    turn_index = len(session.messages) // 2
+    plugin_ctx = plugin_ctx.model_copy(update={"user_input": user_input})
+    conversation_task_type = _conversation_task_type(plugin_ids)
 
-    drive_ctx = TaskContext(
-        selection=None,
-        image=None,
-        extracted_text=session.extracted_text,
-        user_question=user_question,
-        history=list(session.messages),
-        options={
-            "target_lang": body.options.target_lang,
-            "temperature": settings.llm_temperature,
-        },
-        project_id=session.project_id,
-        pdf_id=session.pdf_id,
-    )
-
-    result, llm_resp, invoke_error = await _invoke_task(
-        task=task,
-        ctx=drive_ctx,
+    result, llm_resp, invoke_error = await _invoke_pipeline(
+        pipeline=pipeline,
+        plugin_ids=plugin_ids,
+        plugin_ctx=plugin_ctx,
         provider=provider,
         request_id=request_id,
         api_version="v1",
-        task_type=task_type,
+        task_type=conversation_task_type,
         page=page,
         image_bytes=0,
         start=start,
-        model_override_task=task_type,
+        model_override_task=_model_override_task(plugin_ids),
         session_id=body.session_id,
         turn_index=turn_index,
         project_id=session.project_id,
@@ -856,7 +1052,7 @@ async def _execute_follow_up_v1(
 
     user_msg_for_history = LLMMessage(
         role="user",
-        content=[TextPart(text=user_question)],
+        content=[TextPart(text=user_input or "")],
     )
     assistant_msg_for_history = LLMMessage(
         role="assistant",
@@ -878,7 +1074,7 @@ async def _execute_follow_up_v1(
     return _build_success_response(
         request_id=request_id,
         api_version="v1",
-        task_type=task_type,
+        task_type=conversation_task_type,
         page=page,
         image_bytes=0,
         start=start,
@@ -889,6 +1085,7 @@ async def _execute_follow_up_v1(
         project_id=session.project_id,
         pdf_id=session.pdf_id,
         conversation_id=body.session_id,
+        plugins=plugin_ids,
     )
 
 
@@ -898,6 +1095,7 @@ async def execute_run(
     body: TranslateRequest,
     provider: Provider,
     settings: Settings,
+    registry: PluginRegistry,
     allowed_task_types: set[str] | None = None,
 ) -> JSONResponse | dict[str, object]:
     request_id = generate_request_id()
@@ -909,6 +1107,7 @@ async def execute_run(
             body=body,
             provider=provider,
             settings=settings,
+            registry=registry,
             request_id=request_id,
             start=start,
             allowed_task_types=allowed_task_types,
@@ -918,6 +1117,7 @@ async def execute_run(
         body=body,
         provider=provider,
         settings=settings,
+        registry=registry,
         request_id=request_id,
         start=start,
         allowed_task_types=allowed_task_types,
@@ -937,10 +1137,14 @@ async def _stream_driver_events(
     stream_error: LLMStreamEvent | None = None
 
     try:
-        llm_req = prepared.task.build_request(prepared.drive_ctx)
+        llm_req = prepared.pipeline.build_request(
+            prepared.plugin_ids,
+            prepared.plugin_ctx,
+        )
         llm_req = llm_req.model_copy(update={"stream": True})
-        llm_req = _inject_model_override(llm_req, prepared.task_type)
-        llm_req = _inject_thinking(llm_req, enabled=_thinking_enabled_from_settings())
+        override_task = _model_override_task(prepared.plugin_ids)
+        if override_task is not None:
+            llm_req = _inject_model_override(llm_req, override_task)
         async for event in provider.invoke_stream(llm_req):
             if event.type == "text_delta" and event.delta:
                 accumulated_text += event.delta
@@ -981,7 +1185,7 @@ async def _stream_driver_events(
         elif accumulated_text or interrupted:
             user_msg = LLMMessage(
                 role="user",
-                content=[TextPart(text=prepared.follow_up_user_question or "")],
+                content=[TextPart(text=prepared.follow_up_user_input or "")],
             )
             assistant_msg = LLMMessage(
                 role="assistant",
@@ -1004,35 +1208,14 @@ async def prepare_stream_run(
     body: TranslateRequest,
     provider: Provider,
     settings: Settings,
+    registry: PluginRegistry,
     request_id: str,
     allowed_task_types: set[str] | None = None,
 ) -> JSONResponse | PreparedStreamRun:
     start = time.perf_counter()
     task_type = body.task_type
     page = body.selection.page if body.selection is not None else 0
-
-    task, task_error = _resolve_task(
-        body=body,
-        allowed_task_types=allowed_task_types,
-        request_id=request_id,
-        api_version=API_VERSION,
-        page=page,
-        image_bytes=0,
-    )
-    if task_error is not None:
-        return task_error
-
-    if not _task_supports_stream(task):
-        return _error_json(
-            status_code=400,
-            code="STREAM_UNSUPPORTED",
-            message="Streaming is not supported for this task.",
-            request_id=request_id,
-            api_version=API_VERSION,
-            task_type=task_type,
-            page=page,
-            image_bytes=0,
-        )
+    pipeline = _make_pipeline(registry, provider)
 
     if body.session_id is None:
         if not body.pdf_id:
@@ -1094,8 +1277,7 @@ async def prepare_stream_run(
             pdf_id=pdf_id,
         )
         extract_start = time.perf_counter()
-        extract_result, extract_resp, extract_error = await _invoke_task(
-            task=EXTRACT_TASK,
+        extract_result, extract_resp, extract_error = await _invoke_extract_task(
             ctx=extract_ctx,
             provider=provider,
             request_id=request_id,
@@ -1104,8 +1286,6 @@ async def prepare_stream_run(
             page=page,
             image_bytes=image_bytes,
             start=start,
-            model_override_task="extract",
-            apply_thinking=False,
             project_id=project_id,
             pdf_id=pdf_id,
         )
@@ -1115,25 +1295,34 @@ async def prepare_stream_run(
 
         extracted_text = extract_result.text
         extracted_text_chars = len(extracted_text)
-        drive_ctx = TaskContext(
-            selection=None,
-            image=None,
-            extracted_text=extracted_text,
-            user_question=body.options.user_question,
+
+        plugin_ctx = PluginContext(
+            selection_text=extracted_text,
+            selection_type="image",
+            selection_word_count=estimate_word_count(extracted_text),
+            target_lang=body.options.target_lang,
             history=[],
-            options={
-                "target_lang": body.options.target_lang,
-                "temperature": settings.llm_temperature,
-            },
-            project_id=project_id,
-            pdf_id=pdf_id,
         )
+        try:
+            plugin_ids, user_input = resolve_plugin_routing(body, registry, plugin_ctx)
+        except (UnsupportedTaskError, RunInvalidRequestError) as exc:
+            return _routing_error_response(
+                exc=exc,
+                request_id=request_id,
+                api_version=API_VERSION,
+                task_type=task_type,
+                page=page,
+                image_bytes=image_bytes,
+                project_id=project_id,
+                pdf_id=pdf_id,
+            )
+
+        plugin_ctx = plugin_ctx.model_copy(update={"user_input": user_input})
+        conversation_task_type = _conversation_task_type(plugin_ids)
 
         conversation_id = f"conv_{ULID()}"
         selection_id = f"sel_{ULID()}"
-        user_history_text = _compose_user_history_text(
-            extracted_text, body.options.user_question
-        )
+        user_history_text = _compose_user_history_text(extracted_text, user_input)
         store = get_session_store()
         meta = {
             "page": body.selection.page,
@@ -1167,10 +1356,10 @@ async def prepare_stream_run(
                 project_id=project_id,
                 pdf_id=pdf_id,
                 selection_id=selection_id,
-                task_type=task_type,
+                task_type=conversation_task_type,
                 extracted_text=extracted_text,
                 selection_row=selection_row,
-                first_user_question=body.options.user_question,
+                first_user_question=user_input,
                 first_user_content=user_history_text,
                 first_assistant_text="",
                 first_assistant_meta={"model": None},
@@ -1183,7 +1372,7 @@ async def prepare_stream_run(
                 message="An internal server error occurred.",
                 request_id=request_id,
                 api_version=API_VERSION,
-                task_type=task_type,
+                task_type=conversation_task_type,
                 page=page,
                 image_bytes=image_bytes,
                 project_id=project_id,
@@ -1199,16 +1388,17 @@ async def prepare_stream_run(
             "request_id": request_id,
             "session_id": conversation_id,
             "conversation_id": conversation_id,
-            "task_type": task_type,
+            "task_type": conversation_task_type,
             "turn_index": 0,
             "model": default_model,
-            "thinking_enabled": _thinking_enabled_for_meta(),
+            "thinking_enabled": _thinking_enabled_for_meta(pipeline, plugin_ids),
+            "plugins": plugin_ids,
             "extract_latency_ms": extract_latency_ms,
         }
         prepared = PreparedStreamRun(
             request_id=request_id,
             start=start,
-            task_type=task_type,
+            task_type=conversation_task_type,
             page=page,
             image_bytes=image_bytes,
             project_id=project_id,
@@ -1218,9 +1408,10 @@ async def prepare_stream_run(
             is_first_turn=True,
             extract_latency_ms=extract_latency_ms,
             extracted_text_chars=extracted_text_chars,
-            drive_ctx=drive_ctx,
-            task=task,
-            follow_up_user_question=None,
+            plugin_ids=plugin_ids,
+            plugin_ctx=plugin_ctx,
+            pipeline=pipeline,
+            follow_up_user_input=None,
             meta_payload=meta_payload,
         )
         prepared.meta_ready.set()
@@ -1231,20 +1422,6 @@ async def prepare_stream_run(
             status_code=400,
             code="INVALID_REQUEST",
             message="Follow-up turn must not include image.",
-            request_id=request_id,
-            api_version=API_VERSION,
-            task_type=task_type,
-            page=page,
-            image_bytes=0,
-            session_id=body.session_id,
-        )
-
-    user_question = body.options.user_question
-    if not user_question:
-        return _error_json(
-            status_code=400,
-            code="INVALID_REQUEST",
-            message="Follow-up turn requires options.user_question.",
             request_id=request_id,
             api_version=API_VERSION,
             task_type=task_type,
@@ -1268,11 +1445,21 @@ async def prepare_stream_run(
             session_id=body.session_id,
         )
 
-    if session.task_type != body.task_type:
-        return _error_json(
-            status_code=400,
-            code="SESSION_TASK_MISMATCH",
-            message="Task type does not match session.",
+    # V1.1.1: cross-plugin follow-up allowed; SESSION_TASK_MISMATCH check removed.
+
+    turn_index = len(session.messages) // 2
+    plugin_ctx = PluginContext(
+        selection_text=session.extracted_text,
+        selection_type="image",
+        selection_word_count=estimate_word_count(session.extracted_text),
+        target_lang=body.options.target_lang,
+        history=list(session.messages),
+    )
+    try:
+        plugin_ids, user_input = resolve_plugin_routing(body, registry, plugin_ctx)
+    except (UnsupportedTaskError, RunInvalidRequestError) as exc:
+        return _routing_error_response(
+            exc=exc,
             request_id=request_id,
             api_version=API_VERSION,
             task_type=task_type,
@@ -1281,20 +1468,9 @@ async def prepare_stream_run(
             session_id=body.session_id,
         )
 
-    turn_index = len(session.messages) // 2
-    drive_ctx = TaskContext(
-        selection=None,
-        image=None,
-        extracted_text=session.extracted_text,
-        user_question=user_question,
-        history=list(session.messages),
-        options={
-            "target_lang": body.options.target_lang,
-            "temperature": settings.llm_temperature,
-        },
-        project_id=session.project_id,
-        pdf_id=session.pdf_id,
-    )
+    plugin_ctx = plugin_ctx.model_copy(update={"user_input": user_input})
+    conversation_task_type = _conversation_task_type(plugin_ids)
+
     try:
         default_model = settings_store.get_current().default_model
     except RuntimeError:
@@ -1304,15 +1480,16 @@ async def prepare_stream_run(
         "request_id": request_id,
         "session_id": body.session_id,
         "conversation_id": body.session_id,
-        "task_type": task_type,
+        "task_type": conversation_task_type,
         "turn_index": turn_index,
         "model": default_model,
-        "thinking_enabled": _thinking_enabled_for_meta(),
+        "thinking_enabled": _thinking_enabled_for_meta(pipeline, plugin_ids),
+        "plugins": plugin_ids,
     }
     prepared = PreparedStreamRun(
         request_id=request_id,
         start=start,
-        task_type=task_type,
+        task_type=conversation_task_type,
         page=page,
         image_bytes=0,
         project_id=session.project_id,
@@ -1322,9 +1499,10 @@ async def prepare_stream_run(
         is_first_turn=False,
         extract_latency_ms=None,
         extracted_text_chars=None,
-        drive_ctx=drive_ctx,
-        task=task,
-        follow_up_user_question=user_question,
+        plugin_ids=plugin_ids,
+        plugin_ctx=plugin_ctx,
+        pipeline=pipeline,
+        follow_up_user_input=user_input,
         meta_payload=meta_payload,
     )
     prepared.meta_ready.set()
@@ -1364,6 +1542,7 @@ def _log_run_stream_completed(
         pdf_id=prepared.pdf_id or "",
         conversation_id=prepared.conversation_id,
         thinking_enabled=thinking_enabled,
+        plugins=_plugins_log_value(prepared.plugin_ids),
         stream=True,
         stream_chunks=stream_chunks,
         first_chunk_latency_ms=first_chunk_latency_ms if first_chunk_latency_ms is not None else "",

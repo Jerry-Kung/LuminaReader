@@ -1,0 +1,102 @@
+from __future__ import annotations
+
+from collections.abc import AsyncIterator
+from string import Template
+
+from lumina.plugins.base import PluginContext, PluginPromptSegments
+from lumina.plugins.registry import PluginRegistry
+from lumina.providers.base import (
+    LLMMessage,
+    LLMRequest,
+    LLMResponse,
+    LLMStreamEvent,
+    Provider,
+    TextPart,
+)
+
+
+class PluginPipeline:
+    CHAT_SYSTEM_PROMPT_TEMPLATE = (
+        "You are LuminaReader's AI reading assistant. The user is reading a PDF and may "
+        "ask questions about the content, request explanations, or seek clarifications. "
+        "Respond in ${target_lang}. Be accurate, concise, and helpful."
+    )
+
+    def __init__(
+        self,
+        registry: PluginRegistry,
+        provider: Provider,
+        settings_thinking_enabled: bool,
+    ) -> None:
+        self._registry = registry
+        self._provider = provider
+        self._settings_thinking_enabled = settings_thinking_enabled
+
+    def decide_thinking(self, plugin_ids: list[str]) -> bool:
+        return self._decide_thinking(plugin_ids)
+
+    def build_request(
+        self,
+        plugin_ids: list[str],
+        ctx: PluginContext,
+    ) -> LLMRequest:
+        if not plugin_ids:
+            system_text = Template(self.CHAT_SYSTEM_PROMPT_TEMPLATE).safe_substitute(
+                target_lang=ctx.target_lang
+            )
+            user_text = _build_chat_user_text(ctx)
+        else:
+            plugins = [self._registry.get(pid) for pid in plugin_ids]
+            segments = [p.build_segments(ctx) for p in plugins]
+            system_text = "\n\n".join(s.system for s in segments)
+            user_text = _join_user_segments(segments)
+
+        thinking = self._decide_thinking(plugin_ids)
+        messages: list[LLMMessage] = [
+            LLMMessage(role="system", content=[TextPart(text=system_text)])
+        ]
+        if ctx.history:
+            messages.extend(ctx.history)
+        messages.append(LLMMessage(role="user", content=[TextPart(text=user_text)]))
+
+        return LLMRequest(messages=messages, thinking=thinking)
+
+    async def run(
+        self,
+        plugin_ids: list[str],
+        ctx: PluginContext,
+    ) -> LLMResponse:
+        req = self.build_request(plugin_ids, ctx)
+        return await self._provider.invoke(req)
+
+    async def run_stream(
+        self,
+        plugin_ids: list[str],
+        ctx: PluginContext,
+    ) -> AsyncIterator[LLMStreamEvent]:
+        req = self.build_request(plugin_ids, ctx)
+        req = req.model_copy(update={"stream": True})
+        async for event in self._provider.invoke_stream(req):
+            yield event
+
+    def _decide_thinking(self, plugin_ids: list[str]) -> bool:
+        if not self._settings_thinking_enabled:
+            return False
+        if not plugin_ids:
+            return True
+        return any(
+            self._registry.get(pid).manifest.thinking_default for pid in plugin_ids
+        )
+
+
+def _build_chat_user_text(ctx: PluginContext) -> str:
+    parts: list[str] = []
+    if ctx.user_input:
+        parts.append(ctx.user_input)
+    if ctx.selection_text:
+        parts.append(f"\n\n[Selected content for context]:\n{ctx.selection_text}")
+    return "".join(parts)
+
+
+def _join_user_segments(segments: list[PluginPromptSegments]) -> str:
+    return "\n\n---\n\n".join(s.user for s in segments)

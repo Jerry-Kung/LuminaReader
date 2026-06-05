@@ -1,6 +1,6 @@
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '';
 
-export type TaskType = 'translate' | 'explain';
+export type TaskType = 'translate' | 'explain' | 'dictionary' | 'chat';
 
 export interface TranslateSelection {
   page: number;
@@ -33,6 +33,7 @@ export interface TranslateMeta {
 export interface RunOptions {
   targetLang?: string;
   userQuestion?: string;
+  userInput?: string;
   pdfId?: string;
 }
 
@@ -87,6 +88,7 @@ export interface StreamMeta {
   turn_index: number;
   model: string;
   thinking_enabled: boolean;
+  plugins?: string[];
   extract_latency_ms?: number;
 }
 
@@ -114,14 +116,18 @@ const MOCK_TEXTS: Record<TaskType, string> = {
     '这是模拟的翻译结果。\n\n当您配置了后端 API 地址后（在 .env 文件中设置 VITE_API_BASE_URL），这里将显示 AI 翻译的实际内容。\n\n您可以框选 PDF 中的英文段落，点击 Run 按钮，AI 将为您把选区内容翻译为简体中文。',
   explain:
     '这是模拟的解释结果。\n\n当您配置了后端 API 地址后（在 .env 文件中设置 VITE_API_BASE_URL），这里将显示 AI 对所选内容的深度解读，包括：核心观点、术语说明、必要的背景知识。',
+  dictionary:
+    '这是模拟的词典结果。\n\n选中 1–3 个词时，AI 会返回该词的发音、词性、释义、词源与例句。',
+  chat:
+    '这是模拟的自由对话回答。\n\n不选任何能力 chip 直接输入问题时，AI 会作为你的阅读助手回答提问，并参考所框选的上下文。',
 };
 
 const mockTurnCounter: Record<string, number> = {};
 
 function mockRunStream(
-  taskType: TaskType,
+  plugins: TaskType[],
   sessionId: string,
-  userQuestion: string | undefined,
+  userInput: string | undefined,
   isFollowUp: boolean,
   callbacks: RunStreamCallbacks,
 ): RunStreamHandle {
@@ -130,8 +136,10 @@ function mockRunStream(
   const conversationId = isFollowUp ? sessionId : `mock-${Date.now()}`;
   const turnIndex = mockTurnCounter[conversationId] ?? 0;
   mockTurnCounter[conversationId] = turnIndex + 1;
-  const baseText = turnIndex === 0 ? MOCK_TEXTS[taskType] : '这是模拟的追问回答。';
-  const fullText = userQuestion ? `（针对你的问题：「${userQuestion}」）\n\n${baseText}` : baseText;
+  // 用 plugins[0] 决定 mock 文本；plugins 为空时走 chat
+  const primary: TaskType = plugins[0] ?? 'chat';
+  const baseText = turnIndex === 0 ? MOCK_TEXTS[primary] : '这是模拟的追问回答。';
+  const fullText = userInput ? `（针对你的问题：「${userInput}」）\n\n${baseText}` : baseText;
   // 切成 5 段模拟流式
   const chunkSize = Math.max(1, Math.ceil(fullText.length / 5));
   const chunks: string[] = [];
@@ -144,10 +152,11 @@ function mockRunStream(
       request_id: `mock-req-${Date.now()}`,
       session_id: conversationId,
       conversation_id: conversationId,
-      task_type: taskType,
+      task_type: primary,
       turn_index: turnIndex,
       model: 'mock',
       thinking_enabled: false,
+      plugins: plugins.slice(),
       ...(isFollowUp ? {} : { extract_latency_ms: 200 }),
     };
     callbacks.onMeta(meta);
@@ -397,13 +406,18 @@ function startSSEFetch(
 }
 
 function buildFirstTurnBody(
-  taskType: TaskType,
+  plugins: TaskType[],
   selection: TranslateSelection,
   image: TranslateImage,
   options: RunOptions,
 ): Record<string, unknown> {
+  // V1.1.1 契约：plugins[] + user_input 为新字段；task_type 仍必填（后端用作回退）。
+  // 空 plugins → 走 chat 模式，task_type 传 "chat" 让后端 resolve_plugin_routing 走空 plugin 分支。
+  const taskType: TaskType = plugins[0] ?? 'chat';
   return {
     task_type: taskType,
+    plugins,
+    user_input: options.userInput ?? null,
     session_id: null,
     pdf_id: options.pdfId ?? null,
     selection: {
@@ -430,19 +444,24 @@ function buildFirstTurnBody(
 }
 
 function buildFollowUpBody(
-  taskType: TaskType,
+  plugins: TaskType[],
   sessionId: string,
-  userQuestion: string,
+  userInput: string,
   options: { targetLang?: string },
 ): Record<string, unknown> {
+  // 追问轮：plugins 可与首轮不同（V1.1.1 起跨插件追问已允许，SESSION_TASK_MISMATCH 已移除）。
+  // task_type 字段仍传 plugins[0] ?? 'chat' 维持必填。
+  const taskType: TaskType = plugins[0] ?? 'chat';
   return {
     task_type: taskType,
+    plugins,
+    user_input: userInput,
     session_id: sessionId,
     selection: null,
     image: null,
     options: {
       target_lang: options.targetLang ?? 'zh-CN',
-      user_question: userQuestion,
+      user_question: userInput,
       stream: true,
     },
   };
@@ -450,30 +469,30 @@ function buildFollowUpBody(
 
 // First turn streaming: image + selection required; backend creates the session.
 export function runTaskStream(
-  taskType: TaskType,
+  plugins: TaskType[],
   selection: TranslateSelection,
   image: TranslateImage,
   options: RunOptions,
   callbacks: RunStreamCallbacks,
 ): RunStreamHandle {
   if (!API_BASE) {
-    return mockRunStream(taskType, '', options.userQuestion, false, callbacks);
+    return mockRunStream(plugins, '', options.userInput, false, callbacks);
   }
-  return startSSEFetch(`${API_BASE}/api/v1/run`, buildFirstTurnBody(taskType, selection, image, options), callbacks);
+  return startSSEFetch(`${API_BASE}/api/v1/run`, buildFirstTurnBody(plugins, selection, image, options), callbacks);
 }
 
 // Follow-up streaming: text-driven only (Scheme D).
 export function runFollowUpStream(
-  taskType: TaskType,
+  plugins: TaskType[],
   sessionId: string,
-  userQuestion: string,
+  userInput: string,
   options: { targetLang?: string },
   callbacks: RunStreamCallbacks,
 ): RunStreamHandle {
   if (!API_BASE) {
-    return mockRunStream(taskType, sessionId, userQuestion, true, callbacks);
+    return mockRunStream(plugins, sessionId, userInput, true, callbacks);
   }
-  return startSSEFetch(`${API_BASE}/api/v1/run`, buildFollowUpBody(taskType, sessionId, userQuestion, options), callbacks);
+  return startSSEFetch(`${API_BASE}/api/v1/run`, buildFollowUpBody(plugins, sessionId, userInput, options), callbacks);
 }
 
 // Release a session ("clear conversation"). 204 = deleted, 404 = already gone — both resolve.

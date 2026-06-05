@@ -11,6 +11,8 @@ from httpx import ASGITransport
 
 from lumina.api import _run_core
 from lumina.config import Settings, get_settings
+from lumina.plugins import PluginPipeline, PluginRegistry, get_plugins_root
+from lumina.plugins.base import PluginContext
 from lumina.db.engine import close_all, get_connection
 from lumina.db.models import list_messages
 from lumina.main import create_app
@@ -96,6 +98,35 @@ class MockStreamRunProvider(Provider):
 
     async def health_check(self) -> bool:
         return True
+
+
+def _manual_prepared(
+    *,
+    provider: MockStreamRunProvider,
+    conversation_id: str,
+    meta_payload: dict,
+) -> _run_core.PreparedStreamRun:
+    registry = PluginRegistry.load_all(get_plugins_root())
+    pipeline = PluginPipeline(registry, provider, settings_thinking_enabled=False)
+    return _run_core.PreparedStreamRun(
+        request_id=meta_payload.get("request_id", "req"),
+        start=__import__("time").perf_counter(),
+        task_type="translate",
+        page=1,
+        image_bytes=0,
+        project_id=None,
+        pdf_id=None,
+        conversation_id=conversation_id,
+        turn_index=0,
+        is_first_turn=True,
+        extract_latency_ms=1,
+        extracted_text_chars=1,
+        plugin_ids=["translate"],
+        plugin_ctx=PluginContext(selection_text="x", target_lang="zh-CN"),
+        pipeline=pipeline,
+        follow_up_user_input=None,
+        meta_payload=meta_payload,
+    )
 
 
 def _event_with_sleep(delta: str, seconds: float) -> LLMStreamEvent:
@@ -240,24 +271,9 @@ async def test_sse_generator_emits_keep_alive(
 
     provider = MockStreamRunProvider()
     provider.invoke_stream = _slow_stream  # type: ignore[method-assign, assignment]
-    prepared = _run_core.PreparedStreamRun(
-        request_id="req_hb",
-        start=__import__("time").perf_counter(),
-        task_type="translate",
-        page=1,
-        image_bytes=0,
-        project_id=None,
-        pdf_id=None,
+    prepared = _manual_prepared(
+        provider=provider,
         conversation_id="conv_hb",
-        turn_index=0,
-        is_first_turn=True,
-        extract_latency_ms=1,
-        extracted_text_chars=1,
-        drive_ctx=__import__("lumina.tasks.base", fromlist=["TaskContext"]).TaskContext(
-            extracted_text="x", options={"target_lang": "zh-CN"}
-        ),
-        task=__import__("lumina.tasks.translate", fromlist=["TranslateTask"]).TranslateTask(),
-        follow_up_user_question=None,
         meta_payload={
             "request_id": "req_hb",
             "session_id": "conv_hb",
@@ -266,6 +282,7 @@ async def test_sse_generator_emits_keep_alive(
             "turn_index": 0,
             "model": "gpt-4o",
             "thinking_enabled": False,
+            "plugins": ["translate"],
         },
     )
     prepared.meta_ready.set()
@@ -322,15 +339,22 @@ def test_stream_non_stream_json_unchanged(stream_client: TestClient) -> None:
     assert response.json()["ok"] is True
 
 
-def test_stream_unsupported_returns_json_400(stream_client: TestClient) -> None:
-    with patch("lumina.api._run_core._task_supports_stream", return_value=False):
-        response = stream_client.post(
-            "/api/v1/run", json=valid_run_payload(stream_client.stream_pdf_id)
-        )
-    assert response.status_code == 400
-    body = response.json()
-    assert body["ok"] is False
-    assert body["error"]["code"] == "STREAM_UNSUPPORTED"
+def test_stream_meta_includes_plugins(stream_client: TestClient) -> None:
+    provider = MockStreamRunProvider(
+        [
+            LLMStreamEvent(type="text_delta", delta="hi"),
+            LLMStreamEvent(type="done", model="gpt-4o"),
+        ]
+    )
+    stream_client.app.dependency_overrides[get_provider] = lambda: provider
+    with stream_client.stream(
+        "POST",
+        "/api/v1/run",
+        json=valid_run_payload(stream_client.stream_pdf_id),
+    ) as response:
+        frames = _parse_sse("".join(response.iter_text()))
+    meta = next(data for name, data in frames if name == "meta")
+    assert meta["plugins"] == ["translate"]
 
 
 @pytest.mark.asyncio
@@ -348,24 +372,9 @@ async def test_sse_generator_marks_stream_aborted_on_cancel(
 
     provider = MockStreamRunProvider()
     provider.invoke_stream = _slow_stream  # type: ignore[method-assign, assignment]
-    prepared = _run_core.PreparedStreamRun(
-        request_id="req_abort",
-        start=__import__("time").perf_counter(),
-        task_type="translate",
-        page=1,
-        image_bytes=0,
-        project_id=None,
-        pdf_id=None,
+    prepared = _manual_prepared(
+        provider=provider,
         conversation_id="conv_abort",
-        turn_index=0,
-        is_first_turn=True,
-        extract_latency_ms=0,
-        extracted_text_chars=0,
-        drive_ctx=__import__("lumina.tasks.base", fromlist=["TaskContext"]).TaskContext(
-            extracted_text="x", options={"target_lang": "zh-CN"}
-        ),
-        task=__import__("lumina.tasks.translate", fromlist=["TranslateTask"]).TranslateTask(),
-        follow_up_user_question=None,
         meta_payload={
             "request_id": "req_abort",
             "session_id": "conv_abort",
@@ -374,6 +383,7 @@ async def test_sse_generator_marks_stream_aborted_on_cancel(
             "turn_index": 0,
             "model": "gpt-4o",
             "thinking_enabled": False,
+            "plugins": ["translate"],
         },
     )
     prepared.meta_ready.set()

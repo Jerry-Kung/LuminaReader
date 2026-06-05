@@ -1,0 +1,14 @@
+{
+  "id": "explain",
+  "label": "解释",
+  "icon": "ri-lightbulb-line",
+  "applicable_to": ["text", "image"],
+  "thinking_default": true,
+  "prompt_files": {
+    "system": "prompts/system.md",
+    "user": {
+      "full": "prompts/user_full.md",
+      "qa": "prompts/user_qa.md"
+    }
+  }
+}

@@ -17,6 +17,7 @@ from lumina.logging import get_logger, log_with_fields, setup_logging
 from lumina.projects.catalog import load_catalog
 from lumina.projects.paths import resolve_data_root
 from lumina import settings_store
+from lumina.plugins import PluginRegistry, get_plugins_root
 from lumina.providers import init_provider_from_resolved, reset_provider
 from lumina.sessions import cleanup_loop, init_session_store, reset_session_store
 from lumina.request_id import generate_request_id
@@ -92,7 +93,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ttl_seconds=cfg.session_ttl_seconds,
         )
         cleanup_task = asyncio.create_task(cleanup_loop(store))
+        plugin_registry = PluginRegistry.load_all(get_plugins_root())
+        app.state.plugin_registry = plugin_registry
         logger = get_logger("lumina.startup")
+        plugin_ids = ", ".join(sorted(plugin_registry.plugins.keys()))
+        log_with_fields(
+            logger,
+            logging.INFO,
+            f"loaded {len(plugin_registry.plugins)} plugins: {plugin_ids}",
+            event="plugins_loaded",
+            plugin_count=len(plugin_registry.plugins),
+            plugin_ids=plugin_ids,
+        )
         log_with_fields(
             logger,
             logging.INFO,

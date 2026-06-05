@@ -1,0 +1,11 @@
+{
+  "id": "translate",
+  "label": "翻译",
+  "icon": "ri-translate-2",
+  "applicable_to": ["text", "image"],
+  "thinking_default": false,
+  "prompt_files": {
+    "system": "prompts/system.md",
+    "user": "prompts/user.md"
+  }
+}

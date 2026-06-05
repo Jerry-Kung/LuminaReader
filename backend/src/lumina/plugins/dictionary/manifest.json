@@ -1,0 +1,14 @@
+{
+  "id": "dictionary",
+  "label": "词典",
+  "icon": "ri-book-open-line",
+  "applicable_to": ["text", "image"],
+  "applicable_when": {
+    "selection_word_count": { "max": 3 }
+  },
+  "thinking_default": false,
+  "prompt_files": {
+    "system": "prompts/system.md",
+    "user": "prompts/user.md"
+  }
+}

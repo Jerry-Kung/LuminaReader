@@ -179,7 +179,7 @@ def test_run_explain_success(run_client: TestClient) -> None:
     assert body["data"]["meta"]["turn_index"] == 0
     assert provider.last_request is not None
     system_text = provider.last_request.messages[0].content[0].text
-    assert "Explain" in system_text or "explain" in system_text
+    assert "explain system prompt placeholder" in system_text
 
 
 def test_run_unsupported_task(run_client: TestClient) -> None:
@@ -347,8 +347,8 @@ def test_run_follow_up_task_type_mismatch(run_client: TestClient) -> None:
         "/api/v1/run",
         json=follow_up_payload(session_id, task_type="explain"),
     )
-    assert response.status_code == 400
-    assert response.json()["error"]["code"] == "SESSION_TASK_MISMATCH"
+    assert response.status_code == 200
+    assert response.json()["data"]["meta"]["plugins"] == ["explain"]
 
 
 def test_run_follow_up_rejects_image(run_client: TestClient) -> None:
@@ -365,6 +365,9 @@ def test_run_follow_up_requires_user_question(run_client: TestClient) -> None:
     first = run_client.post("/api/v1/run", json=run_payload(run_client))
     session_id = first.json()["data"]["session_id"]
     payload = follow_up_payload(session_id)
+    payload["task_type"] = "chat"
+    payload["plugins"] = []
+    payload["user_input"] = None
     payload["options"] = {"target_lang": "zh-CN"}
     response = run_client.post("/api/v1/run", json=payload)
     assert response.status_code == 400
@@ -526,7 +529,9 @@ def test_run_thinking_enabled_qwen_meta_true(run_client: TestClient) -> None:
         base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
         thinking_enabled=True,
     )
-    response = run_client.post("/api/v1/run", json=run_payload(run_client))
+    response = run_client.post(
+        "/api/v1/run", json=run_payload(run_client, task_type="explain")
+    )
     assert response.status_code == 200
     assert response.json()["data"]["meta"]["thinking_enabled"] is True
 
@@ -549,7 +554,7 @@ def test_run_extract_forces_thinking_false(run_client: TestClient) -> None:
     response = run_client.post("/api/v1/run", json=run_payload(run_client))
     assert response.status_code == 200
     assert provider.all_requests[0].thinking is False
-    assert provider.all_requests[1].thinking is True
+    assert provider.all_requests[1].thinking is False
 
 
 def test_run_follow_up_injects_thinking(run_client: TestClient) -> None:
@@ -560,10 +565,15 @@ def test_run_follow_up_injects_thinking(run_client: TestClient) -> None:
     )
     provider = MockRunProvider()
     run_client.app.dependency_overrides[get_provider] = lambda: provider
-    first = run_client.post("/api/v1/run", json=run_payload(run_client))
+    first = run_client.post(
+        "/api/v1/run", json=run_payload(run_client, task_type="explain")
+    )
     session_id = first.json()["data"]["session_id"]
     provider.all_requests.clear()
-    second = run_client.post("/api/v1/run", json=follow_up_payload(session_id))
+    second = run_client.post(
+        "/api/v1/run",
+        json=follow_up_payload(session_id, task_type="explain"),
+    )
     assert second.status_code == 200
     assert len(provider.all_requests) == 1
     assert provider.all_requests[0].thinking is True
@@ -579,7 +589,9 @@ def test_run_log_includes_thinking_enabled(
         thinking_enabled=True,
     )
     caplog.set_level(logging.INFO, logger="lumina.run")
-    response = run_client.post("/api/v1/run", json=run_payload(run_client))
+    response = run_client.post(
+        "/api/v1/run", json=run_payload(run_client, task_type="explain")
+    )
     assert response.status_code == 200
     run_logs = [
         getattr(record, "extra_fields", {})
@@ -632,6 +644,185 @@ def test_run_follow_up_uses_translate_override(run_client: TestClient) -> None:
         assert response.json()["data"]["meta"]["model"] == "gpt-4o-mini"
     follow_up_requests = provider.all_requests[1:]
     assert all(req.extras.get("model_override") == "gpt-4o-mini" for req in follow_up_requests)
+
+
+def test_r02_01_plugins_translate(run_client: TestClient) -> None:
+    response = run_client.post(
+        "/api/v1/run",
+        json=run_payload(run_client, plugins=["translate"]),
+    )
+    assert response.status_code == 200
+    assert response.json()["data"]["meta"]["plugins"] == ["translate"]
+
+
+def test_r02_02_unknown_plugin_id(run_client: TestClient) -> None:
+    response = run_client.post(
+        "/api/v1/run",
+        json=run_payload(run_client, plugins=["nonexistent"]),
+    )
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"]["code"] == "INVALID_REQUEST"
+    paths = [e["path"] for e in body["error"]["field_errors"]]
+    assert "plugins[0]" in paths
+
+
+def test_r02_03_free_chat_with_user_input(run_client: TestClient) -> None:
+    response = run_client.post(
+        "/api/v1/run",
+        json=run_payload(
+            run_client,
+            task_type="chat",
+            plugins=[],
+            user_input="hi",
+        ),
+    )
+    assert response.status_code == 200
+    assert response.json()["data"]["meta"]["plugins"] == []
+
+
+def test_r02_04_empty_plugins_and_input(run_client: TestClient) -> None:
+    response = run_client.post(
+        "/api/v1/run",
+        json=run_payload(
+            run_client,
+            task_type="chat",
+            plugins=[],
+            user_input=None,
+            options={"target_lang": "zh-CN", "user_question": None},
+        ),
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "INVALID_REQUEST"
+
+
+def test_r02_05_legacy_task_type_user_question(run_client: TestClient) -> None:
+    response = run_client.post(
+        "/api/v1/run",
+        json=run_payload(
+            run_client,
+            task_type="translate",
+            options={"target_lang": "zh-CN", "user_question": "why?"},
+        ),
+    )
+    assert response.status_code == 200
+    assert response.json()["data"]["meta"]["plugins"] == ["translate"]
+
+
+def test_r02_06_task_type_chat(run_client: TestClient) -> None:
+    response = run_client.post(
+        "/api/v1/run",
+        json=run_payload(
+            run_client,
+            task_type="chat",
+            user_input="what is this?",
+        ),
+    )
+    assert response.status_code == 200
+    assert response.json()["data"]["meta"]["plugins"] == []
+
+
+def test_r02_07_dictionary_not_applicable(run_client: TestClient) -> None:
+    provider = MockRunProvider(response_text="one two three four five")
+    run_client.app.dependency_overrides[get_provider] = lambda: provider
+    response = run_client.post(
+        "/api/v1/run",
+        json=run_payload(run_client, plugins=["dictionary"]),
+    )
+    assert response.status_code == 400
+    body = response.json()
+    assert body["error"]["code"] == "INVALID_REQUEST"
+    paths = [e["path"] for e in body["error"]["field_errors"]]
+    assert "plugins[0]" in paths
+
+
+def test_r02_09_cross_plugin_translate_then_explain(run_client: TestClient) -> None:
+    first = run_client.post(
+        "/api/v1/run",
+        json=run_payload(run_client, plugins=["translate"]),
+    )
+    session_id = first.json()["data"]["session_id"]
+    second = run_client.post(
+        "/api/v1/run",
+        json=follow_up_payload(
+            session_id,
+            task_type="explain",
+            options={"target_lang": "zh-CN", "user_question": "explain more"},
+        ),
+    )
+    assert second.status_code == 200
+    assert second.json()["data"]["meta"]["plugins"] == ["explain"]
+
+
+def test_r03_03_multi_plugin_meta(run_client: TestClient) -> None:
+    response = run_client.post(
+        "/api/v1/run",
+        json=run_payload(
+            run_client,
+            plugins=["translate", "explain"],
+            user_input="why?",
+        ),
+    )
+    assert response.status_code == 200
+    assert response.json()["data"]["meta"]["plugins"] == ["translate", "explain"]
+
+
+def test_r03_06_thinking_explain_enabled(run_client: TestClient) -> None:
+    _put_settings(
+        run_client,
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        thinking_enabled=True,
+    )
+    response = run_client.post(
+        "/api/v1/run",
+        json=run_payload(run_client, task_type="explain"),
+    )
+    assert response.status_code == 200
+    assert response.json()["data"]["meta"]["thinking_enabled"] is True
+
+
+def test_r03_07_thinking_translate_disabled(run_client: TestClient) -> None:
+    _put_settings(
+        run_client,
+        base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
+        thinking_enabled=True,
+    )
+    response = run_client.post("/api/v1/run", json=run_payload(run_client))
+    assert response.status_code == 200
+    assert response.json()["data"]["meta"]["thinking_enabled"] is False
+
+
+def test_r03_09_log_plugins_translate(
+    run_client: TestClient,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="lumina.run")
+    response = run_client.post("/api/v1/run", json=run_payload(run_client))
+    assert response.status_code == 200
+    logs = [
+        getattr(r, "extra_fields", {})
+        for r in caplog.records
+        if r.message == "run call completed"
+    ]
+    assert logs[-1]["plugins"] == "translate"
+
+
+def test_r03_10_log_plugins_chat(
+    run_client: TestClient,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.INFO, logger="lumina.run")
+    response = run_client.post(
+        "/api/v1/run",
+        json=run_payload(run_client, task_type="chat", user_input="hi"),
+    )
+    assert response.status_code == 200
+    logs = [
+        getattr(r, "extra_fields", {})
+        for r in caplog.records
+        if r.message == "run call completed"
+    ]
+    assert logs[-1]["plugins"] == "chat"
 
 
 def test_run_settings_change_takes_effect_immediately(run_client: TestClient) -> None:
