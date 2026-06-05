@@ -45,6 +45,7 @@ from lumina.schemas.api import (
     ok_response,
 )
 from lumina.sessions import get_session_store
+from lumina.tasks import resolve_legacy_task_type
 from lumina.tasks.base import TaskContext, TaskResult, UnsupportedTaskError
 from lumina.tasks.extract import EXTRACT_TASK
 
@@ -144,14 +145,13 @@ def resolve_plugin_routing(
                 "plugins contain unknown ids",
                 field_errors=field_errors,
             )
-    elif body.task_type == "translate":
-        plugin_ids = ["translate"]
-    elif body.task_type == "explain":
-        plugin_ids = ["explain"]
     elif body.task_type == "chat":
         plugin_ids = []
     else:
-        raise UnsupportedTaskError(body.task_type)
+        plugin_id = resolve_legacy_task_type(body.task_type)
+        if plugin_id is None:
+            raise UnsupportedTaskError(body.task_type)
+        plugin_ids = [plugin_id]
 
     user_input = body.user_input if body.user_input else body.options.user_question
 

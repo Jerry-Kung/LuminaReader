@@ -1,26 +1,25 @@
 from lumina.tasks.base import Task, TaskContext, TaskResult, UnsupportedTaskError
-from lumina.tasks.explain import ExplainTask
-from lumina.tasks.translate import TranslateTask
+from lumina.tasks.extract import ExtractTask
 
-TASK_REGISTRY: dict[str, Task] = {
-    "translate": TranslateTask(),
-    "explain": ExplainTask(),
+# V1.1.1: thin compatibility map for _run_core legacy task_type fallback only.
+# Task abstraction and ExtractTask remain; user-visible tasks moved to plugins.
+TASK_REGISTRY: dict[str, str] = {
+    "translate": "translate",
+    "explain": "explain",
 }
 
 
-def get_task(task_type: str) -> Task:
-    if task_type not in TASK_REGISTRY:
-        raise UnsupportedTaskError(task_type)
-    return TASK_REGISTRY[task_type]
+def resolve_legacy_task_type(task_type: str) -> str | None:
+    """Map legacy task_type to plugin_id. None means unknown → UNSUPPORTED_TASK."""
+    return TASK_REGISTRY.get(task_type)
 
 
 __all__ = [
-    "TASK_REGISTRY",
-    "ExplainTask",
     "Task",
     "TaskContext",
     "TaskResult",
-    "TranslateTask",
     "UnsupportedTaskError",
-    "get_task",
+    "ExtractTask",
+    "TASK_REGISTRY",
+    "resolve_legacy_task_type",
 ]

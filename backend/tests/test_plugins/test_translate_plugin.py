@@ -7,14 +7,35 @@ def _translate_plugin():
     return registry.get("translate")
 
 
-def test_p01_target_lang_interpolation() -> None:
+def test_t01_target_lang_interpolation() -> None:
     plugin = _translate_plugin()
     segments = plugin.build_segments(PluginContext(target_lang="en"))
-    assert "target_lang=en" in segments.user
+    assert "Translate the source content into en" in segments.user
 
 
-def test_p02_empty_user_input_interpolation() -> None:
+def test_t02_selection_text_interpolation() -> None:
     plugin = _translate_plugin()
-    segments = plugin.build_segments(PluginContext(user_input=""))
-    assert "user_input=" in segments.user
+    segments = plugin.build_segments(
+        PluginContext(selection_text="Hello world")
+    )
+    assert "Hello world" in segments.user
+
+
+def test_t03_user_input_interpolation() -> None:
+    plugin = _translate_plugin()
+    segments = plugin.build_segments(
+        PluginContext(user_input="please be formal")
+    )
+    assert "please be formal" in segments.user
+
+
+def test_t04_empty_user_input_no_literal_placeholder() -> None:
+    plugin = _translate_plugin()
+    segments = plugin.build_segments(PluginContext(user_input=None))
     assert "${user_input}" not in segments.user
+
+
+def test_t05_system_contains_professional_translator() -> None:
+    plugin = _translate_plugin()
+    segments = plugin.build_segments(PluginContext())
+    assert "professional translator" in segments.system

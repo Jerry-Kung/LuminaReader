@@ -179,7 +179,7 @@ def test_run_explain_success(run_client: TestClient) -> None:
     assert body["data"]["meta"]["turn_index"] == 0
     assert provider.last_request is not None
     system_text = provider.last_request.messages[0].content[0].text
-    assert "explain system prompt placeholder" in system_text
+    assert "knowledgeable reading assistant" in system_text
 
 
 def test_run_unsupported_task(run_client: TestClient) -> None:
@@ -340,7 +340,7 @@ def test_run_follow_up_session_not_found(run_client: TestClient) -> None:
     assert response.json()["error"]["code"] == "SESSION_NOT_FOUND"
 
 
-def test_run_follow_up_task_type_mismatch(run_client: TestClient) -> None:
+def test_run_follow_up_cross_plugin_allowed(run_client: TestClient) -> None:
     first = run_client.post("/api/v1/run", json=run_payload(run_client, task_type="translate"))
     session_id = first.json()["data"]["session_id"]
     response = run_client.post(
@@ -823,6 +823,46 @@ def test_r03_10_log_plugins_chat(
         if r.message == "run call completed"
     ]
     assert logs[-1]["plugins"] == "chat"
+
+
+def test_l02_chat_then_translate_follow_up(run_client: TestClient) -> None:
+    first = run_client.post(
+        "/api/v1/run",
+        json=run_payload(
+            run_client,
+            task_type="chat",
+            plugins=[],
+            user_input="hello",
+        ),
+    )
+    session_id = first.json()["data"]["session_id"]
+    second = run_client.post(
+        "/api/v1/run",
+        json=follow_up_payload(
+            session_id,
+            task_type="translate",
+            plugins=["translate"],
+        ),
+    )
+    assert second.status_code == 200
+    assert second.json()["data"]["meta"]["plugins"] == ["translate"]
+
+
+def test_l03_multi_plugin_then_dictionary_follow_up(run_client: TestClient) -> None:
+    first = run_client.post(
+        "/api/v1/run",
+        json=run_payload(run_client, plugins=["translate", "explain"]),
+    )
+    session_id = first.json()["data"]["session_id"]
+    second = run_client.post(
+        "/api/v1/run",
+        json=follow_up_payload(
+            session_id,
+            plugins=["dictionary"],
+        ),
+    )
+    assert second.status_code == 200
+    assert second.json()["data"]["meta"]["plugins"] == ["dictionary"]
 
 
 def test_run_settings_change_takes_effect_immediately(run_client: TestClient) -> None:

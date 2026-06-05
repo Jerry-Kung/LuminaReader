@@ -119,10 +119,10 @@ def test_v0_translate_does_not_touch_session_store(gone_client: TestClient) -> N
 
 
 def test_v0_translate_does_not_query_task_registry(gone_client: TestClient) -> None:
-    with patch("lumina.tasks.get_task") as get_task_mock:
+    with patch("lumina.tasks.resolve_legacy_task_type") as resolve_mock:
         response = gone_client.post("/api/v0/translate", json={"task_type": "translate"})
     assert response.status_code == 410
-    get_task_mock.assert_not_called()
+    resolve_mock.assert_not_called()
 
 
 def test_v0_logs_api_version_gone(gone_client: TestClient, caplog: pytest.LogCaptureFixture) -> None:

@@ -69,7 +69,7 @@ def test_pl01_single_translate_system(pipeline: PluginPipeline, provider: MockPi
     req = pipeline.build_request(["translate"], _ctx(selection_text="hello"))
     assert req.messages[0].role == "system"
     system_text = req.messages[0].content[0].text
-    assert "translate system prompt placeholder" in system_text
+    assert "professional translator" in system_text
 
 
 def test_pl02_multi_plugin_system_join(pipeline: PluginPipeline) -> None:
@@ -78,8 +78,8 @@ def test_pl02_multi_plugin_system_join(pipeline: PluginPipeline) -> None:
         _ctx(selection_text="hello"),
     )
     system_text = req.messages[0].content[0].text
-    assert "translate system prompt placeholder" in system_text
-    assert "explain system prompt placeholder" in system_text
+    assert "professional translator" in system_text
+    assert "knowledgeable reading assistant" in system_text
     assert "\n\n" in system_text
 
 

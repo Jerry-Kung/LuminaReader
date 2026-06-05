@@ -2,8 +2,8 @@ import pytest
 
 from lumina.providers.base import ImagePart, LLMResponse, TextPart
 from lumina.schemas.selection import ImagePayload, Selection
-from lumina.tasks import TASK_REGISTRY, get_task
-from lumina.tasks.base import TaskContext, UnsupportedTaskError
+from lumina.tasks import TASK_REGISTRY, resolve_legacy_task_type
+from lumina.tasks.base import TaskContext
 from lumina.tasks.extract import ExtractTask
 
 MINIMAL_PNG_B64 = (
@@ -94,8 +94,19 @@ def test_missing_image_raises() -> None:
 
 def test_extract_task_not_registered() -> None:
     assert "extract" not in TASK_REGISTRY
-    with pytest.raises(UnsupportedTaskError):
-        get_task("extract")
+    assert resolve_legacy_task_type("extract") is None
+
+
+def test_resolve_legacy_task_type_translate() -> None:
+    assert resolve_legacy_task_type("translate") == "translate"
+
+
+def test_resolve_legacy_task_type_explain() -> None:
+    assert resolve_legacy_task_type("explain") == "explain"
+
+
+def test_resolve_legacy_task_type_unknown() -> None:
+    assert resolve_legacy_task_type("qa") is None
 
 
 def test_parse_response_returns_text_as_is() -> None:

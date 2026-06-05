@@ -1,4 +1,4 @@
-import logging
+from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
@@ -55,3 +55,81 @@ def test_conversation_messages_after_run(conv_run_client: TestClient) -> None:
     assert body["conversation_id"] == conv_id
     assert body["extracted_text"]
     assert len(body["messages"]) >= 2
+
+
+def test_l04_legacy_translate_task_type_in_messages(conv_run_client: TestClient) -> None:
+    first = conv_run_client.post(
+        "/api/v1/run",
+        json=run_payload(conv_run_client, task_type="translate"),
+    )
+    conv_id = first.json()["data"]["conversation_id"]
+    response = conv_run_client.get(f"/api/v1/conversations/{conv_id}/messages")
+    assert response.status_code == 200
+    assert response.json()["data"]["task_type"] == "translate"
+
+
+def test_l05_legacy_explain_task_type_in_messages(conv_run_client: TestClient) -> None:
+    first = conv_run_client.post(
+        "/api/v1/run",
+        json=run_payload(conv_run_client, task_type="explain"),
+    )
+    conv_id = first.json()["data"]["conversation_id"]
+    response = conv_run_client.get(f"/api/v1/conversations/{conv_id}/messages")
+    assert response.status_code == 200
+    assert response.json()["data"]["task_type"] == "explain"
+
+
+def test_l06_chat_task_type_in_messages(conv_run_client: TestClient) -> None:
+    first = conv_run_client.post(
+        "/api/v1/run",
+        json=run_payload(
+            conv_run_client,
+            task_type="chat",
+            plugins=[],
+            user_input="hi",
+        ),
+    )
+    conv_id = first.json()["data"]["conversation_id"]
+    response = conv_run_client.get(f"/api/v1/conversations/{conv_id}/messages")
+    assert response.status_code == 200
+    assert response.json()["data"]["task_type"] == "chat"
+
+
+def test_l07_pdf_conversations_list_includes_chat(conv_run_client: TestClient) -> None:
+    first = conv_run_client.post(
+        "/api/v1/run",
+        json=run_payload(
+            conv_run_client,
+            task_type="chat",
+            plugins=[],
+            user_input="hi",
+        ),
+    )
+    pdf_id = conv_run_client.default_pdf_id
+    conv_id = first.json()["data"]["conversation_id"]
+    response = conv_run_client.get(f"/api/v1/pdfs/{pdf_id}/conversations")
+    assert response.status_code == 200
+    items = response.json()["data"]["items"]
+    matching = [i for i in items if i["conversation_id"] == conv_id]
+    assert len(matching) == 1
+    assert matching[0]["task_type"] == "chat"
+
+
+def test_l08_no_session_task_mismatch_tests_in_run_suite() -> None:
+    source = Path(__file__).resolve().parents[1] / "test_api" / "test_run.py"
+    assert "SESSION_TASK_MISMATCH" not in source.read_text(encoding="utf-8")
+
+
+def test_l09_run_core_no_session_task_mismatch_trigger() -> None:
+    source = (
+        Path(__file__).resolve().parents[2]
+        / "src"
+        / "lumina"
+        / "api"
+        / "_run_core.py"
+    )
+    code_lines = [
+        ln for ln in source.read_text(encoding="utf-8").splitlines()
+        if not ln.strip().startswith("#")
+    ]
+    assert "SESSION_TASK_MISMATCH" not in "\n".join(code_lines)
