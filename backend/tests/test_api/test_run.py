@@ -26,6 +26,7 @@ from lumina.sessions import get_session_store, reset_session_store
 MINIMAL_PNG_B64 = (
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAAD0lEQVR42mP8/5+hHgAHggJ/PchI7wAAAABJRU5ErkJggg=="
 )
+MOCK_SCREENSHOT_QA_RESPONSE = "<ocr>mock</ocr><answer>mock</answer>"
 
 
 def valid_run_payload(task_type: str = "translate", pdf_id: str | None = None, **overrides: object) -> dict:
@@ -59,7 +60,7 @@ class MockRunProvider(Provider):
     def __init__(
         self,
         *,
-        response_text: str = "mock",
+        response_text: str = MOCK_SCREENSHOT_QA_RESPONSE,
         invoke_error: Exception | None = None,
         invoke_errors: list[Exception | None] | None = None,
     ) -> None:
@@ -161,8 +162,10 @@ def test_run_translate_success(run_client: TestClient) -> None:
     body = response.json()
     assert body["ok"] is True
     assert body["data"]["text"] == "mock"
+    assert body["data"]["extracted_text"] == "mock"
     assert body["data"]["meta"]["request_id"].startswith("req_")
-    assert body["data"]["meta"]["task_type"] == "translate"
+    assert body["data"]["meta"]["task_type"] == "screenshot-qa"
+    assert body["data"]["meta"]["plugins"] == ["screenshot-qa"]
     assert body["data"]["session_id"]
     assert body["data"]["meta"]["turn_index"] == 0
 
@@ -174,20 +177,20 @@ def test_run_explain_success(run_client: TestClient) -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["ok"] is True
-    assert body["data"]["meta"]["task_type"] == "explain"
+    assert body["data"]["meta"]["task_type"] == "screenshot-qa"
     assert body["data"]["session_id"]
     assert body["data"]["meta"]["turn_index"] == 0
     assert provider.last_request is not None
     system_text = provider.last_request.messages[0].content[0].text
-    assert "knowledgeable reading assistant" in system_text
+    assert "LuminaReader" in system_text
 
 
-def test_run_unsupported_task(run_client: TestClient) -> None:
+def test_run_unsupported_task_coerced_on_first_turn_image(run_client: TestClient) -> None:
     response = run_client.post("/api/v1/run", json=run_payload(run_client, task_type="qa"))
-    assert response.status_code == 400
+    assert response.status_code == 200
     body = response.json()
-    assert body["ok"] is False
-    assert body["error"]["code"] == "UNSUPPORTED_TASK"
+    assert body["ok"] is True
+    assert body["data"]["meta"]["task_type"] == "screenshot-qa"
 
 
 def test_run_invalid_mime(run_client: TestClient) -> None:
@@ -252,20 +255,16 @@ def test_run_health(run_client: TestClient) -> None:
     assert isinstance(body["data"]["provider_ready"], bool)
 
 
-def test_run_first_turn_invokes_extract_then_driving_task(run_client: TestClient) -> None:
+def test_run_first_turn_single_screenshot_qa_invoke(run_client: TestClient) -> None:
     provider = MockRunProvider()
     run_client.app.dependency_overrides[get_provider] = lambda: provider
     response = run_client.post("/api/v1/run", json=run_payload(run_client, task_type="translate"))
     assert response.status_code == 200
-    assert len(provider.all_requests) == 2
-    extract_system = provider.all_requests[0].messages[0].content[0].text.lower()
-    assert "extract" in extract_system or "markdown" in extract_system
-    drive_system = provider.all_requests[1].messages[0].content[0].text.lower()
-    assert "translator" in drive_system or "translate" in drive_system
-    assert all(
-        part.type != "image"
-        for part in provider.all_requests[1].messages[-1].content
-    )
+    assert len(provider.all_requests) == 1
+    system_text = provider.all_requests[0].messages[0].content[0].text.lower()
+    assert "<ocr>" in system_text or "ocr" in system_text
+    user_content = provider.all_requests[0].messages[-1].content
+    assert any(part.type == "image" for part in user_content)
 
 
 def test_run_first_turn_response_contains_session_id_and_turn_index_zero(
@@ -285,8 +284,8 @@ def test_run_first_turn_with_user_question(run_client: TestClient) -> None:
     )
     response = run_client.post("/api/v1/run", json=payload)
     assert response.status_code == 200
-    drive_user = provider.all_requests[1].messages[-1].content
-    combined = "".join(part.text for part in drive_user if part.type == "text")
+    user_content = provider.all_requests[0].messages[-1].content
+    combined = "".join(part.text for part in user_content if part.type == "text")
     assert "为什么 V=8?" in combined
 
 
@@ -298,7 +297,7 @@ def test_run_first_turn_missing_image(run_client: TestClient) -> None:
     assert response.json()["error"]["code"] == "INVALID_REQUEST"
 
 
-def test_run_first_turn_extract_task_failure_does_not_create_session(
+def test_run_first_turn_pipeline_failure_does_not_create_session(
     run_client: TestClient,
 ) -> None:
     provider = MockRunProvider(invoke_errors=[ProviderTimeout("timed out")])
@@ -424,7 +423,7 @@ def test_run_first_turn_log_includes_session_and_extract_fields(
     fields = run_logs[-1]
     assert fields["session_id"].startswith("conv_")
     assert fields["turn_index"] == 0
-    assert isinstance(fields["extract_latency_ms"], int)
+    assert fields["parse_failure_reason"] == ""
     assert isinstance(fields["extracted_text_chars"], int)
 
 
@@ -445,7 +444,7 @@ def test_run_follow_up_log_omits_extract_fields(
     ]
     follow_up_log = next(item for item in run_logs if item.get("turn_index") == 1)
     assert follow_up_log["session_id"] == session_id
-    assert follow_up_log["extract_latency_ms"] == ""
+    assert follow_up_log["parse_failure_reason"] == ""
     assert follow_up_log["extracted_text_chars"] == ""
 
 
@@ -543,7 +542,7 @@ def test_run_thinking_enabled_non_qwen_meta_false(run_client: TestClient) -> Non
     assert response.json()["data"]["meta"]["thinking_enabled"] is False
 
 
-def test_run_extract_forces_thinking_false(run_client: TestClient) -> None:
+def test_run_screenshot_qa_thinking_enabled_on_qwen(run_client: TestClient) -> None:
     _put_settings(
         run_client,
         base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
@@ -553,8 +552,7 @@ def test_run_extract_forces_thinking_false(run_client: TestClient) -> None:
     run_client.app.dependency_overrides[get_provider] = lambda: provider
     response = run_client.post("/api/v1/run", json=run_payload(run_client))
     assert response.status_code == 200
-    assert provider.all_requests[0].thinking is False
-    assert provider.all_requests[1].thinking is False
+    assert provider.all_requests[0].thinking is True
 
 
 def test_run_follow_up_injects_thinking(run_client: TestClient) -> None:
@@ -601,34 +599,23 @@ def test_run_log_includes_thinking_enabled(
     assert run_logs[-1]["thinking_enabled"] is True
 
 
-def test_run_translate_uses_task_model_override(run_client: TestClient) -> None:
+def test_run_first_turn_screenshot_qa_ignores_task_model_override(run_client: TestClient) -> None:
     _put_settings(run_client, translate="gpt-4o-mini")
     provider = MockRunProvider()
     run_client.app.dependency_overrides[get_provider] = lambda: provider
     response = run_client.post("/api/v1/run", json=run_payload(run_client, task_type="translate"))
     assert response.status_code == 200
-    assert provider.all_requests[1].extras.get("model_override") == "gpt-4o-mini"
-    assert response.json()["data"]["meta"]["model"] == "gpt-4o-mini"
+    assert provider.all_requests[0].extras.get("model_override") is None
+    assert response.json()["data"]["meta"]["model"] == "gpt-4o"
 
 
-def test_run_explain_falls_back_to_default(run_client: TestClient) -> None:
+def test_run_first_turn_no_model_override(run_client: TestClient) -> None:
     _put_settings(run_client, translate="gpt-4o-mini")
     provider = MockRunProvider()
     run_client.app.dependency_overrides[get_provider] = lambda: provider
     response = run_client.post("/api/v1/run", json=run_payload(run_client, task_type="explain"))
     assert response.status_code == 200
-    assert provider.all_requests[1].extras.get("model_override") is None
-    assert response.json()["data"]["meta"]["model"] == "gpt-4o"
-
-
-def test_run_extract_uses_task_model_override(run_client: TestClient) -> None:
-    _put_settings(run_client, extract="vlm-special")
-    provider = MockRunProvider()
-    run_client.app.dependency_overrides[get_provider] = lambda: provider
-    response = run_client.post("/api/v1/run", json=run_payload(run_client, task_type="translate"))
-    assert response.status_code == 200
-    assert provider.all_requests[0].extras.get("model_override") == "vlm-special"
-    assert provider.all_requests[1].extras.get("model_override") is None
+    assert provider.all_requests[0].extras.get("model_override") is None
     assert response.json()["data"]["meta"]["model"] == "gpt-4o"
 
 
@@ -646,28 +633,25 @@ def test_run_follow_up_uses_translate_override(run_client: TestClient) -> None:
     assert all(req.extras.get("model_override") == "gpt-4o-mini" for req in follow_up_requests)
 
 
-def test_r02_01_plugins_translate(run_client: TestClient) -> None:
+def test_r02_01_plugins_translate_coerced_to_screenshot_qa(run_client: TestClient) -> None:
     response = run_client.post(
         "/api/v1/run",
         json=run_payload(run_client, plugins=["translate"]),
     )
     assert response.status_code == 200
-    assert response.json()["data"]["meta"]["plugins"] == ["translate"]
+    assert response.json()["data"]["meta"]["plugins"] == ["screenshot-qa"]
 
 
-def test_r02_02_unknown_plugin_id(run_client: TestClient) -> None:
+def test_r02_02_unknown_plugin_id_coerced_on_first_turn(run_client: TestClient) -> None:
     response = run_client.post(
         "/api/v1/run",
         json=run_payload(run_client, plugins=["nonexistent"]),
     )
-    assert response.status_code == 400
-    body = response.json()
-    assert body["error"]["code"] == "INVALID_REQUEST"
-    paths = [e["path"] for e in body["error"]["field_errors"]]
-    assert "plugins[0]" in paths
+    assert response.status_code == 200
+    assert response.json()["data"]["meta"]["plugins"] == ["screenshot-qa"]
 
 
-def test_r02_03_free_chat_with_user_input(run_client: TestClient) -> None:
+def test_r02_03_first_turn_image_coerced_to_screenshot_qa(run_client: TestClient) -> None:
     response = run_client.post(
         "/api/v1/run",
         json=run_payload(
@@ -678,10 +662,10 @@ def test_r02_03_free_chat_with_user_input(run_client: TestClient) -> None:
         ),
     )
     assert response.status_code == 200
-    assert response.json()["data"]["meta"]["plugins"] == []
+    assert response.json()["data"]["meta"]["plugins"] == ["screenshot-qa"]
 
 
-def test_r02_04_empty_plugins_and_input(run_client: TestClient) -> None:
+def test_r02_04_empty_plugins_and_input_defaults_screenshot_qa(run_client: TestClient) -> None:
     response = run_client.post(
         "/api/v1/run",
         json=run_payload(
@@ -692,8 +676,8 @@ def test_r02_04_empty_plugins_and_input(run_client: TestClient) -> None:
             options={"target_lang": "zh-CN", "user_question": None},
         ),
     )
-    assert response.status_code == 400
-    assert response.json()["error"]["code"] == "INVALID_REQUEST"
+    assert response.status_code == 200
+    assert response.json()["data"]["meta"]["plugins"] == ["screenshot-qa"]
 
 
 def test_r02_05_legacy_task_type_user_question(run_client: TestClient) -> None:
@@ -706,10 +690,10 @@ def test_r02_05_legacy_task_type_user_question(run_client: TestClient) -> None:
         ),
     )
     assert response.status_code == 200
-    assert response.json()["data"]["meta"]["plugins"] == ["translate"]
+    assert response.json()["data"]["meta"]["plugins"] == ["screenshot-qa"]
 
 
-def test_r02_06_task_type_chat(run_client: TestClient) -> None:
+def test_r02_06_task_type_chat_coerced(run_client: TestClient) -> None:
     response = run_client.post(
         "/api/v1/run",
         json=run_payload(
@@ -719,21 +703,18 @@ def test_r02_06_task_type_chat(run_client: TestClient) -> None:
         ),
     )
     assert response.status_code == 200
-    assert response.json()["data"]["meta"]["plugins"] == []
+    assert response.json()["data"]["meta"]["plugins"] == ["screenshot-qa"]
 
 
-def test_r02_07_dictionary_not_applicable(run_client: TestClient) -> None:
-    provider = MockRunProvider(response_text="one two three four five")
+def test_r02_07_dictionary_coerced_to_screenshot_qa(run_client: TestClient) -> None:
+    provider = MockRunProvider(response_text="<ocr>one two three four five</ocr><answer>x</answer>")
     run_client.app.dependency_overrides[get_provider] = lambda: provider
     response = run_client.post(
         "/api/v1/run",
         json=run_payload(run_client, plugins=["dictionary"]),
     )
-    assert response.status_code == 400
-    body = response.json()
-    assert body["error"]["code"] == "INVALID_REQUEST"
-    paths = [e["path"] for e in body["error"]["field_errors"]]
-    assert "plugins[0]" in paths
+    assert response.status_code == 200
+    assert response.json()["data"]["meta"]["plugins"] == ["screenshot-qa"]
 
 
 def test_r02_09_cross_plugin_translate_then_explain(run_client: TestClient) -> None:
@@ -754,7 +735,7 @@ def test_r02_09_cross_plugin_translate_then_explain(run_client: TestClient) -> N
     assert second.json()["data"]["meta"]["plugins"] == ["explain"]
 
 
-def test_r03_03_multi_plugin_meta(run_client: TestClient) -> None:
+def test_r03_03_multi_plugin_coerced_to_screenshot_qa(run_client: TestClient) -> None:
     response = run_client.post(
         "/api/v1/run",
         json=run_payload(
@@ -764,10 +745,10 @@ def test_r03_03_multi_plugin_meta(run_client: TestClient) -> None:
         ),
     )
     assert response.status_code == 200
-    assert response.json()["data"]["meta"]["plugins"] == ["translate", "explain"]
+    assert response.json()["data"]["meta"]["plugins"] == ["screenshot-qa"]
 
 
-def test_r03_06_thinking_explain_enabled(run_client: TestClient) -> None:
+def test_r03_06_thinking_screenshot_qa_enabled(run_client: TestClient) -> None:
     _put_settings(
         run_client,
         base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
@@ -781,7 +762,7 @@ def test_r03_06_thinking_explain_enabled(run_client: TestClient) -> None:
     assert response.json()["data"]["meta"]["thinking_enabled"] is True
 
 
-def test_r03_07_thinking_translate_disabled(run_client: TestClient) -> None:
+def test_r03_07_thinking_screenshot_qa_on_qwen(run_client: TestClient) -> None:
     _put_settings(
         run_client,
         base_url="https://dashscope.aliyuncs.com/compatible-mode/v1",
@@ -789,7 +770,7 @@ def test_r03_07_thinking_translate_disabled(run_client: TestClient) -> None:
     )
     response = run_client.post("/api/v1/run", json=run_payload(run_client))
     assert response.status_code == 200
-    assert response.json()["data"]["meta"]["thinking_enabled"] is False
+    assert response.json()["data"]["meta"]["thinking_enabled"] is True
 
 
 def test_r03_09_log_plugins_translate(
@@ -804,10 +785,10 @@ def test_r03_09_log_plugins_translate(
         for r in caplog.records
         if r.message == "run call completed"
     ]
-    assert logs[-1]["plugins"] == "translate"
+    assert logs[-1]["plugins"] == "screenshot-qa"
 
 
-def test_r03_10_log_plugins_chat(
+def test_r03_10_log_plugins_screenshot_qa(
     run_client: TestClient,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
@@ -822,10 +803,10 @@ def test_r03_10_log_plugins_chat(
         for r in caplog.records
         if r.message == "run call completed"
     ]
-    assert logs[-1]["plugins"] == "chat"
+    assert logs[-1]["plugins"] == "screenshot-qa"
 
 
-def test_l02_chat_then_translate_follow_up(run_client: TestClient) -> None:
+def test_l02_screenshot_qa_then_translate_follow_up(run_client: TestClient) -> None:
     first = run_client.post(
         "/api/v1/run",
         json=run_payload(
@@ -848,7 +829,7 @@ def test_l02_chat_then_translate_follow_up(run_client: TestClient) -> None:
     assert second.json()["data"]["meta"]["plugins"] == ["translate"]
 
 
-def test_l03_multi_plugin_then_dictionary_follow_up(run_client: TestClient) -> None:
+def test_l03_screenshot_qa_then_dictionary_follow_up(run_client: TestClient) -> None:
     first = run_client.post(
         "/api/v1/run",
         json=run_payload(run_client, plugins=["translate", "explain"]),
@@ -875,3 +856,105 @@ def test_run_settings_change_takes_effect_immediately(run_client: TestClient) ->
     _put_settings(run_client, translate="gpt-4o-mini")
     second = run_client.post("/api/v1/run", json=follow_up_payload(session_id))
     assert second.json()["data"]["meta"]["model"] == "gpt-4o-mini"
+
+
+def test_v112_first_turn_screenshot_qa_success(run_client: TestClient) -> None:
+    provider = MockRunProvider(
+        response_text="<ocr>OCR content</ocr><answer>Answer content</answer>"
+    )
+    run_client.app.dependency_overrides[get_provider] = lambda: provider
+    body = run_payload(
+        run_client,
+        task_type="translate",
+        plugins=["translate"],
+        user_input="Explain this image",
+    )
+    resp = run_client.post("/api/v1/run", json=body)
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["text"] == "Answer content"
+    assert data["extracted_text"] == "OCR content"
+    assert data["meta"]["task_type"] == "screenshot-qa"
+    assert data["meta"]["plugins"] == ["screenshot-qa"]
+    session_id = data["session_id"]
+    session = asyncio.run(get_session_store().get(session_id))
+    assert session is not None
+    assert session.extracted_text == "OCR content"
+    assert session.task_type == "screenshot-qa"
+
+
+def test_v112_first_turn_parse_failure(run_client: TestClient) -> None:
+    provider = MockRunProvider(response_text="Just plain text without any tags.")
+    run_client.app.dependency_overrides[get_provider] = lambda: provider
+    resp = run_client.post("/api/v1/run", json=run_payload(run_client))
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["text"] == "Just plain text without any tags."
+    assert data["extracted_text"] is None
+    session_id = data["session_id"]
+    session = asyncio.run(get_session_store().get(session_id))
+    assert session is not None
+    assert session.extracted_text == ""
+
+
+def test_v112_followup_ocr_unavailable(run_client: TestClient) -> None:
+    provider = MockRunProvider(response_text="Just plain text without any tags.")
+    run_client.app.dependency_overrides[get_provider] = lambda: provider
+    first = run_client.post("/api/v1/run", json=run_payload(run_client))
+    session_id = first.json()["data"]["session_id"]
+    provider.invoke_count = 0
+    resp = run_client.post(
+        "/api/v1/run",
+        json={
+            "task_type": "chat",
+            "plugins": [],
+            "user_input": "继续追问",
+            "session_id": session_id,
+            "selection": None,
+            "image": None,
+            "options": {"target_lang": "zh-CN"},
+        },
+    )
+    assert resp.status_code == 400
+    err = resp.json()["error"]
+    assert err["code"] == "OCR_TEXT_UNAVAILABLE"
+    assert "识别文本缺失" in err["message"]
+    assert provider.invoke_count == 0
+
+
+def test_v112_followup_cross_plugin_explain(run_client: TestClient) -> None:
+    provider = MockRunProvider(
+        response_text="<ocr>OCR content</ocr><answer>Answer content</answer>"
+    )
+    run_client.app.dependency_overrides[get_provider] = lambda: provider
+    first = run_client.post("/api/v1/run", json=run_payload(run_client))
+    session_id = first.json()["data"]["session_id"]
+    resp = run_client.post(
+        "/api/v1/run",
+        json=follow_up_payload(
+            session_id,
+            task_type="explain",
+            plugins=["explain"],
+            options={"target_lang": "zh-CN", "user_question": "再详细说说"},
+        ),
+    )
+    assert resp.status_code == 200
+    assert resp.json()["data"]["meta"]["plugins"] == ["explain"]
+
+
+def test_v112_legacy_translate_coerced(run_client: TestClient) -> None:
+    provider = MockRunProvider()
+    run_client.app.dependency_overrides[get_provider] = lambda: provider
+    body = run_payload(
+        run_client,
+        task_type="translate",
+        user_input=None,
+        options={"target_lang": "zh-CN", "user_question": "翻译这段"},
+    )
+    resp = run_client.post("/api/v1/run", json=body)
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["meta"]["task_type"] == "screenshot-qa"
+    assert data["meta"]["plugins"] == ["screenshot-qa"]
+    user_text = provider.all_requests[0].messages[-1].content[0].text
+    assert "翻译这段" in user_text

@@ -75,6 +75,7 @@ class TranslateMeta(BaseModel):
 
 class TranslateData(BaseModel):
     text: str
+    extracted_text: str | None = None
     session_id: str | None = None
     conversation_id: str | None = None
     meta: TranslateMeta
@@ -171,7 +172,10 @@ class ErrorEnvelope(BaseModel):
 
 def ok_response(data: DataT) -> dict[str, Any]:
     if isinstance(data, BaseModel):
-        payload = data.model_dump(exclude_none=True)
+        if isinstance(data, TranslateData):
+            payload = data.model_dump()
+        else:
+            payload = data.model_dump(exclude_none=True)
     else:
         payload = data
     return {"ok": True, "data": payload}

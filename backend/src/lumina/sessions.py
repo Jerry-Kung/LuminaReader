@@ -21,6 +21,7 @@ from lumina.db.models import (
     mark_conversation_cleared,
     count_messages,
     update_assistant_message_at_turn,
+    update_conversation_extracted_text,
     update_conversation_last_used,
 )
 from lumina.logging import get_logger, log_with_fields
@@ -314,6 +315,7 @@ class SessionStore:
         assistant_text: str,
         interrupted: bool = False,
         assistant_meta: dict | None = None,
+        extracted_text_override: str | None = None,
     ) -> Session | None:
         session = await self.get(session_id)
         if session is None:
@@ -350,6 +352,11 @@ class SessionStore:
                 latency_ms=meta.get("latency_ms"),
             )
             update_conversation_last_used(conn, session_id, ts)
+            if extracted_text_override is not None:
+                update_conversation_extracted_text(
+                    conn, session_id, extracted_text_override
+                )
+                session.extracted_text = extracted_text_override
             conn.execute("COMMIT")
             session.dirty = False
         except Exception:

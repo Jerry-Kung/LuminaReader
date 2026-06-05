@@ -20,6 +20,7 @@ from lumina.projects.manager import PdfNotFoundError, lookup_project_by_pdf_id
 from lumina.request_id import generate_request_id
 from lumina import settings_store
 from lumina.providers.base import (
+    ImagePart,
     LLMMessage,
     LLMRequest,
     LLMStreamEvent,
@@ -33,7 +34,11 @@ from lumina.providers.base import (
 )
 from lumina.providers.errors import StreamUnsupportedError
 from lumina.plugins import PluginPipeline
-from lumina.plugins.base import PluginContext, estimate_word_count
+from lumina.plugins.base import (
+    PluginContext,
+    StructuredStreamEvent,
+    estimate_word_count,
+)
 from lumina.plugins.registry import PluginRegistry
 from lumina.providers.openai_compat import _is_qwen_base_url
 from lumina.schemas.api import (
@@ -46,10 +51,10 @@ from lumina.schemas.api import (
 )
 from lumina.sessions import get_session_store
 from lumina.tasks import resolve_legacy_task_type
-from lumina.tasks.base import TaskContext, TaskResult, UnsupportedTaskError
-from lumina.tasks.extract import EXTRACT_TASK
+from lumina.tasks.base import TaskResult, UnsupportedTaskError
 
 MAX_BODY_BYTES = 8 * 1024 * 1024
+SCREENSHOT_QA_PLUGIN_ID = "screenshot-qa"
 ALLOWED_IMAGE_MIME = "image/png"
 API_VERSION = "v1"
 
@@ -107,6 +112,14 @@ def _conversation_task_type(plugin_ids: list[str]) -> str:
     return plugin_ids[0] if plugin_ids else "chat"
 
 
+def _first_turn_user_input(body: TranslateRequest) -> str | None:
+    return body.user_input if body.user_input else body.options.user_question
+
+
+def _image_part_from_payload(image) -> ImagePart:
+    return ImagePart(mime=image.mime, data_b64=image.data)
+
+
 def _model_override_task(plugin_ids: list[str]) -> str | None:
     if not plugin_ids:
         return None
@@ -131,6 +144,10 @@ def resolve_plugin_routing(
 ) -> tuple[list[str], str | None]:
     if body.plugins:
         plugin_ids = list(body.plugins)
+        # V1.1.2 防御：screenshot-qa 是首轮 image 路径自动激活的内部插件，
+        # 追问轮（或任何非首轮 image 场景）显式带它会让 LLM 仍被强制要求
+        # <ocr>/<answer> 双标签输出，标签会泄漏到 SSE。静默剥离即可。
+        plugin_ids = [pid for pid in plugin_ids if pid != SCREENSHOT_QA_PLUGIN_ID]
         field_errors: list[dict[str, str]] = []
         for i, pid in enumerate(plugin_ids):
             if pid not in registry.plugins:
@@ -191,13 +208,15 @@ class PreparedStreamRun:
     conversation_id: str
     turn_index: int
     is_first_turn: bool
-    extract_latency_ms: int | None
+    is_screenshot_qa: bool
     extracted_text_chars: int | None
     plugin_ids: list[str]
     plugin_ctx: PluginContext
     pipeline: PluginPipeline
+    registry: PluginRegistry
     follow_up_user_input: str | None
     meta_payload: dict
+    parse_failure_reason: str | None = None
     meta_ready: asyncio.Event = field(default_factory=asyncio.Event)
 
 
@@ -240,7 +259,7 @@ def _log_run_call(
     error_code: str | None = None,
     session_id: str | None = None,
     turn_index: int | None = None,
-    extract_latency_ms: int | None = None,
+    parse_failure_reason: str | None = None,
     extracted_text_chars: int | None = None,
     project_id: str | None = None,
     pdf_id: str | None = None,
@@ -266,7 +285,7 @@ def _log_run_call(
         error_code=error_code or "",
         session_id=session_id or "",
         turn_index=turn_index if turn_index is not None else "",
-        extract_latency_ms=extract_latency_ms if extract_latency_ms is not None else "",
+        parse_failure_reason=parse_failure_reason or "",
         extracted_text_chars=extracted_text_chars if extracted_text_chars is not None else "",
         project_id=project_id or "",
         pdf_id=pdf_id or "",
@@ -290,7 +309,7 @@ def _error_json(
     latency_ms: int | None = None,
     session_id: str | None = None,
     turn_index: int | None = None,
-    extract_latency_ms: int | None = None,
+    parse_failure_reason: str | None = None,
     extracted_text_chars: int | None = None,
     project_id: str | None = None,
     pdf_id: str | None = None,
@@ -311,7 +330,7 @@ def _error_json(
         error_code=code,
         session_id=session_id,
         turn_index=turn_index,
-        extract_latency_ms=extract_latency_ms,
+        parse_failure_reason=parse_failure_reason,
         extracted_text_chars=extracted_text_chars,
         project_id=project_id,
         pdf_id=pdf_id,
@@ -455,120 +474,6 @@ def _inject_model_override(req: LLMRequest, override_task_type: str) -> LLMReque
     return req
 
 
-async def _invoke_extract_task(
-    *,
-    ctx: TaskContext,
-    provider: Provider,
-    request_id: str,
-    api_version: str,
-    task_type: str,
-    page: int,
-    image_bytes: int,
-    start: float,
-    project_id: str | None = None,
-    pdf_id: str | None = None,
-):
-    return await _invoke_task_legacy(
-        task=EXTRACT_TASK,
-        ctx=ctx,
-        provider=provider,
-        request_id=request_id,
-        api_version=api_version,
-        task_type=task_type,
-        page=page,
-        image_bytes=image_bytes,
-        start=start,
-        model_override_task="extract",
-        apply_thinking=False,
-        project_id=project_id,
-        pdf_id=pdf_id,
-    )
-
-
-async def _invoke_task_legacy(
-    *,
-    task,
-    ctx: TaskContext,
-    provider: Provider,
-    request_id: str,
-    api_version: str,
-    task_type: str,
-    page: int,
-    image_bytes: int,
-    start: float,
-    model_override_task: str | None = None,
-    session_id: str | None = None,
-    turn_index: int | None = None,
-    extract_latency_ms: int | None = None,
-    extracted_text_chars: int | None = None,
-    project_id: str | None = None,
-    pdf_id: str | None = None,
-    conversation_id: str | None = None,
-    apply_thinking: bool = True,
-):
-    try:
-        llm_req = task.build_request(ctx)
-        if model_override_task is not None:
-            llm_req = _inject_model_override(llm_req, model_override_task)
-        if apply_thinking:
-            llm_req = _inject_thinking(llm_req, enabled=_thinking_enabled_from_settings())
-        else:
-            llm_req = _inject_thinking(llm_req, enabled=False)
-        llm_resp = await provider.invoke(llm_req)
-        return task.parse_response(llm_resp), llm_resp, None
-    except ProviderTimeout:
-        latency_ms = int((time.perf_counter() - start) * 1000)
-        return None, None, _error_json(
-            status_code=504,
-            code="PROVIDER_TIMEOUT",
-            message="Upstream LLM request timed out.",
-            request_id=request_id,
-            api_version=api_version,
-            task_type=task_type,
-            page=page,
-            image_bytes=image_bytes,
-            latency_ms=latency_ms,
-            session_id=session_id,
-            turn_index=turn_index,
-            extract_latency_ms=extract_latency_ms,
-            extracted_text_chars=extracted_text_chars,
-        )
-    except (ProviderAuthError, ProviderUpstreamError):
-        latency_ms = int((time.perf_counter() - start) * 1000)
-        return None, None, _error_json(
-            status_code=502,
-            code="PROVIDER_ERROR",
-            message="Upstream LLM request failed.",
-            request_id=request_id,
-            api_version=api_version,
-            task_type=task_type,
-            page=page,
-            image_bytes=image_bytes,
-            latency_ms=latency_ms,
-            session_id=session_id,
-            turn_index=turn_index,
-            extract_latency_ms=extract_latency_ms,
-            extracted_text_chars=extracted_text_chars,
-        )
-    except ProviderConfigError:
-        latency_ms = int((time.perf_counter() - start) * 1000)
-        return None, None, _error_json(
-            status_code=500,
-            code="INTERNAL_ERROR",
-            message="An internal server error occurred.",
-            request_id=request_id,
-            api_version=api_version,
-            task_type=task_type,
-            page=page,
-            image_bytes=image_bytes,
-            latency_ms=latency_ms,
-            session_id=session_id,
-            turn_index=turn_index,
-            extract_latency_ms=extract_latency_ms,
-            extracted_text_chars=extracted_text_chars,
-        )
-
-
 async def _invoke_pipeline(
     *,
     pipeline: PluginPipeline,
@@ -584,7 +489,7 @@ async def _invoke_pipeline(
     model_override_task: str | None = None,
     session_id: str | None = None,
     turn_index: int | None = None,
-    extract_latency_ms: int | None = None,
+    parse_failure_reason: str | None = None,
     extracted_text_chars: int | None = None,
     project_id: str | None = None,
     pdf_id: str | None = None,
@@ -610,7 +515,7 @@ async def _invoke_pipeline(
             latency_ms=latency_ms,
             session_id=session_id,
             turn_index=turn_index,
-            extract_latency_ms=extract_latency_ms,
+            parse_failure_reason=parse_failure_reason,
             extracted_text_chars=extracted_text_chars,
         )
     except (ProviderAuthError, ProviderUpstreamError):
@@ -627,7 +532,7 @@ async def _invoke_pipeline(
             latency_ms=latency_ms,
             session_id=session_id,
             turn_index=turn_index,
-            extract_latency_ms=extract_latency_ms,
+            parse_failure_reason=parse_failure_reason,
             extracted_text_chars=extracted_text_chars,
         )
     except ProviderConfigError:
@@ -644,7 +549,7 @@ async def _invoke_pipeline(
             latency_ms=latency_ms,
             session_id=session_id,
             turn_index=turn_index,
-            extract_latency_ms=extract_latency_ms,
+            parse_failure_reason=parse_failure_reason,
             extracted_text_chars=extracted_text_chars,
         )
 
@@ -661,7 +566,8 @@ def _build_success_response(
     result,
     session_id: str | None = None,
     turn_index: int | None = None,
-    extract_latency_ms: int | None = None,
+    parse_failure_reason: str | None = None,
+    extracted_text: str | None = None,
     extracted_text_chars: int | None = None,
     project_id: str | None = None,
     pdf_id: str | None = None,
@@ -691,6 +597,7 @@ def _build_success_response(
 
     data = TranslateData(
         text=result.text,
+        extracted_text=extracted_text,
         session_id=session_id,
         conversation_id=session_id if session_id is not None else None,
         meta=TranslateMeta(**meta_kwargs),
@@ -711,7 +618,7 @@ def _build_success_response(
         http_status=200,
         session_id=session_id,
         turn_index=turn_index,
-        extract_latency_ms=extract_latency_ms,
+        parse_failure_reason=parse_failure_reason,
         extracted_text_chars=extracted_text_chars,
         project_id=project_id,
         pdf_id=pdf_id,
@@ -791,56 +698,28 @@ async def _execute_first_turn_v1(
     if image_error is not None:
         return image_error
 
-    extract_ctx = TaskContext(
-        selection=body.selection,
-        image=body.image,
-        options={"temperature": settings.llm_temperature},
-        project_id=project_id,
-        pdf_id=pdf_id,
-    )
-    extract_start = time.perf_counter()
-    extract_result, extract_resp, extract_error = await _invoke_extract_task(
-        ctx=extract_ctx,
-        provider=provider,
+    request_plugins = ",".join(body.plugins) if body.plugins else ""
+    log_with_fields(
+        logger,
+        logging.INFO,
+        "screenshot-qa auto-activated",
         request_id=request_id,
-        api_version="v1",
-        task_type=task_type,
-        page=page,
-        image_bytes=image_bytes,
-        start=start,
-        project_id=project_id,
-        pdf_id=pdf_id,
+        request_plugins=request_plugins,
+        request_task_type=body.task_type,
     )
-    extract_latency_ms = int((time.perf_counter() - extract_start) * 1000)
-    if extract_error is not None:
-        return extract_error
 
-    extracted_text = extract_result.text
-    extracted_text_chars = len(extracted_text)
-
+    user_input = _first_turn_user_input(body)
+    plugin_ids = [SCREENSHOT_QA_PLUGIN_ID]
+    conversation_task_type = SCREENSHOT_QA_PLUGIN_ID
     plugin_ctx = PluginContext(
-        selection_text=extracted_text,
+        selection_text=None,
         selection_type="image",
-        selection_word_count=estimate_word_count(extracted_text),
+        selection_word_count=0,
+        image=_image_part_from_payload(body.image),
         target_lang=body.options.target_lang,
         history=[],
+        user_input=user_input,
     )
-    try:
-        plugin_ids, user_input = resolve_plugin_routing(body, registry, plugin_ctx)
-    except (UnsupportedTaskError, RunInvalidRequestError) as exc:
-        return _routing_error_response(
-            exc=exc,
-            request_id=request_id,
-            api_version="v1",
-            task_type=task_type,
-            page=page,
-            image_bytes=image_bytes,
-            project_id=project_id,
-            pdf_id=pdf_id,
-        )
-
-    plugin_ctx = plugin_ctx.model_copy(update={"user_input": user_input})
-    conversation_task_type = _conversation_task_type(plugin_ids)
 
     result, llm_resp, invoke_error = await _invoke_pipeline(
         pipeline=pipeline,
@@ -853,15 +732,20 @@ async def _execute_first_turn_v1(
         page=page,
         image_bytes=image_bytes,
         start=start,
-        model_override_task=_model_override_task(plugin_ids),
+        model_override_task=None,
         turn_index=0,
-        extract_latency_ms=extract_latency_ms,
-        extracted_text_chars=extracted_text_chars,
         project_id=project_id,
         pdf_id=pdf_id,
     )
     if invoke_error is not None:
         return invoke_error
+
+    plugin = registry.get(SCREENSHOT_QA_PLUGIN_ID)
+    parse_result = plugin.parse_response(llm_resp.text)
+    parse_failure_reason = getattr(plugin, "last_failure_reason", None)
+    extracted_text = parse_result.extracted_text or ""
+    answer_text = parse_result.answer
+    extracted_text_chars = len(extracted_text)
 
     conversation_id = f"conv_{ULID()}"
     selection_id = f"sel_{ULID()}"
@@ -912,7 +796,7 @@ async def _execute_first_turn_v1(
             selection_row=selection_row,
             first_user_question=user_input,
             first_user_content=user_history_text,
-            first_assistant_text=result.text,
+            first_assistant_text=answer_text,
             first_assistant_meta=assistant_meta,
             meta=meta,
         )
@@ -948,10 +832,11 @@ async def _execute_first_turn_v1(
         image_bytes=image_bytes,
         start=start,
         llm_resp=llm_resp,
-        result=result,
+        result=TaskResult(text=answer_text),
         session_id=session.session_id,
         turn_index=0,
-        extract_latency_ms=extract_latency_ms,
+        parse_failure_reason=parse_failure_reason,
+        extracted_text=parse_result.extracted_text,
         extracted_text_chars=extracted_text_chars,
         project_id=project_id,
         pdf_id=pdf_id,
@@ -1003,6 +888,22 @@ async def _execute_follow_up_v1(
         )
 
     # V1.1.1: cross-plugin follow-up allowed; SESSION_TASK_MISMATCH check removed.
+
+    if not session.extracted_text:
+        return _error_json(
+            status_code=400,
+            code="OCR_TEXT_UNAVAILABLE",
+            message="识别文本缺失，请重新截图发起新对话",
+            request_id=request_id,
+            api_version="v1",
+            task_type=task_type,
+            page=page,
+            image_bytes=0,
+            session_id=body.session_id,
+            project_id=session.project_id,
+            pdf_id=session.pdf_id,
+            conversation_id=body.session_id,
+        )
 
     turn_index = len(session.messages) // 2
 
@@ -1128,13 +1029,14 @@ async def _stream_driver_events(
     *,
     prepared: PreparedStreamRun,
     provider: Provider,
-) -> AsyncIterator[LLMStreamEvent]:
-    accumulated_text = ""
+) -> AsyncIterator[StructuredStreamEvent]:
+    accumulated_ocr = ""
+    accumulated_answer = ""
+    parse_failure_reason: str | None = None
     interrupted = False
     usage: LLMUsage | None = None
     model: str | None = None
     thinking_enabled = False
-    stream_error: LLMStreamEvent | None = None
 
     try:
         llm_req = prepared.pipeline.build_request(
@@ -1145,27 +1047,58 @@ async def _stream_driver_events(
         override_task = _model_override_task(prepared.plugin_ids)
         if override_task is not None:
             llm_req = _inject_model_override(llm_req, override_task)
-        async for event in provider.invoke_stream(llm_req):
-            if event.type == "text_delta" and event.delta:
-                accumulated_text += event.delta
-                yield event
-            elif event.type == "usage":
-                usage = event.usage
-                yield event
-            elif event.type == "done":
-                model = event.model
-                thinking_enabled = bool(event.thinking_enabled)
-                yield event
-                break
-            elif event.type == "error":
-                interrupted = True
-                stream_error = event
-                yield event
-                break
+        provider_events = provider.invoke_stream(llm_req)
+
+        if prepared.is_screenshot_qa:
+            plugin = prepared.registry.get(SCREENSHOT_QA_PLUGIN_ID)
+            async for ev in plugin.wrap_stream(provider_events):
+                if ev.type == "text_delta":
+                    if ev.section == "ocr":
+                        accumulated_ocr += ev.delta or ""
+                    elif ev.section == "answer":
+                        accumulated_answer += ev.delta or ""
+                    elif ev.section is None:
+                        accumulated_answer += ev.delta or ""
+                    yield ev
+                elif ev.type == "extracted_text":
+                    accumulated_ocr = ev.text or ""
+                    yield ev
+                elif ev.type == "usage":
+                    usage = ev.usage
+                    yield ev
+                elif ev.type == "done":
+                    model = ev.model
+                    thinking_enabled = bool(ev.thinking_enabled)
+                    yield ev
+                    break
+                elif ev.type == "error":
+                    interrupted = True
+                    yield ev
+                    break
+            parse_failure_reason = getattr(plugin, "last_failure_reason", None)
+        else:
+            async for event in provider_events:
+                wrapped = StructuredStreamEvent.passthrough(event)
+                if event.type == "text_delta":
+                    accumulated_answer += event.delta or ""
+                    yield wrapped
+                elif event.type == "usage":
+                    usage = event.usage
+                    yield wrapped
+                elif event.type == "done":
+                    model = event.model
+                    thinking_enabled = bool(event.thinking_enabled)
+                    yield wrapped
+                    break
+                elif event.type == "error":
+                    interrupted = True
+                    yield wrapped
+                    break
     except asyncio.CancelledError:
         interrupted = True
         raise
     finally:
+        prepared.parse_failure_reason = parse_failure_reason
         latency_ms = int((time.perf_counter() - prepared.start) * 1000)
         assistant_meta = {
             "model": model,
@@ -1178,18 +1111,23 @@ async def _stream_driver_events(
             await store.finalize_streaming_assistant(
                 prepared.conversation_id,
                 turn_index=prepared.turn_index,
-                assistant_text=accumulated_text,
+                assistant_text=accumulated_answer,
                 interrupted=interrupted,
                 assistant_meta=assistant_meta,
+                extracted_text_override=(
+                    accumulated_ocr if prepared.is_screenshot_qa else None
+                ),
             )
-        elif accumulated_text or interrupted:
+            if prepared.is_screenshot_qa:
+                prepared.extracted_text_chars = len(accumulated_ocr)
+        elif accumulated_answer or interrupted:
             user_msg = LLMMessage(
                 role="user",
                 content=[TextPart(text=prepared.follow_up_user_input or "")],
             )
             assistant_msg = LLMMessage(
                 role="assistant",
-                content=[TextPart(text=accumulated_text)],
+                content=[TextPart(text=accumulated_answer)],
             )
             await store.append_turn(
                 prepared.conversation_id,
@@ -1199,7 +1137,6 @@ async def _stream_driver_events(
                 assistant_meta=assistant_meta,
                 interrupted=interrupted,
             )
-        _ = stream_error
 
 
 async def prepare_stream_run(
@@ -1269,60 +1206,32 @@ async def prepare_stream_run(
         if image_error is not None:
             return image_error
 
-        extract_ctx = TaskContext(
-            selection=body.selection,
-            image=body.image,
-            options={"temperature": settings.llm_temperature},
-            project_id=project_id,
-            pdf_id=pdf_id,
-        )
-        extract_start = time.perf_counter()
-        extract_result, extract_resp, extract_error = await _invoke_extract_task(
-            ctx=extract_ctx,
-            provider=provider,
+        request_plugins = ",".join(body.plugins) if body.plugins else ""
+        log_with_fields(
+            logger,
+            logging.INFO,
+            "screenshot-qa auto-activated",
             request_id=request_id,
-            api_version=API_VERSION,
-            task_type=task_type,
-            page=page,
-            image_bytes=image_bytes,
-            start=start,
-            project_id=project_id,
-            pdf_id=pdf_id,
+            request_plugins=request_plugins,
+            request_task_type=body.task_type,
         )
-        extract_latency_ms = int((time.perf_counter() - extract_start) * 1000)
-        if extract_error is not None:
-            return extract_error
 
-        extracted_text = extract_result.text
-        extracted_text_chars = len(extracted_text)
-
+        user_input = _first_turn_user_input(body)
+        plugin_ids = [SCREENSHOT_QA_PLUGIN_ID]
+        conversation_task_type = SCREENSHOT_QA_PLUGIN_ID
         plugin_ctx = PluginContext(
-            selection_text=extracted_text,
+            selection_text=None,
             selection_type="image",
-            selection_word_count=estimate_word_count(extracted_text),
+            selection_word_count=0,
+            image=_image_part_from_payload(body.image),
             target_lang=body.options.target_lang,
             history=[],
+            user_input=user_input,
         )
-        try:
-            plugin_ids, user_input = resolve_plugin_routing(body, registry, plugin_ctx)
-        except (UnsupportedTaskError, RunInvalidRequestError) as exc:
-            return _routing_error_response(
-                exc=exc,
-                request_id=request_id,
-                api_version=API_VERSION,
-                task_type=task_type,
-                page=page,
-                image_bytes=image_bytes,
-                project_id=project_id,
-                pdf_id=pdf_id,
-            )
-
-        plugin_ctx = plugin_ctx.model_copy(update={"user_input": user_input})
-        conversation_task_type = _conversation_task_type(plugin_ids)
 
         conversation_id = f"conv_{ULID()}"
         selection_id = f"sel_{ULID()}"
-        user_history_text = _compose_user_history_text(extracted_text, user_input)
+        user_history_text = _compose_user_history_text("", user_input)
         store = get_session_store()
         meta = {
             "page": body.selection.page,
@@ -1357,7 +1266,7 @@ async def prepare_stream_run(
                 pdf_id=pdf_id,
                 selection_id=selection_id,
                 task_type=conversation_task_type,
-                extracted_text=extracted_text,
+                extracted_text="",
                 selection_row=selection_row,
                 first_user_question=user_input,
                 first_user_content=user_history_text,
@@ -1393,7 +1302,6 @@ async def prepare_stream_run(
             "model": default_model,
             "thinking_enabled": _thinking_enabled_for_meta(pipeline, plugin_ids),
             "plugins": plugin_ids,
-            "extract_latency_ms": extract_latency_ms,
         }
         prepared = PreparedStreamRun(
             request_id=request_id,
@@ -1406,11 +1314,12 @@ async def prepare_stream_run(
             conversation_id=conversation_id,
             turn_index=0,
             is_first_turn=True,
-            extract_latency_ms=extract_latency_ms,
-            extracted_text_chars=extracted_text_chars,
+            is_screenshot_qa=True,
+            extracted_text_chars=None,
             plugin_ids=plugin_ids,
             plugin_ctx=plugin_ctx,
             pipeline=pipeline,
+            registry=registry,
             follow_up_user_input=None,
             meta_payload=meta_payload,
         )
@@ -1446,6 +1355,22 @@ async def prepare_stream_run(
         )
 
     # V1.1.1: cross-plugin follow-up allowed; SESSION_TASK_MISMATCH check removed.
+
+    if not session.extracted_text:
+        return _error_json(
+            status_code=400,
+            code="OCR_TEXT_UNAVAILABLE",
+            message="识别文本缺失，请重新截图发起新对话",
+            request_id=request_id,
+            api_version=API_VERSION,
+            task_type=task_type,
+            page=page,
+            image_bytes=0,
+            session_id=body.session_id,
+            project_id=session.project_id,
+            pdf_id=session.pdf_id,
+            conversation_id=body.session_id,
+        )
 
     turn_index = len(session.messages) // 2
     plugin_ctx = PluginContext(
@@ -1497,11 +1422,12 @@ async def prepare_stream_run(
         conversation_id=body.session_id,
         turn_index=turn_index,
         is_first_turn=False,
-        extract_latency_ms=None,
+        is_screenshot_qa=False,
         extracted_text_chars=None,
         plugin_ids=plugin_ids,
         plugin_ctx=plugin_ctx,
         pipeline=pipeline,
+        registry=registry,
         follow_up_user_input=user_input,
         meta_payload=meta_payload,
     )
@@ -1536,7 +1462,7 @@ def _log_run_stream_completed(
         error_code=error_code or "",
         session_id=prepared.conversation_id,
         turn_index=prepared.turn_index,
-        extract_latency_ms=prepared.extract_latency_ms if prepared.extract_latency_ms is not None else "",
+        parse_failure_reason=prepared.parse_failure_reason or "",
         extracted_text_chars=prepared.extracted_text_chars if prepared.extracted_text_chars is not None else "",
         project_id=prepared.project_id or "",
         pdf_id=prepared.pdf_id or "",
@@ -1588,7 +1514,12 @@ async def iter_run_sse_bytes(
                 stream_chunks += 1
                 if first_chunk_latency_ms is None:
                     first_chunk_latency_ms = int((time.perf_counter() - stream_start) * 1000)
-                yield _encode_sse("text_delta", {"delta": event.delta})
+                payload: dict[str, object] = {"delta": event.delta}
+                if event.section is not None:
+                    payload["section"] = event.section
+                yield _encode_sse("text_delta", payload)
+            elif event.type == "extracted_text":
+                yield _encode_sse("extracted_text", {"text": event.text or ""})
             elif event.type == "usage":
                 yield _encode_sse("usage", _usage_to_dict(event.usage))
             elif event.type == "done":

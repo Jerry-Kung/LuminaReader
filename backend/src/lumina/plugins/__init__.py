@@ -7,7 +7,9 @@ from lumina.plugins.base import (
     Plugin,
     PluginContext,
     PluginManifest,
+    PluginParseResult,
     PluginPromptSegments,
+    StructuredStreamEvent,
     evaluate_applicable_when,
 )
 from lumina.plugins.errors import PluginLoadError, PluginNotFoundError
@@ -21,9 +23,11 @@ __all__ = [
     "PluginLoadError",
     "PluginManifest",
     "PluginNotFoundError",
+    "PluginParseResult",
     "PluginPromptSegments",
     "PluginPipeline",
     "PluginRegistry",
+    "StructuredStreamEvent",
     "evaluate_applicable_when",
     "get_plugin_registry",
     "get_plugins_root",

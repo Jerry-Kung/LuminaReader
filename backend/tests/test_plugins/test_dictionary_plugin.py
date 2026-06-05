@@ -1,5 +1,8 @@
+import pytest
+
 from lumina.plugins import PluginRegistry, get_plugins_root
 from lumina.plugins.base import PluginContext
+from lumina.providers.base import ImagePart, LLMStreamEvent
 
 
 def _dictionary_plugin():
@@ -56,3 +59,41 @@ def test_d08_applicable_when_max_word_count() -> None:
     assert rule is not None
     assert rule.selection_word_count is not None
     assert rule.selection_word_count.max == 3
+
+
+def test_d09_default_parse_response_passthrough() -> None:
+    plugin = _dictionary_plugin()
+    result = plugin.parse_response("hello world")
+    assert result.answer == "hello world"
+    assert result.extracted_text is None
+
+
+@pytest.mark.asyncio
+async def test_d10_default_wrap_stream_passthrough() -> None:
+    plugin = _dictionary_plugin()
+    events = [
+        LLMStreamEvent(type="text_delta", delta="hi"),
+        LLMStreamEvent(type="done", model="m"),
+    ]
+
+    async def _iter():
+        for ev in events:
+            yield ev
+
+    out = [ev async for ev in plugin.wrap_stream(_iter())]
+    assert out[0].type == "text_delta"
+    assert out[0].delta == "hi"
+    assert out[0].section is None
+    assert out[1].type == "done"
+
+
+def test_d11_image_field_ignored_by_build_segments() -> None:
+    plugin = _dictionary_plugin()
+    baseline = plugin.build_segments(PluginContext(selection_text="ephemeral"))
+    with_image = plugin.build_segments(
+        PluginContext(
+            selection_text="ephemeral",
+            image=ImagePart(mime="image/png", data_b64="abc"),
+        )
+    )
+    assert with_image == baseline

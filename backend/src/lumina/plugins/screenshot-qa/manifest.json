@@ -1,0 +1,15 @@
+{
+  "id": "screenshot-qa",
+  "label": "截图问答",
+  "icon": "ri-image-line",
+  "applicable_to": ["image"],
+  "applicable_when": null,
+  "thinking_default": true,
+  "prompt_files": {
+    "system": "prompts/system.md",
+    "user": {
+      "default": "prompts/user_default.md",
+      "with_input": "prompts/user.md"
+    }
+  }
+}

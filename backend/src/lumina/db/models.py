@@ -237,6 +237,17 @@ def update_conversation_last_used(conn, conversation_id: str, ts: int) -> None:
     )
 
 
+def update_conversation_extracted_text(
+    conn,
+    conversation_id: str,
+    extracted_text: str,
+) -> None:
+    conn.execute(
+        "UPDATE conversations SET extracted_text = ? WHERE id = ?",
+        (extracted_text, conversation_id),
+    )
+
+
 def list_conversations_by_pdf(
     conn, pdf_id: str, *, include_cleared: bool = False
 ) -> list[ConversationRow]:

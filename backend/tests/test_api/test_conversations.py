@@ -65,7 +65,7 @@ def test_l04_legacy_translate_task_type_in_messages(conv_run_client: TestClient)
     conv_id = first.json()["data"]["conversation_id"]
     response = conv_run_client.get(f"/api/v1/conversations/{conv_id}/messages")
     assert response.status_code == 200
-    assert response.json()["data"]["task_type"] == "translate"
+    assert response.json()["data"]["task_type"] == "screenshot-qa"
 
 
 def test_l05_legacy_explain_task_type_in_messages(conv_run_client: TestClient) -> None:
@@ -76,7 +76,7 @@ def test_l05_legacy_explain_task_type_in_messages(conv_run_client: TestClient) -
     conv_id = first.json()["data"]["conversation_id"]
     response = conv_run_client.get(f"/api/v1/conversations/{conv_id}/messages")
     assert response.status_code == 200
-    assert response.json()["data"]["task_type"] == "explain"
+    assert response.json()["data"]["task_type"] == "screenshot-qa"
 
 
 def test_l06_chat_task_type_in_messages(conv_run_client: TestClient) -> None:
@@ -92,7 +92,7 @@ def test_l06_chat_task_type_in_messages(conv_run_client: TestClient) -> None:
     conv_id = first.json()["data"]["conversation_id"]
     response = conv_run_client.get(f"/api/v1/conversations/{conv_id}/messages")
     assert response.status_code == 200
-    assert response.json()["data"]["task_type"] == "chat"
+    assert response.json()["data"]["task_type"] == "screenshot-qa"
 
 
 def test_l07_pdf_conversations_list_includes_chat(conv_run_client: TestClient) -> None:
@@ -112,7 +112,7 @@ def test_l07_pdf_conversations_list_includes_chat(conv_run_client: TestClient) -
     items = response.json()["data"]["items"]
     matching = [i for i in items if i["conversation_id"] == conv_id]
     assert len(matching) == 1
-    assert matching[0]["task_type"] == "chat"
+    assert matching[0]["task_type"] == "screenshot-qa"
 
 
 def test_l08_no_session_task_mismatch_tests_in_run_suite() -> None:

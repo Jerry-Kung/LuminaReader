@@ -98,11 +98,12 @@ def _stream_prepared(
         "conversation_id": conversation_id,
         "turn_index": 0,
         "is_first_turn": True,
-        "extract_latency_ms": None,
+        "is_screenshot_qa": False,
         "extracted_text_chars": None,
         "plugin_ids": ids,
         "plugin_ctx": plugin_ctx,
         "pipeline": pipeline,
+        "registry": registry,
         "follow_up_user_input": None,
         "meta_payload": {},
     }
@@ -110,7 +111,7 @@ def _stream_prepared(
     return PreparedStreamRun(**defaults)  # type: ignore[arg-type]
 
 
-async def _collect_events(gen: AsyncIterator[LLMStreamEvent]) -> list[LLMStreamEvent]:
+async def _collect_events(gen):
     return [event async for event in gen]
 
 
@@ -166,7 +167,6 @@ async def test_stream_success_persists_without_interrupted_marker(data_root) -> 
         project_id=created.project_id,
         pdf_id=created.pdf_id,
         request_id="req_test",
-        extract_latency_ms=10,
         extracted_text_chars=6,
     )
     collected = await _collect_events(
@@ -299,7 +299,7 @@ async def test_stream_cancelled_persists_interrupted(data_root) -> None:
 
 
 @pytest.mark.asyncio
-async def test_first_turn_extract_non_stream_then_driver_stream(monkeypatch) -> None:
+async def test_first_turn_single_screenshot_qa_stream(monkeypatch) -> None:
     from fastapi import Request
     from lumina.schemas.api import TranslateRequest, TranslateOptions
 
@@ -328,10 +328,9 @@ async def test_first_turn_extract_non_stream_then_driver_stream(monkeypatch) -> 
         request_id="req_first",
     )
     assert not isinstance(prep, __import__("fastapi").responses.JSONResponse)
-    assert provider.invoke_count == 1
-    assert provider.last_invoke_request is not None
-    assert provider.last_invoke_request.thinking is False
-    assert provider.last_invoke_request.stream is False
+    assert provider.invoke_count == 0
+    assert isinstance(prep, PreparedStreamRun)
+    assert prep.is_screenshot_qa is True
     await _collect_events(_stream_driver_events(prepared=prep, provider=provider))
     assert provider.stream_invoke_count == 1
     assert provider.last_stream_request is not None

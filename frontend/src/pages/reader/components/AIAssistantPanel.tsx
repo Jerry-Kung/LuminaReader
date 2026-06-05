@@ -36,6 +36,7 @@ interface AIAssistantPanelProps {
   onPanelModeChange: (mode: 'narrow' | 'wide' | 'overlay') => void;
   onRetry?: (message: Message) => void;
   onDismissError?: (message: Message) => void;
+  onToggleOcr?: (message: Message) => void;
 }
 
 const taskLabelConfig: Record<TaskType, { label: string; icon: string; bgClass: string; textClass: string }> = {
@@ -62,6 +63,12 @@ const taskLabelConfig: Record<TaskType, { label: string; icon: string; bgClass: 
     icon: 'ri-chat-3-line',
     bgClass: 'bg-stone-100',
     textClass: 'text-stone-600',
+  },
+  'screenshot-qa': {
+    label: '截图问答',
+    icon: 'ri-image-line',
+    bgClass: 'bg-sky-50',
+    textClass: 'text-sky-700',
   },
 };
 
@@ -119,14 +126,53 @@ function categoryIcon(category?: ErrorCategory): string {
   }
 }
 
+function OcrFoldable({
+  text,
+  collapsed,
+  onToggle,
+}: {
+  text: string;
+  collapsed: boolean;
+  onToggle: () => void;
+}) {
+  return (
+    <div className="mb-2 rounded-md border border-sky-100 bg-sky-50/60 overflow-hidden">
+      <button
+        onClick={onToggle}
+        className="flex items-center justify-between w-full px-2 py-1.5 hover:bg-sky-100/50 transition-colors cursor-pointer"
+        aria-expanded={!collapsed}
+      >
+        <span className="inline-flex items-center gap-1 text-[10px] font-medium text-sky-700">
+          <i className="ri-scan-line text-[10px]"></i>
+          识别文本
+        </span>
+        <i
+          className={`ri-arrow-down-s-line text-sky-500 text-xs transition-transform duration-200 ${
+            collapsed ? '' : 'rotate-180'
+          }`}
+        ></i>
+      </button>
+      {!collapsed && (
+        <div className="px-2 pb-2 pt-1">
+          <p className="text-[11px] text-sky-900/80 leading-relaxed whitespace-pre-wrap break-words max-h-48 overflow-y-auto">
+            {text || <span className="text-sky-400/70">（未提取到识别文本）</span>}
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function MessageBubble({
   message,
   onRetry,
   onDismiss,
+  onToggleOcr,
 }: {
   message: Message;
   onRetry?: (m: Message) => void;
   onDismiss?: (m: Message) => void;
+  onToggleOcr?: (m: Message) => void;
 }) {
   if (message.role === 'user') {
     return (
@@ -200,6 +246,13 @@ function MessageBubble({
           </div>
           <span className="text-[10px] text-stone-400 font-medium">AI</span>
         </div>
+        {message.ocrText !== undefined && (
+          <OcrFoldable
+            text={message.ocrText}
+            collapsed={message.ocrCollapsed === true}
+            onToggle={() => onToggleOcr?.(message)}
+          />
+        )}
         <MarkdownRenderer content={message.text} />
       </div>
     </div>
@@ -260,6 +313,7 @@ function HistoryItem({
   isAIWorking,
   onRetry,
   onDismissError,
+  onToggleOcr,
 }: {
   entry: HistoryEntry;
   isExpanded: boolean;
@@ -269,6 +323,7 @@ function HistoryItem({
   isAIWorking: boolean;
   onRetry?: (m: Message) => void;
   onDismissError?: (m: Message) => void;
+  onToggleOcr?: (m: Message) => void;
 }) {
   const config = taskLabelConfig[entry.taskType];
   const placeholder = (entry.summary || '历史对话').slice(0, 60);
@@ -331,6 +386,7 @@ function HistoryItem({
                   message={message}
                   onRetry={onRetry}
                   onDismiss={onDismissError}
+                  onToggleOcr={onToggleOcr}
                 />
               ))}
               {!hasLoading && (
@@ -565,6 +621,7 @@ export default function AIAssistantPanel({
   onPanelModeChange,
   onRetry,
   onDismissError,
+  onToggleOcr,
 }: AIAssistantPanelProps) {
   const handleCopy = async (text: string) => {
     try {
@@ -659,6 +716,7 @@ export default function AIAssistantPanel({
                     isAIWorking={isAIWorking}
                     onRetry={onRetry}
                     onDismissError={onDismissError}
+                    onToggleOcr={onToggleOcr}
                   />
                 ))}
               </div>
@@ -771,6 +829,7 @@ export default function AIAssistantPanel({
                               message={message}
                               onRetry={onRetry}
                               onDismiss={onDismissError}
+                              onToggleOcr={onToggleOcr}
                             />
                           ))}
                         </div>

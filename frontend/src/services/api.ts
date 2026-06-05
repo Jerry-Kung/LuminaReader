@@ -1,6 +1,9 @@
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '';
 
-export type TaskType = 'translate' | 'explain' | 'dictionary' | 'chat';
+export type TaskType = 'translate' | 'explain' | 'dictionary' | 'chat' | 'screenshot-qa';
+
+// V1.1.2: SSE text_delta.section 字段（screenshot-qa 路径流式分段）
+export type StreamSection = 'ocr' | 'answer';
 
 export interface TranslateSelection {
   page: number;
@@ -100,7 +103,10 @@ export interface StreamUsage {
 
 export interface RunStreamCallbacks {
   onMeta: (meta: StreamMeta) => void;
-  onTextDelta: (delta: string) => void;
+  // V1.1.2：text_delta.section 用于区分 OCR 折叠区 / 正文区流式累积；其他插件路径恒为 null
+  onTextDelta: (delta: string, section: StreamSection | null) => void;
+  // V1.1.2：仅 screenshot-qa 路径下发；text 是 OCR 段全部收完后的"权威值"，前端折叠区据此覆盖
+  onExtractedText?: (text: string) => void;
   onUsage: (usage: StreamUsage) => void;
   onDone: (final: { latency_ms: number }) => void;
   // partialTextKept: 后端已把累积文本落库（含 [interrupted] 标记）；前端 partial 气泡可保留
@@ -165,7 +171,7 @@ function mockRunStream(
   chunks.forEach((c, i) => {
     timers.push(setTimeout(() => {
       if (aborted) return;
-      callbacks.onTextDelta(c);
+      callbacks.onTextDelta(c, null);
     }, 350 + i * 60));
   });
 
@@ -227,10 +233,20 @@ function parseSSEFrame(rawFrame: string, callbacks: RunStreamCallbacks, state: S
       break;
     case 'text_delta': {
       const delta = typeof obj.delta === 'string' ? obj.delta : '';
+      // V1.1.2：section 字段缺省视作 null（V1.1.1 兼容路径）；只接受合法字面值
+      const rawSection = obj.section;
+      const section: StreamSection | null =
+        rawSection === 'ocr' || rawSection === 'answer' ? rawSection : null;
       if (delta) {
         state.textChunkCount += 1;
-        callbacks.onTextDelta(delta);
+        callbacks.onTextDelta(delta, section);
       }
+      break;
+    }
+    case 'extracted_text': {
+      // V1.1.2：screenshot-qa 路径独有；text 为 OCR 段完整权威值
+      const text = typeof obj.text === 'string' ? obj.text : '';
+      callbacks.onExtractedText?.(text);
       break;
     }
     case 'usage':
@@ -314,7 +330,8 @@ function startSSEFetch(
   let finished = false;
   const wrap: RunStreamCallbacks = {
     onMeta: (m) => { if (!finished) callbacks.onMeta(m); },
-    onTextDelta: (d) => { if (!finished) callbacks.onTextDelta(d); },
+    onTextDelta: (d, s) => { if (!finished) callbacks.onTextDelta(d, s); },
+    onExtractedText: (t) => { if (!finished) callbacks.onExtractedText?.(t); },
     onUsage: (u) => { if (!finished) callbacks.onUsage(u); },
     onDone: (f) => { if (finished) return; finished = true; callbacks.onDone(f); },
     onError: (e, o) => { if (finished) return; finished = true; callbacks.onError(e, o); },
@@ -1057,12 +1074,14 @@ export type ErrorCategory =
   | 'provider_unconfigured'
   | 'server_error'
   | 'interrupted'
+  | 'ocr_text_unavailable'
   | 'unknown';
 
 /** 把 catch 到的 err 归类到 ErrorCategory，仅用于 UI 文案分支。 */
 export function classifyApiError(err: unknown): ErrorCategory {
   if (err instanceof TranslateApiError) {
     const code = err.code;
+    if (code === 'OCR_TEXT_UNAVAILABLE') return 'ocr_text_unavailable';
     if (code === 'STREAM_INTERRUPTED') return 'interrupted';
     if (code === 'NETWORK_ERROR') return 'network';
     if (code === 'PROVIDER_ERROR' || code === 'PROVIDER_UNCONFIGURED') return 'provider_unconfigured';
@@ -1099,6 +1118,8 @@ export function errorMessageFor(category: ErrorCategory): string {
       return '后端处理失败，请稍后重试；若持续出现请检查后端日志。';
     case 'interrupted':
       return '流式输出中断，可点击重试继续。';
+    case 'ocr_text_unavailable':
+      return '识别文本缺失，请重新截图发起新对话。';
     case 'unknown':
     default:
       return 'AI 调用失败，请重试。';

@@ -1,8 +1,6 @@
 from lumina.tasks.base import Task, TaskContext, TaskResult, UnsupportedTaskError
-from lumina.tasks.extract import ExtractTask
 
 # V1.1.1: thin compatibility map for _run_core legacy task_type fallback only.
-# Task abstraction and ExtractTask remain; user-visible tasks moved to plugins.
 TASK_REGISTRY: dict[str, str] = {
     "translate": "translate",
     "explain": "explain",
@@ -19,7 +17,6 @@ __all__ = [
     "TaskContext",
     "TaskResult",
     "UnsupportedTaskError",
-    "ExtractTask",
     "TASK_REGISTRY",
     "resolve_legacy_task_type",
 ]

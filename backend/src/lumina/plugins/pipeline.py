@@ -6,6 +6,7 @@ from string import Template
 from lumina.plugins.base import PluginContext, PluginPromptSegments
 from lumina.plugins.registry import PluginRegistry
 from lumina.providers.base import (
+    ImagePart,
     LLMMessage,
     LLMRequest,
     LLMResponse,
@@ -19,7 +20,14 @@ class PluginPipeline:
     CHAT_SYSTEM_PROMPT_TEMPLATE = (
         "You are LuminaReader's AI reading assistant. The user is reading a PDF and may "
         "ask questions about the content, request explanations, or seek clarifications. "
-        "Respond in ${target_lang}. Be accurate, concise, and helpful."
+        "Respond in ${target_lang}. Be accurate, concise, and helpful. "
+        "Any selected text or extracted screenshot content provided as [Selected content for context] "
+        "is background reference only — it is NOT a topical constraint. The user is free to ask anything: "
+        "follow-ups grounded in the selected content, broader background questions, or topics entirely "
+        "unrelated to it. You MUST answer to the best of your knowledge in every case. NEVER refuse on "
+        "the grounds that the question is off-topic, not covered by the selected content, or otherwise "
+        "unrelated. If the selected content does not contain information needed to answer, simply answer "
+        "from your own knowledge without prefacing the answer with disclaimers about scope."
     )
 
     def __init__(
@@ -57,7 +65,10 @@ class PluginPipeline:
         ]
         if ctx.history:
             messages.extend(ctx.history)
-        messages.append(LLMMessage(role="user", content=[TextPart(text=user_text)]))
+        user_content: list[TextPart | ImagePart] = [TextPart(text=user_text)]
+        if ctx.image is not None:
+            user_content.append(ctx.image)
+        messages.append(LLMMessage(role="user", content=user_content))
 
         return LLMRequest(messages=messages, thinking=thinking)
 

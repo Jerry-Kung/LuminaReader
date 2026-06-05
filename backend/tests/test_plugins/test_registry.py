@@ -139,4 +139,16 @@ def test_r09_list_applicable_filters(tmp_path: Path) -> None:
 
 def test_builtin_plugins_load() -> None:
     registry = PluginRegistry.load_all(get_plugins_root())
-    assert set(registry.plugins.keys()) == {"translate", "explain", "dictionary"}
+    assert set(registry.plugins.keys()) == {
+        "translate",
+        "explain",
+        "dictionary",
+        "screenshot-qa",
+    }
+
+
+def test_builtin_screenshot_qa_manifest() -> None:
+    registry = PluginRegistry.load_all(get_plugins_root())
+    plugin = registry.get("screenshot-qa")
+    assert plugin.manifest.applicable_to == ["image"]
+    assert plugin.manifest.thinking_default is True

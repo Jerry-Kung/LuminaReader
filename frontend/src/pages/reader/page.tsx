@@ -62,6 +62,11 @@ export interface Message {
   errorText?: string;
   errorCategory?: ErrorCategory;
   retry?: RetryPayload;
+  // V1.1.2 screenshot-qa：首轮 OCR 折叠区文本（非首轮场景 undefined）
+  ocrText?: string;
+  // OCR 段已被 SSE extracted_text 事件以权威值覆盖（后续 delta 不应再追加）
+  ocrAuthoritative?: boolean;
+  ocrCollapsed?: boolean;
 }
 
 export interface AIResult {
@@ -145,8 +150,11 @@ function nextMsgId(): number {
 // 把卡片/历史保存的单一 TaskType 还原为 plugins 数组：
 // 'chat' → []（自由 Chat 模式）；其它三类 → [type]。
 // 追问轮后端允许跨插件，但前端默认沿用本卡的 type，无 UI 让用户改。
+// V1.1.2：'screenshot-qa' 是后端按 image 自动激活的内部插件，追问轮（无 image）
+// 显式带它会让 LLM 仍被强制要求输出 <ocr>/<answer> 双标签 → 标签泄漏到 UI。
+// 追问轮统一退化为 chat 模式，后端会用 session.extracted_text 作为上下文。
 function taskTypeToPlugins(t: TaskType): ChipPluginType[] {
-  if (t === 'chat') return [];
+  if (t === 'chat' || t === 'screenshot-qa') return [];
   return [t];
 }
 
@@ -562,8 +570,27 @@ export default function ReaderPage() {
         });
       });
 
+      // V1.1.2 screenshot-qa：首轮 OCR 段独立累积；extracted_text 事件到达后视为权威值，后续 ocr delta 丢弃
+      let ocrAuthoritative = false;
+      const ocrCommitter = createTextDeltaCommitter((appended) => {
+        if (ocrAuthoritative) return;
+        setAiResults((prev) => {
+          const idx = prev.findIndex((r) => r.id === cardId);
+          if (idx === -1) return prev;
+          const updated = [...prev];
+          updated[idx] = {
+            ...updated[idx],
+            messages: updated[idx].messages.map((m) =>
+              m.id === loadingId ? { ...m, ocrText: (m.ocrText || '') + appended } : m,
+            ),
+          };
+          return updated;
+        });
+      });
+
       const finalize = () => {
         committer.reset();
+        ocrCommitter.reset();
         cardStreamsRef.current.delete(cardId);
         setIsAIWorking(false);
       };
@@ -577,6 +604,8 @@ export default function ReaderPage() {
             updated[idx] = {
               ...updated[idx],
               sessionId: meta.session_id,
+              // V1.1.2：后端按 image 自动激活 screenshot-qa；前端按 meta.task_type 落库 type
+              type: meta.task_type ?? updated[idx].type,
               messages: updated[idx].messages.map((m) =>
                 m.id === loadingId
                   ? { ...m, isLoading: false, isStreaming: true }
@@ -586,10 +615,30 @@ export default function ReaderPage() {
             return updated;
           });
         },
-        onTextDelta: (delta) => committer.push(delta),
+        onTextDelta: (delta, section) => {
+          if (section === 'ocr') ocrCommitter.push(delta);
+          else committer.push(delta);
+        },
+        onExtractedText: (text) => {
+          ocrAuthoritative = true;
+          ocrCommitter.reset();
+          setAiResults((prev) => {
+            const idx = prev.findIndex((r) => r.id === cardId);
+            if (idx === -1) return prev;
+            const updated = [...prev];
+            updated[idx] = {
+              ...updated[idx],
+              messages: updated[idx].messages.map((m) =>
+                m.id === loadingId ? { ...m, ocrText: text, ocrAuthoritative: true } : m,
+              ),
+            };
+            return updated;
+          });
+        },
         onUsage: () => { /* 本任务不在 UI 持久化 usage；后端落 DB 即可 */ },
         onDone: () => {
           committer.flushNow();
+          ocrCommitter.flushNow();
           setAiResults((prev) => {
             const idx = prev.findIndex((r) => r.id === cardId);
             if (idx === -1) return prev;
@@ -1096,8 +1145,27 @@ export default function ReaderPage() {
           });
         });
 
+        // V1.1.2 screenshot-qa：重试首轮也需要 OCR 通道
+        let ocrAuthoritative = false;
+        const ocrCommitter = createTextDeltaCommitter((appended) => {
+          if (ocrAuthoritative) return;
+          setAiResults((prev) => {
+            const idx = prev.findIndex((c) => c.id === r.cardId);
+            if (idx === -1) return prev;
+            const updated = [...prev];
+            updated[idx] = {
+              ...updated[idx],
+              messages: updated[idx].messages.map((m) =>
+                m.id === loadingId ? { ...m, ocrText: (m.ocrText || '') + appended } : m,
+              ),
+            };
+            return updated;
+          });
+        });
+
         const finalize = () => {
           committer.reset();
+          ocrCommitter.reset();
           cardStreamsRef.current.delete(r.cardId);
           setIsAIWorking(false);
           retryInFlightRef.current = false;
@@ -1112,6 +1180,7 @@ export default function ReaderPage() {
               updated[idx] = {
                 ...updated[idx],
                 sessionId: meta.session_id,
+                type: meta.task_type ?? updated[idx].type,
                 messages: updated[idx].messages.map((m) =>
                   m.id === loadingId ? { ...m, isLoading: false, isStreaming: true } : m,
                 ),
@@ -1119,10 +1188,30 @@ export default function ReaderPage() {
               return updated;
             });
           },
-          onTextDelta: (delta) => committer.push(delta),
+          onTextDelta: (delta, section) => {
+            if (section === 'ocr') ocrCommitter.push(delta);
+            else committer.push(delta);
+          },
+          onExtractedText: (text) => {
+            ocrAuthoritative = true;
+            ocrCommitter.reset();
+            setAiResults((prev) => {
+              const idx = prev.findIndex((c) => c.id === r.cardId);
+              if (idx === -1) return prev;
+              const updated = [...prev];
+              updated[idx] = {
+                ...updated[idx],
+                messages: updated[idx].messages.map((m) =>
+                  m.id === loadingId ? { ...m, ocrText: text, ocrAuthoritative: true } : m,
+                ),
+              };
+              return updated;
+            });
+          },
           onUsage: () => {},
           onDone: () => {
             committer.flushNow();
+            ocrCommitter.flushNow();
             setAiResults((prev) => {
               const idx = prev.findIndex((c) => c.id === r.cardId);
               if (idx === -1) return prev;
@@ -1434,6 +1523,16 @@ export default function ReaderPage() {
     setAiError(null);
   }, []);
 
+  // V1.1.2 screenshot-qa：识别文本折叠区切换。点击切换 ocrCollapsed；msg.id 是稳定标识。
+  const handleToggleOcr = useCallback((msg: Message) => {
+    const toggle = (m: Message): Message =>
+      m.id === msg.id ? { ...m, ocrCollapsed: !(m.ocrCollapsed === true) } : m;
+    setAiResults((prev) =>
+      prev.map((card) => ({ ...card, messages: card.messages.map(toggle) })),
+    );
+    setHistory((prev) => prev.map((h) => ({ ...h, messages: h.messages.map(toggle) })));
+  }, []);
+
   const displayName = fileName ? fileName.replace(/\.pdf$/i, '') : '';
 
   return (
@@ -1526,6 +1625,7 @@ export default function ReaderPage() {
           onPanelModeChange={setPanelMode}
           onRetry={handleRetry}
           onDismissError={handleDismissError}
+          onToggleOcr={handleToggleOcr}
         />
       </div>
     </div>

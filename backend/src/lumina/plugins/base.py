@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import re
 from abc import ABC, abstractmethod
+from collections.abc import AsyncIterator
 from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from lumina.providers.base import LLMMessage
+from lumina.providers.base import ImagePart, LLMMessage, LLMStreamEvent, LLMUsage
 
 
 class SelectionWordCountRule(BaseModel):
@@ -46,11 +47,45 @@ class PluginContext(BaseModel):
     user_input: str | None = None
     target_lang: str = "zh-CN"
     history: list[LLMMessage] = Field(default_factory=list)
+    image: ImagePart | None = None
 
 
 class PluginPromptSegments(BaseModel):
     system: str
     user: str
+
+
+class PluginParseResult(BaseModel):
+    answer: str
+    extracted_text: str | None = None
+
+
+class StructuredStreamEvent(BaseModel):
+    type: Literal["text_delta", "usage", "done", "error", "extracted_text"]
+    section: Literal["ocr", "answer"] | None = None
+    delta: str | None = None
+    usage: LLMUsage | None = None
+    model: str | None = None
+    thinking_enabled: bool | None = None
+    code: str | None = None
+    message: str | None = None
+    retriable: bool | None = None
+    text: str | None = None
+
+    @classmethod
+    def passthrough(cls, ev: LLMStreamEvent) -> StructuredStreamEvent:
+        return cls(
+            type=ev.type,
+            section=None,
+            delta=ev.delta,
+            usage=ev.usage,
+            model=ev.model,
+            thinking_enabled=ev.thinking_enabled,
+            code=ev.code,
+            message=ev.message,
+            retriable=ev.retriable,
+            text=None,
+        )
 
 
 def evaluate_applicable_when(
@@ -107,3 +142,13 @@ class Plugin(ABC):
     @abstractmethod
     def build_segments(self, ctx: PluginContext) -> PluginPromptSegments:
         """Select template segments and interpolate via string.Template."""
+
+    def parse_response(self, text: str) -> PluginParseResult:
+        return PluginParseResult(answer=text, extracted_text=None)
+
+    async def wrap_stream(
+        self,
+        events: AsyncIterator[LLMStreamEvent],
+    ) -> AsyncIterator[StructuredStreamEvent]:
+        async for ev in events:
+            yield StructuredStreamEvent.passthrough(ev)

@@ -91,16 +91,13 @@ def test_v0_no_sensitive_info_in_response(gone_client: TestClient) -> None:
     assert "Traceback" not in text
 
 
-def test_v0_translate_does_not_call_provider_or_extract(gone_client: TestClient) -> None:
+def test_v0_translate_does_not_call_provider(gone_client: TestClient) -> None:
     provider = AsyncMock()
     provider.invoke = AsyncMock()
-    extract_run = AsyncMock()
     gone_client.app.dependency_overrides[get_provider] = lambda: provider
-    with patch("lumina.tasks.extract.EXTRACT_TASK.run", extract_run):
-        response = gone_client.post("/api/v0/translate", json={"task_type": "translate"})
+    response = gone_client.post("/api/v0/translate", json={"task_type": "translate"})
     assert response.status_code == 410
     assert provider.invoke.await_count == 0
-    assert extract_run.await_count == 0
 
 
 def test_v0_translate_does_not_touch_session_store(gone_client: TestClient) -> None:

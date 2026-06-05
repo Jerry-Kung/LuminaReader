@@ -119,11 +119,12 @@ def _manual_prepared(
         conversation_id=conversation_id,
         turn_index=0,
         is_first_turn=True,
-        extract_latency_ms=1,
+        is_screenshot_qa=False,
         extracted_text_chars=1,
         plugin_ids=["translate"],
         plugin_ctx=PluginContext(selection_text="x", target_lang="zh-CN"),
         pipeline=pipeline,
+        registry=registry,
         follow_up_user_input=None,
         meta_payload=meta_payload,
     )
@@ -190,9 +191,8 @@ def test_stream_response_content_type(stream_client: TestClient) -> None:
 def test_stream_frame_sequence(stream_client: TestClient) -> None:
     provider = MockStreamRunProvider(
         [
-            LLMStreamEvent(type="text_delta", delta="a"),
-            LLMStreamEvent(type="text_delta", delta="b"),
-            LLMStreamEvent(type="text_delta", delta="c"),
+            LLMStreamEvent(type="text_delta", delta="<ocr>a</ocr><answer>b"),
+            LLMStreamEvent(type="text_delta", delta="c</answer>"),
             LLMStreamEvent(type="usage", usage=LLMUsage(prompt_tokens=1, completion_tokens=2, total_tokens=3)),
             LLMStreamEvent(type="done", model="gpt-4o"),
         ]
@@ -204,7 +204,8 @@ def test_stream_frame_sequence(stream_client: TestClient) -> None:
         body = "".join(response.iter_text())
     names = [name for name, _ in _parse_sse(body)]
     assert names[0] == "meta"
-    assert names.count("text_delta") == 3
+    assert names.count("text_delta") >= 2
+    assert "extracted_text" in names
     assert "usage" in names
     assert names[-1] == "done"
 
@@ -220,17 +221,64 @@ def test_stream_meta_fields_first_turn(stream_client: TestClient) -> None:
     assert meta["request_id"].startswith("req_")
     assert meta["session_id"].startswith("conv_")
     assert meta["conversation_id"] == meta["session_id"]
-    assert meta["task_type"] == "translate"
+    assert meta["task_type"] == "screenshot-qa"
     assert meta["turn_index"] == 0
     assert "model" in meta
     assert "thinking_enabled" in meta
-    assert "extract_latency_ms" in meta
+    assert set(meta.keys()) <= {
+        "request_id",
+        "session_id",
+        "conversation_id",
+        "task_type",
+        "turn_index",
+        "model",
+        "thinking_enabled",
+        "plugins",
+    }
 
 
-def test_stream_meta_follow_up_omits_extract_latency(stream_client: TestClient) -> None:
+def test_v112_first_turn_screenshot_qa_stream(stream_client: TestClient) -> None:
+    provider = MockStreamRunProvider(
+        [
+            LLMStreamEvent(type="text_delta", delta="<ocr>OCR</ocr><answer>Ans</answer>"),
+            LLMStreamEvent(type="done", model="gpt-4o"),
+        ]
+    )
+    stream_client.app.dependency_overrides[get_provider] = lambda: provider
+    with stream_client.stream(
+        "POST",
+        "/api/v1/run",
+        json=valid_run_payload(stream_client.stream_pdf_id),
+    ) as response:
+        body = "".join(response.iter_text())
+    events = _parse_sse(body)
+    assert events[0][0] == "meta"
+    assert events[0][1]["task_type"] == "screenshot-qa"
+    ocr_deltas = [
+        e for e in events
+        if e[0] == "text_delta" and e[1].get("section") == "ocr"
+    ]
+    answer_deltas = [
+        e for e in events
+        if e[0] == "text_delta" and e[1].get("section") == "answer"
+    ]
+    extracted_event = next((e for e in events if e[0] == "extracted_text"), None)
+    assert len(ocr_deltas) >= 1
+    assert len(answer_deltas) >= 1
+    assert extracted_event is not None
+    assert extracted_event[1]["text"] == "OCR"
+    for _, data in ocr_deltas + answer_deltas:
+        for tag in ("<ocr>", "</ocr>", "<answer>", "</answer>"):
+            assert tag not in data["delta"]
+
+
+def test_stream_meta_follow_up_omits_parse_failure(stream_client: TestClient) -> None:
     stream_client.app.dependency_overrides[get_provider] = lambda: MockStreamRunProvider(
         [
-            LLMStreamEvent(type="text_delta", delta="first"),
+            LLMStreamEvent(
+                type="text_delta",
+                delta="<ocr>first</ocr><answer>ans</answer>",
+            ),
             LLMStreamEvent(type="done", model="gpt-4o"),
         ]
     )
@@ -252,7 +300,7 @@ def test_stream_meta_follow_up_omits_extract_latency(stream_client: TestClient) 
         },
     ) as response:
         meta = _parse_sse("".join(response.iter_text()))[0][1]
-    assert "extract_latency_ms" not in meta
+    assert "plugins" in meta
 
 
 @pytest.mark.asyncio
@@ -300,7 +348,10 @@ async def test_sse_generator_emits_keep_alive(
 def test_stream_error_partial_text_kept(stream_client: TestClient) -> None:
     provider = MockStreamRunProvider(
         [
-            LLMStreamEvent(type="text_delta", delta="part"),
+            LLMStreamEvent(
+                type="text_delta",
+                delta="<ocr>part</ocr><answer>ans",
+            ),
             LLMStreamEvent(type="error", code="PROVIDER_ERROR", message="fail", retriable=True),
         ]
     )
@@ -354,7 +405,7 @@ def test_stream_meta_includes_plugins(stream_client: TestClient) -> None:
     ) as response:
         frames = _parse_sse("".join(response.iter_text()))
     meta = next(data for name, data in frames if name == "meta")
-    assert meta["plugins"] == ["translate"]
+    assert meta["plugins"] == ["screenshot-qa"]
 
 
 @pytest.mark.asyncio
