@@ -99,14 +99,16 @@ def test_startup_upgrades_v103_projects_to_v104(data_root):
     for project_id in ("proj_alpha", "proj_beta"):
         conn = sqlite3.connect(project_sqlite_path(project_id))
         try:
-            assert read_schema_version(conn) == SCHEMA_VERSION == 2
+            assert read_schema_version(conn) == SCHEMA_VERSION == 3
             cols = {row[1] for row in conn.execute("PRAGMA table_info(pdfs)").fetchall()}
             assert "last_read_page" in cols
+            assert "last_read_offset" in cols
             # Existing pdf row gets the default value, not NULL.
             row = conn.execute(
-                "SELECT last_read_page FROM pdfs LIMIT 1"
+                "SELECT last_read_page, last_read_offset FROM pdfs LIMIT 1"
             ).fetchone()
             assert row[0] == 1
+            assert row[1] == 0.0
         finally:
             conn.close()
 
@@ -118,9 +120,10 @@ def test_startup_is_idempotent(data_root):
     apply_pending_for_all_projects()
     conn = sqlite3.connect(project_sqlite_path("proj_idem"))
     try:
-        assert read_schema_version(conn) == 2
+        assert read_schema_version(conn) == SCHEMA_VERSION
         cols = [row[1] for row in conn.execute("PRAGMA table_info(pdfs)").fetchall()]
         assert cols.count("last_read_page") == 1
+        assert cols.count("last_read_offset") == 1
     finally:
         conn.close()
 

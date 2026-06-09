@@ -125,7 +125,9 @@ const MOCK_TEXTS: Record<TaskType, string> = {
   dictionary:
     '这是模拟的词典结果。\n\n选中 1–3 个词时，AI 会返回该词的发音、词性、释义、词源与例句。',
   chat:
-    '这是模拟的自由对话回答。\n\n不选任何能力 chip 直接输入问题时，AI 会作为你的阅读助手回答提问，并参考所框选的上下文。',
+    '这是模拟的自由对话回答。\n\n不选任何能力 chip 直接输入问题时,AI 会作为你的阅读助手回答提问,并参考所框选的上下文。',
+  'screenshot-qa':
+    '这是模拟的截图问答回答。\n\n当后端启用且选区含图像时,AI 会先 OCR 识别文本再据此回答你的提问。',
 };
 
 const mockTurnCounter: Record<string, number> = {};
@@ -556,6 +558,8 @@ export interface LibraryItem {
   created_at: number;
   last_opened_at: number;
   last_read_page: number;
+  // V1.1.3 F5：页内偏移（0 ~ 1 相对值，与 scale 解耦）。旧后端响应中缺该字段时回退 0。
+  last_read_offset: number;
   thumbnail_url: string | null;
 }
 
@@ -797,10 +801,12 @@ export function getPdfRawUrl(pdfId: string): string {
   return `${API_BASE}/api/v1/pdfs/${encodeURIComponent(pdfId)}/raw`;
 }
 
-// V1.0.4 F9: persist last_read_page. 204/404 both resolve; 400 throws.
+// V1.0.4 F9 / V1.1.3 F5: persist last_read_page + last_read_offset. 204/404 both resolve; 400 throws.
+// lastReadOffset：0 ~ 1 相对值，缺省 0；越界 / 类型错误 → 400 INVALID_REQUEST。
 export async function updateReadingPosition(
   pdfId: string,
   lastReadPage: number,
+  lastReadOffset: number = 0,
 ): Promise<void> {
   if (!API_BASE) return;
   if (!Number.isInteger(lastReadPage) || lastReadPage < 1) {
@@ -809,13 +815,26 @@ export async function updateReadingPosition(
       `last_read_page must be a positive integer (got ${lastReadPage}).`,
     );
   }
+  if (
+    !Number.isFinite(lastReadOffset) ||
+    lastReadOffset < 0 ||
+    lastReadOffset > 1
+  ) {
+    throw new TranslateApiError(
+      'INVALID_REQUEST',
+      `last_read_offset must be in [0, 1] (got ${lastReadOffset}).`,
+    );
+  }
   const url = `${API_BASE}/api/v1/pdfs/${encodeURIComponent(pdfId)}/reading-position`;
   let response: Response;
   try {
     response = await fetch(url, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ last_read_page: lastReadPage }),
+      body: JSON.stringify({
+        last_read_page: lastReadPage,
+        last_read_offset: lastReadOffset,
+      }),
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Failed to reach backend.';

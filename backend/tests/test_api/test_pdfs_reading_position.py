@@ -7,6 +7,7 @@
 - 后端不做上界校验（前端基于 PDF.js numPages 自行 clamp）
 """
 
+import pytest
 from fastapi.testclient import TestClient
 
 PDF_BYTES = b"%PDF-1.4 reading-position test"
@@ -132,3 +133,99 @@ def test_patch_reading_position_isolates_across_pdfs(client: TestClient) -> None
     items = {i["pdf_id"]: i for i in client.get("/api/v1/library").json()["data"]["items"]}
     assert items[a["pdf_id"]]["last_read_page"] == 11
     assert items[b["pdf_id"]]["last_read_page"] == 222
+
+
+# --- V1.1.3: last_read_offset ---
+
+
+def test_patch_reading_position_with_offset_returns_204(client: TestClient) -> None:
+    created = _upload(client)
+    response = client.patch(
+        f"/api/v1/pdfs/{created['pdf_id']}/reading-position",
+        json={"last_read_page": 42, "last_read_offset": 0.37},
+    )
+    assert response.status_code == 204
+
+
+def test_patch_reading_position_offset_reflected_in_library(client: TestClient) -> None:
+    created = _upload(client)
+    client.patch(
+        f"/api/v1/pdfs/{created['pdf_id']}/reading-position",
+        json={"last_read_page": 42, "last_read_offset": 0.37},
+    )
+    items = client.get("/api/v1/library").json()["data"]["items"]
+    target = next(i for i in items if i["pdf_id"] == created["pdf_id"])
+    assert target["last_read_page"] == 42
+    assert target["last_read_offset"] == pytest.approx(0.37, abs=1e-6)
+
+
+def test_patch_reading_position_missing_offset_defaults_zero(client: TestClient) -> None:
+    created = _upload(client)
+    response = client.patch(
+        f"/api/v1/pdfs/{created['pdf_id']}/reading-position",
+        json={"last_read_page": 42},
+    )
+    assert response.status_code == 204
+    items = client.get("/api/v1/library").json()["data"]["items"]
+    target = next(i for i in items if i["pdf_id"] == created["pdf_id"])
+    assert target["last_read_offset"] == 0.0
+
+
+def test_patch_reading_position_offset_boundary_zero(client: TestClient) -> None:
+    created = _upload(client)
+    response = client.patch(
+        f"/api/v1/pdfs/{created['pdf_id']}/reading-position",
+        json={"last_read_page": 42, "last_read_offset": 0.0},
+    )
+    assert response.status_code == 204
+
+
+def test_patch_reading_position_offset_boundary_one(client: TestClient) -> None:
+    created = _upload(client)
+    response = client.patch(
+        f"/api/v1/pdfs/{created['pdf_id']}/reading-position",
+        json={"last_read_page": 42, "last_read_offset": 1.0},
+    )
+    assert response.status_code == 204
+
+
+def test_patch_reading_position_offset_too_large_returns_400(client: TestClient) -> None:
+    created = _upload(client)
+    response = client.patch(
+        f"/api/v1/pdfs/{created['pdf_id']}/reading-position",
+        json={"last_read_page": 42, "last_read_offset": 1.5},
+    )
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "INVALID_REQUEST"
+
+
+def test_patch_reading_position_offset_negative_returns_400(client: TestClient) -> None:
+    created = _upload(client)
+    response = client.patch(
+        f"/api/v1/pdfs/{created['pdf_id']}/reading-position",
+        json={"last_read_page": 42, "last_read_offset": -0.1},
+    )
+    assert response.status_code == 400
+
+
+def test_patch_reading_position_offset_wrong_type_returns_400(client: TestClient) -> None:
+    created = _upload(client)
+    response = client.patch(
+        f"/api/v1/pdfs/{created['pdf_id']}/reading-position",
+        json={"last_read_page": 42, "last_read_offset": "abc"},
+    )
+    assert response.status_code == 400
+
+
+def test_patch_reading_position_offset_idempotent(client: TestClient) -> None:
+    created = _upload(client)
+    payload = {"last_read_page": 42, "last_read_offset": 0.37}
+    for _ in range(2):
+        response = client.patch(
+            f"/api/v1/pdfs/{created['pdf_id']}/reading-position",
+            json=payload,
+        )
+        assert response.status_code == 204
+    items = client.get("/api/v1/library").json()["data"]["items"]
+    target = next(i for i in items if i["pdf_id"] == created["pdf_id"])
+    assert target["last_read_offset"] == pytest.approx(0.37, abs=1e-6)

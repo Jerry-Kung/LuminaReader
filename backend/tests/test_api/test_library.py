@@ -27,3 +27,27 @@ def test_library_lists_uploaded_pdf(client: TestClient) -> None:
 def test_library_invalid_sort(client: TestClient) -> None:
     response = client.get("/api/v1/library?sort=invalid")
     assert response.status_code == 400
+
+
+def test_library_includes_last_read_offset_after_patch(client: TestClient) -> None:
+    created = client.post(
+        "/api/v1/pdfs",
+        files={"file": ("offset.pdf", PDF_BYTES, "application/pdf")},
+    ).json()["data"]
+    client.patch(
+        f"/api/v1/pdfs/{created['pdf_id']}/reading-position",
+        json={"last_read_page": 42, "last_read_offset": 0.37},
+    )
+    items = client.get("/api/v1/library").json()["data"]["items"]
+    target = next(i for i in items if i["pdf_id"] == created["pdf_id"])
+    assert target["last_read_page"] == 42
+    assert target["last_read_offset"] == pytest.approx(0.37, abs=1e-6)
+
+
+def test_library_default_last_read_offset_is_zero(client: TestClient) -> None:
+    client.post(
+        "/api/v1/pdfs",
+        files={"file": ("fresh-offset.pdf", PDF_BYTES, "application/pdf")},
+    )
+    items = client.get("/api/v1/library").json()["data"]["items"]
+    assert items[0]["last_read_offset"] == 0.0

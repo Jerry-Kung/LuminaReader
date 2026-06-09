@@ -4,7 +4,7 @@ from fastapi import APIRouter
 from fastapi.responses import JSONResponse
 
 from lumina.db.engine import get_connection
-from lumina.db.models import get_pdf_last_read_page
+from lumina.db.models import get_pdf_reading_position
 from lumina.logging import get_logger, log_with_fields
 from lumina.projects.catalog import list_entries
 from lumina.request_id import generate_request_id
@@ -43,10 +43,16 @@ async def get_library(sort: str = "last_opened_at_desc"):
     for e in entries:
         try:
             conn = get_connection(e.id)
-            stored = get_pdf_last_read_page(conn, e.primary_pdf_id)
+            stored = get_pdf_reading_position(conn, e.primary_pdf_id)
         except Exception:
             stored = None
-        last_read_page = stored if isinstance(stored, int) and stored >= 1 else 1
+        if stored is not None:
+            page, offset = stored
+            last_read_page = page if page >= 1 else 1
+            last_read_offset = offset
+        else:
+            last_read_page = 1
+            last_read_offset = 0.0
         items.append(
             LibraryItem(
                 pdf_id=e.primary_pdf_id,
@@ -56,6 +62,7 @@ async def get_library(sort: str = "last_opened_at_desc"):
                 created_at=e.created_at,
                 last_opened_at=e.last_opened_at,
                 last_read_page=last_read_page,
+                last_read_offset=last_read_offset,
                 thumbnail_url=None,
             )
         )

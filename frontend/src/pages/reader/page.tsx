@@ -21,7 +21,7 @@ import {
   type StreamMeta,
 } from '@/services/api';
 import Toolbar from './components/Toolbar';
-import PDFViewer from './components/PDFViewer';
+import PDFViewer, { type SelectedArea } from './components/PDFViewer';
 import AIAssistantPanel, { type ChipPluginType, type ChipsState } from './components/AIAssistantPanel';
 import ThumbnailPanel from './components/ThumbnailPanel';
 
@@ -90,12 +90,7 @@ export interface HistoryEntry {
   messages: Message[];
 }
 
-interface SelectedArea {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}
+// V1.1.3：SelectedArea 类型来自 PDFViewer，多页 canvas 模式下含 page 字段（起点页 clamp）
 
 interface CaptureResult {
   dataUrl: string;
@@ -104,6 +99,8 @@ interface CaptureResult {
   height: number;
   selection: { page: number; x: number; y: number; w: number; h: number; dpi: number };
 }
+
+const READING_OFFSET_NOTICE_KEY = 'lumina:v1.1.3_offset_notice_shown';
 
 function formatError(err: unknown): string {
   if (err instanceof TranslateApiError) return `[${err.code}] ${err.message}`;
@@ -223,14 +220,19 @@ export default function ReaderPage() {
     pdfDoc,
     numPages,
     currentPage,
+    currentOffset,
     scale,
     isLoading,
     error: pdfError,
     fileName,
+    pendingScrollTarget,
     loadPDF,
     loadPDFFromUrl,
     setFileName,
+    reportPosition,
+    consumeScrollTarget,
     goToPage,
+    goToPosition,
     nextPage,
     prevPage,
     zoomIn,
@@ -249,11 +251,16 @@ export default function ReaderPage() {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [expandedHistoryId, setExpandedHistoryId] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  // F9: 从 library 拿到的上次阅读位置 + 待跳标记。
+  // F9 / V1.1.3 F5: 从 library 拿到的上次阅读位置 + 待跳标记。
   // 用 state 而非 ref：library 是异步的，PDF raw 可能命中浏览器缓存先 ready，
   // 必须靠 state 的 re-render 让 restore effect 在 library 完成后再次跑一遍。
-  const [pendingRestorePage, setPendingRestorePage] = useState<number | null>(null);
+  const [pendingRestorePosition, setPendingRestorePosition] = useState<
+    { page: number; offset: number } | null
+  >(null);
   const [restoreAppliedForPdfId, setRestoreAppliedForPdfId] = useState<string | undefined>(undefined);
+  // V1.1.3 F8: 旧用户阅读位置升级一次性 Toast（与 onboarded 同套 localStorage 机制）
+  const [readerToast, setReaderToast] = useState<string | null>(null);
+  const readerToastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // F1: 缩略图栏折叠状态。D2 默认展开；R-V104-5 窄屏（< 1280px）首次进入自动折叠。
   // 用户手动操作后不再被窗口变化覆盖（userOverride）。
@@ -290,7 +297,7 @@ export default function ReaderPage() {
     setThumbnailCollapsed((c) => !c);
   }, []);
 
-  usePdfReadingPosition(pdfId, currentPage, restoreAppliedForPdfId === pdfId);
+  usePdfReadingPosition(pdfId, currentPage, currentOffset, restoreAppliedForPdfId === pdfId);
 
   // Load PDF bytes from backend when pdfId changes.
   useEffect(() => {
@@ -299,13 +306,13 @@ export default function ReaderPage() {
   }, [pdfId, loadPDFFromUrl]);
 
   // Resolve display name from library list (single-shot — the library endpoint is the source of truth for names).
-  // V1.0.4 F9: also cache last_read_page for restore-on-open.
-  // pendingRestorePage 语义：null = library 尚未返回；number（含 1）= 已返回，restore 可推进。
-  // 即便值为 1，也必须显式 setPendingRestorePage(1)，否则 restoreAppliedForPdfId 不会被设，
+  // V1.0.4 F9 / V1.1.3 F5: also cache (last_read_page, last_read_offset) for restore-on-open.
+  // pendingRestorePosition 语义：null = library 尚未返回；object = 已返回，restore 可推进。
+  // 即便位置为 (1, 0)，也必须显式 setPendingRestorePosition，否则 restoreAppliedForPdfId 不会被设，
   // 导致 hook 永久 disabled，用户翻页将无法写入 DB（新书首次阅读场景）。
   useEffect(() => {
     if (!pdfId) return;
-    setPendingRestorePage(null);
+    setPendingRestorePosition(null);
     setRestoreAppliedForPdfId(undefined);
     let cancelled = false;
     fetchLibrary().then((items) => {
@@ -313,32 +320,61 @@ export default function ReaderPage() {
       const match = items.find((item) => item.pdf_id === pdfId);
       if (match) {
         setFileName(match.primary_pdf_filename || match.name);
-        const stored = match.last_read_page;
-        setPendingRestorePage(
-          Number.isInteger(stored) && stored >= 1 ? stored : 1,
-        );
+        const storedPage = match.last_read_page;
+        const storedOffset = match.last_read_offset;
+        const page = Number.isInteger(storedPage) && storedPage >= 1 ? storedPage : 1;
+        const offset =
+          Number.isFinite(storedOffset) && storedOffset >= 0 && storedOffset <= 1
+            ? storedOffset
+            : 0;
+        setPendingRestorePosition({ page, offset });
       } else {
         // PDF 不在 library 中（可能是上传后未刷新等边缘场景）：放弃 restore，但仍开闸允许写
-        setPendingRestorePage(1);
+        setPendingRestorePosition({ page: 1, offset: 0 });
       }
     }).catch(() => {
-      if (!cancelled) setPendingRestorePage(1); // 网络失败也开闸，避免 hook 永久 disabled
+      if (!cancelled) setPendingRestorePosition({ page: 1, offset: 0 }); // 网络失败也开闸，避免 hook 永久 disabled
     });
     return () => { cancelled = true; };
   }, [pdfId, setFileName]);
 
-  // F9: restore last_read_page once BOTH numPages ready AND pendingRestorePage resolved from library.
-  // Clamp to [1, numPages]. Only run once per pdfId.
+  // F9 / V1.1.3 F5: restore (last_read_page, last_read_offset) once BOTH numPages ready AND pendingRestorePosition resolved.
+  // Page clamp 到 [1, numPages]；offset clamp 到 [0, 1]。仅每个 pdfId 触发一次。
   useEffect(() => {
     if (!pdfId || numPages <= 0) return;
     if (restoreAppliedForPdfId === pdfId) return;
-    if (pendingRestorePage === null) return; // library 尚未返回，等下一次 re-render
-    if (pendingRestorePage > 1) {
-      const clamped = Math.min(pendingRestorePage, numPages);
-      if (clamped > 1) goToPage(clamped);
+    if (pendingRestorePosition === null) return; // library 尚未返回，等下一次 re-render
+    const targetPage = Math.min(pendingRestorePosition.page, numPages);
+    const targetOffset = pendingRestorePosition.offset;
+    if (targetPage > 1 || targetOffset > 0) {
+      goToPosition(targetPage, targetOffset);
     }
     setRestoreAppliedForPdfId(pdfId);
-  }, [pdfId, numPages, pendingRestorePage, restoreAppliedForPdfId, goToPage]);
+
+    // V1.1.3 F8：旧书首次打开 → 一次性 Toast 提示。
+    // 仅当 last_read_offset === 0 时弹（"真正从旧版本升级而来 / 从未在 V1.1.3 写过偏移"）；
+    // 新书 / 已写过偏移的书不再弹。localStorage 标记后整个用户范围内只弹一次。
+    if (targetOffset === 0) {
+      try {
+        if (localStorage.getItem(READING_OFFSET_NOTICE_KEY) !== '1') {
+          setReaderToast(
+            '阅读位置已升级（新增页内偏移），旧书首次打开将从该页顶部恢复，可在阅读中手动定位一次',
+          );
+          if (readerToastTimerRef.current) clearTimeout(readerToastTimerRef.current);
+          readerToastTimerRef.current = setTimeout(() => setReaderToast(null), 5000);
+          localStorage.setItem(READING_OFFSET_NOTICE_KEY, '1');
+        }
+      } catch {
+        // localStorage 不可用（隐私模式 / 跨域）：静默跳过；不影响正常阅读
+      }
+    }
+  }, [pdfId, numPages, pendingRestorePosition, restoreAppliedForPdfId, goToPosition]);
+
+  useEffect(() => {
+    return () => {
+      if (readerToastTimerRef.current) clearTimeout(readerToastTimerRef.current);
+    };
+  }, []);
 
   // pdfId 切换：abort 所有 in-flight 流（避免回调对已重置的 aiResults/history 写入）。
   // 注意：保留 effect 顺序——必须在依赖 pdfId 的其他 setAiResults/setHistory effect 之前。
@@ -441,7 +477,9 @@ export default function ReaderPage() {
 
   const captureImage = useCallback(async (): Promise<CaptureResult | null> => {
     if (!selectedArea || !pdfDoc) return null;
-    const page = await pdfDoc.getPage(currentPage);
+    // V1.1.3 D-V113-6：以 selectedArea.page（起点页）为基准截图，与 currentPage 解耦
+    const targetPage = selectedArea.page;
+    const page = await pdfDoc.getPage(targetPage);
     const captureScale = 2.0;
     const captureViewport = page.getViewport({ scale: captureScale });
     const baseViewport = page.getViewport({ scale: 1 });
@@ -481,7 +519,7 @@ export default function ReaderPage() {
       width: offCanvas.width,
       height: offCanvas.height,
       selection: {
-        page: currentPage,
+        page: targetPage,
         x: selectedArea.x * baseViewport.width,
         y: selectedArea.y * baseViewport.height,
         w: selectedArea.width * baseViewport.width,
@@ -489,7 +527,7 @@ export default function ReaderPage() {
         dpi: 72 * captureScale,
       },
     };
-  }, [selectedArea, pdfDoc, currentPage]);
+  }, [selectedArea, pdfDoc]);
 
   const handleAIRequest = useCallback(
     async (taskTypes: ChipPluginType[], inputText?: string) => {
@@ -1588,18 +1626,19 @@ export default function ReaderPage() {
         />
         <PDFViewer
           pdfDoc={pdfDoc}
-          currentPage={currentPage}
+          numPages={numPages}
           scale={scale}
           isLoading={isLoading}
           error={pdfError}
           onSelectionChange={handleSelectionChange}
           selectedArea={selectedArea}
-          onNextPage={nextPage}
-          onPrevPage={prevPage}
           onZoomIn={zoomIn}
           onZoomOut={zoomOut}
           isSelecting={isSelecting}
           onSelectionModeExit={handleSelectionModeExit}
+          pendingScrollTarget={pendingScrollTarget}
+          onScrollTargetConsumed={consumeScrollTarget}
+          onPositionChange={reportPosition}
         />
         <AIAssistantPanel
           results={aiResults}
@@ -1628,6 +1667,15 @@ export default function ReaderPage() {
           onToggleOcr={handleToggleOcr}
         />
       </div>
+
+      {readerToast && (
+        <div className="fixed bottom-6 left-1/2 -translate-x-1/2 z-50 pointer-events-none">
+          <div className="bg-stone-800 text-white text-sm px-4 py-2.5 rounded-lg shadow-lg flex items-center gap-2 animate-[fadeInUp_0.2s_ease-out] max-w-[520px]">
+            <i className="ri-information-line text-amber-400 text-sm"></i>
+            <span className="leading-relaxed">{readerToast}</span>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

@@ -6,18 +6,31 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = new URL(
   import.meta.url,
 ).toString();
 
+export interface ScrollTarget {
+  page: number;
+  offset: number;
+}
+
 interface UsePDFReturn {
   pdfDoc: pdfjsLib.PDFDocumentProxy | null;
   numPages: number;
   currentPage: number;
+  currentOffset: number;
   scale: number;
   isLoading: boolean;
   error: string | null;
   fileName: string;
+  // V1.1.3 F5: 待消费的滚动目标（连续滚动模式下，外部 goToPage/goToPosition 通过此 state 通知 PDFViewer 滚动）
+  pendingScrollTarget: ScrollTarget | null;
   loadPDF: (file: File) => void;
   loadPDFFromUrl: (url: string, fileName?: string) => Promise<void>;
   setFileName: (name: string) => void;
+  // V1.1.3 F5: 来自 PDFViewer viewport 反推的当前位置上报
+  reportPosition: (page: number, offset: number) => void;
+  // V1.1.3 F5: PDFViewer 消费 pendingScrollTarget 后调用，清空标记
+  consumeScrollTarget: () => void;
   goToPage: (page: number) => void;
+  goToPosition: (page: number, offset: number) => void;
   nextPage: () => void;
   prevPage: () => void;
   zoomIn: () => void;
@@ -29,6 +42,8 @@ export function usePDF(): UsePDFReturn {
   const [pdfDoc, setPdfDoc] = useState<pdfjsLib.PDFDocumentProxy | null>(null);
   const [numPages, setNumPages] = useState(0);
   const [currentPage, setCurrentPage] = useState(1);
+  const [currentOffset, setCurrentOffset] = useState(0);
+  const [pendingScrollTarget, setPendingScrollTarget] = useState<ScrollTarget | null>(null);
   const [scale, setScale] = useState(1.0);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -45,6 +60,8 @@ export function usePDF(): UsePDFReturn {
     setPdfDoc(doc);
     setNumPages(doc.numPages);
     setCurrentPage(1);
+    setCurrentOffset(0);
+    setPendingScrollTarget(null);
     setScale(1.0);
   }, []);
 
@@ -91,21 +108,38 @@ export function usePDF(): UsePDFReturn {
     }
   }, [ingestPdfBytes]);
 
+  const reportPosition = useCallback((page: number, offset: number) => {
+    if (page < 1) return;
+    const clampedOffset = Math.max(0, Math.min(1, offset));
+    setCurrentPage((prev) => (prev === page ? prev : page));
+    setCurrentOffset((prev) => (Math.abs(prev - clampedOffset) < 1e-6 ? prev : clampedOffset));
+  }, []);
+
+  const consumeScrollTarget = useCallback(() => {
+    setPendingScrollTarget(null);
+  }, []);
+
+  const goToPosition = useCallback((page: number, offset: number) => {
+    if (page < 1 || page > numPages) return;
+    const clampedOffset = Math.max(0, Math.min(1, offset));
+    setPendingScrollTarget({ page, offset: clampedOffset });
+  }, [numPages]);
+
   const goToPage = useCallback((page: number) => {
     if (page >= 1 && page <= numPages) {
-      setCurrentPage(page);
+      setPendingScrollTarget({ page, offset: 0 });
     }
   }, [numPages]);
 
   const nextPage = useCallback(() => {
     if (currentPage < numPages) {
-      setCurrentPage((p) => p + 1);
+      setPendingScrollTarget({ page: currentPage + 1, offset: 0 });
     }
   }, [currentPage, numPages]);
 
   const prevPage = useCallback(() => {
     if (currentPage > 1) {
-      setCurrentPage((p) => p - 1);
+      setPendingScrollTarget({ page: currentPage - 1, offset: 0 });
     }
   }, [currentPage]);
 
@@ -130,14 +164,19 @@ export function usePDF(): UsePDFReturn {
     pdfDoc,
     numPages,
     currentPage,
+    currentOffset,
     scale,
     isLoading,
     error,
     fileName,
+    pendingScrollTarget,
     loadPDF,
     loadPDFFromUrl,
     setFileName,
+    reportPosition,
+    consumeScrollTarget,
     goToPage,
+    goToPosition,
     nextPage,
     prevPage,
     zoomIn,

@@ -107,11 +107,13 @@ class LibraryItem(BaseModel):
     created_at: int
     last_opened_at: int
     last_read_page: int = 1
+    last_read_offset: float = 0.0
     thumbnail_url: str | None = None
 
 
 class ReadingPositionUpdate(BaseModel):
-    last_read_page: int
+    last_read_page: int = Field(..., ge=1)
+    last_read_offset: float = Field(0.0, ge=0.0, le=1.0)
 
 
 class LibraryListData(BaseModel):

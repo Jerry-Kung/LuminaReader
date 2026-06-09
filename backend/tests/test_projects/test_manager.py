@@ -56,9 +56,12 @@ def test_auto_create_project_creates_dir_pdf_sqlite_manifest_catalog(data_root):
     pdf_count = conn.execute("SELECT COUNT(*) FROM pdfs").fetchone()[0]
     assert meta_count == 1
     assert pdf_count == 1
-    # V1.0.4: the new pdf row carries last_read_page = 1 (DEFAULT applied via 002).
-    row = conn.execute("SELECT last_read_page FROM pdfs").fetchone()
+    # V1.0.4+: new pdf row carries last_read_page=1 / last_read_offset=0 (migration DEFAULTs).
+    row = conn.execute(
+        "SELECT last_read_page, last_read_offset FROM pdfs"
+    ).fetchone()
     assert row[0] == 1
+    assert row[1] == 0.0
     manifest = json.loads(project_manifest_path(created.project_id).read_text())
     assert manifest["project"]["id"] == created.project_id
     entry = find_by_project_id(created.project_id)

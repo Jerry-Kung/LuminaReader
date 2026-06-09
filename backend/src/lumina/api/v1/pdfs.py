@@ -5,7 +5,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 
 from lumina.config import get_settings
 from lumina.db.engine import get_connection
-from lumina.db.models import update_pdf_last_read_page
+from lumina.db.models import update_pdf_reading_position
 from lumina.logging import get_logger, log_with_fields
 from lumina.projects.catalog import find_by_pdf_id
 from lumina.projects.manager import (
@@ -268,22 +268,6 @@ async def delete_pdf(pdf_id: str):
 @router.patch("/{pdf_id}/reading-position", status_code=204)
 async def patch_reading_position(pdf_id: str, payload: ReadingPositionUpdate):
     request_id = generate_request_id()
-    if payload.last_read_page < 1:
-        _log_pdf_call(
-            request_id=request_id,
-            http_status=400,
-            error_code="INVALID_REQUEST",
-            pdf_id=pdf_id,
-        )
-        return JSONResponse(
-            status_code=400,
-            content=error_response(
-                code="INVALID_REQUEST",
-                message="last_read_page must be >= 1",
-                request_id=request_id,
-            ),
-        )
-
     entry = find_by_pdf_id(pdf_id)
     if entry is None:
         _log_pdf_call(
@@ -302,7 +286,9 @@ async def patch_reading_position(pdf_id: str, payload: ReadingPositionUpdate):
         )
 
     conn = get_connection(entry.id)
-    updated = update_pdf_last_read_page(conn, pdf_id, payload.last_read_page)
+    updated = update_pdf_reading_position(
+        conn, pdf_id, payload.last_read_page, payload.last_read_offset
+    )
     if updated == 0:
         # catalog 与 sqlite 不一致（极端情况：手工破坏 sqlite 行），按 404 上报
         _log_pdf_call(

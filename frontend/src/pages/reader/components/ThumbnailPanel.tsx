@@ -122,17 +122,68 @@ export default function ThumbnailPanel({
   // 翻页 → 当前页滚到可见区
   // 首次（含重进书时已恢复到 last_read_page、或 pdfDoc/列表刚就绪）以 auto+center 瞬时居中，
   // 避免从第 1 页平滑滚到第 N 页的长动画；后续翻页用 smooth+nearest 做小幅调整。
+  // V1.1.3 F3：连续滚动模式下 currentPage 会随主视图滚动持续变化；scrollIntoView 加 200ms throttle
+  // 避免动画堆积。throttle 窗口内最后一次目标会在窗口结束时落地一次。
+  const lastScrollAtRef = useRef<number>(0);
+  const pendingPageRef = useRef<number | null>(null);
+  const trailingTimerRef = useRef<number | null>(null);
+  const THROTTLE_MS = 200;
+
+  const scrollToPage = useCallback((pageNum: number, initial: boolean) => {
+    const el = itemRefs.current.get(pageNum);
+    if (!el) return;
+    if (initial) {
+      el.scrollIntoView({ behavior: 'auto', block: 'center' });
+    } else {
+      // 节流窗口内的中间翻阅切到瞬时滚动，避免 smooth 动画堆积
+      el.scrollIntoView({ behavior: 'auto', block: 'nearest' });
+    }
+  }, []);
+
   useEffect(() => {
     if (collapsed || numPages === 0) return;
-    const el = itemRefs.current.get(currentPage);
-    if (!el) return;
     if (!didInitialScrollRef.current) {
-      el.scrollIntoView({ behavior: 'auto', block: 'center' });
+      const el = itemRefs.current.get(currentPage);
+      if (!el) return;
+      scrollToPage(currentPage, true);
       didInitialScrollRef.current = true;
-    } else {
-      el.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+      lastScrollAtRef.current = performance.now();
+      return;
     }
-  }, [currentPage, collapsed, numPages, pdfDoc, isLoading]);
+    const now = performance.now();
+    const elapsed = now - lastScrollAtRef.current;
+    if (elapsed >= THROTTLE_MS) {
+      scrollToPage(currentPage, false);
+      lastScrollAtRef.current = now;
+      pendingPageRef.current = null;
+      if (trailingTimerRef.current !== null) {
+        window.clearTimeout(trailingTimerRef.current);
+        trailingTimerRef.current = null;
+      }
+    } else {
+      pendingPageRef.current = currentPage;
+      if (trailingTimerRef.current === null) {
+        trailingTimerRef.current = window.setTimeout(() => {
+          trailingTimerRef.current = null;
+          const target = pendingPageRef.current;
+          pendingPageRef.current = null;
+          if (target !== null) {
+            scrollToPage(target, false);
+            lastScrollAtRef.current = performance.now();
+          }
+        }, THROTTLE_MS - elapsed);
+      }
+    }
+  }, [currentPage, collapsed, numPages, pdfDoc, isLoading, scrollToPage]);
+
+  useEffect(() => {
+    return () => {
+      if (trailingTimerRef.current !== null) {
+        window.clearTimeout(trailingTimerRef.current);
+        trailingTimerRef.current = null;
+      }
+    };
+  }, []);
 
   const aspectRatioFor = useCallback(
     (pageNum: number) => {

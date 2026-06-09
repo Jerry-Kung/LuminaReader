@@ -338,17 +338,33 @@ def list_conversations_brief(conn) -> list[ConversationRow]:
     return [ConversationRow(*row) for row in rows]
 
 
-def get_pdf_last_read_page(conn, pdf_id: str) -> int | None:
+def get_pdf_reading_position(conn, pdf_id: str) -> tuple[int, float] | None:
     row = conn.execute(
-        "SELECT last_read_page FROM pdfs WHERE id = ?",
+        "SELECT last_read_page, last_read_offset FROM pdfs WHERE id = ?",
         (pdf_id,),
     ).fetchone()
-    return row[0] if row else None
+    if row is None:
+        return None
+    return int(row[0]), float(row[1])
+
+
+def update_pdf_reading_position(
+    conn,
+    pdf_id: str,
+    last_read_page: int,
+    last_read_offset: float,
+) -> int:
+    cursor = conn.execute(
+        "UPDATE pdfs SET last_read_page = ?, last_read_offset = ? WHERE id = ?",
+        (last_read_page, last_read_offset, pdf_id),
+    )
+    return cursor.rowcount
+
+
+def get_pdf_last_read_page(conn, pdf_id: str) -> int | None:
+    position = get_pdf_reading_position(conn, pdf_id)
+    return position[0] if position is not None else None
 
 
 def update_pdf_last_read_page(conn, pdf_id: str, last_read_page: int) -> int:
-    cursor = conn.execute(
-        "UPDATE pdfs SET last_read_page = ? WHERE id = ?",
-        (last_read_page, pdf_id),
-    )
-    return cursor.rowcount
+    return update_pdf_reading_position(conn, pdf_id, last_read_page, 0.0)
