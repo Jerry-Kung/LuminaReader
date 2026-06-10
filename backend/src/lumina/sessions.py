@@ -3,7 +3,7 @@ import logging
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
 
 from ulid import ULID
 
@@ -14,6 +14,7 @@ from lumina.db.models import (
     SelectionRow,
     delete_messages_of_conversation,
     get_conversation,
+    get_selection_type,
     insert_conversation,
     insert_message,
     insert_selection,
@@ -55,6 +56,7 @@ class Session:
     meta: dict[str, Any] = field(default_factory=dict)
     project_id: str = ""
     pdf_id: str = ""
+    selection_type: Literal["text", "image"] = "image"
     dirty: bool = False
     dirty_attempts: int = 0
 
@@ -92,6 +94,7 @@ class SessionStore:
         first_assistant_text: str,
         first_assistant_meta: dict,
         meta: dict | None = None,
+        selection_type: Literal["text", "image"] = "image",
     ) -> Session:
         now = time.time()
         ts = int(now)
@@ -166,6 +169,7 @@ class SessionStore:
             meta=meta or {},
             project_id=project_id,
             pdf_id=pdf_id,
+            selection_type=selection_type,
             dirty=False,
         )
         async with self._lock:
@@ -187,6 +191,9 @@ class SessionStore:
 
         message_rows = list_messages(conn, session_id)
         messages = [_message_row_to_llm(row) for row in message_rows]
+        selection_type: Literal["text", "image"] = (
+            get_selection_type(conn, conv.selection_id) or "image"
+        )
         now = time.time()
         session = Session(
             session_id=conv.id,
@@ -198,6 +205,7 @@ class SessionStore:
             meta={},
             project_id=entry.id,
             pdf_id=conv.pdf_id,
+            selection_type=selection_type,
             dirty=False,
         )
         async with self._lock:

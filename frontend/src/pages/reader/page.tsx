@@ -19,11 +19,13 @@ import {
   type RunStreamHandle,
   type RunStreamCallbacks,
   type StreamMeta,
+  type FirstTurnSelection,
 } from '@/services/api';
-import Toolbar from './components/Toolbar';
+import Toolbar, { type CursorMode } from './components/Toolbar';
 import PDFViewer, { type SelectedArea } from './components/PDFViewer';
 import AIAssistantPanel, { type ChipPluginType, type ChipsState } from './components/AIAssistantPanel';
 import ThumbnailPanel from './components/ThumbnailPanel';
+import { useTextSelection } from './hooks/useTextSelection';
 
 type RetryPayload =
   | {
@@ -92,13 +94,28 @@ export interface HistoryEntry {
 
 // V1.1.3：SelectedArea 类型来自 PDFViewer，多页 canvas 模式下含 page 字段（起点页 clamp）
 
-interface CaptureResult {
+// V1.1.4：首轮捕获结果 = 截图捕获 or 文字捕获
+interface ImageCaptureResult {
+  kind: 'image';
   dataUrl: string;
   base64: string;
   width: number;
   height: number;
   selection: { page: number; x: number; y: number; w: number; h: number; dpi: number };
 }
+
+interface TextCaptureResult {
+  kind: 'text';
+  // 用于卡片头部预览（没有截图所以传空 dataUrl，AIAssistantPanel 端按 kind 决定如何显示）
+  dataUrl: '';
+  text: string;
+  pageStart: number;
+  pageEnd: number;
+  segments: Array<{ page: number; text: string; offset_start: number; offset_end: number }>;
+  wordCount: number;
+}
+
+type CaptureResult = ImageCaptureResult | TextCaptureResult;
 
 const READING_OFFSET_NOTICE_KEY = 'lumina:v1.1.3_offset_notice_shown';
 
@@ -239,8 +256,21 @@ export default function ReaderPage() {
     zoomOut,
   } = usePDF();
 
-  const [isSelecting, setIsSelecting] = useState(false);
+  // V1.1.4：三态光标 + 截图选区 + 文本选区共存
+  //  - cursorMode='off'        → 默认手型；既无文字选择也无截图
+  //  - cursorMode='text'       → I-beam；textLayer pointer-events:auto，浏览器原生 Selection 工作
+  //  - cursorMode='screenshot' → crosshair；走 V1.1.3 框选拖拽路径
+  // isSelecting 保留为 cursorMode==='screenshot' 的派生量，不再独立 setState（避免双源同步）。
+  const [cursorMode, setCursorMode] = useState<CursorMode>('off');
+  const isSelecting = cursorMode === 'screenshot';
   const [selectedArea, setSelectedArea] = useState<SelectedArea | null>(null);
+  // 扫描版（textLayer 全空）页号集合：用 ref 累积避免 setState 风暴；count 用 state 触发 Toolbar disable。
+  const scanPagesRef = useRef<Set<number>>(new Set());
+  const [scanPageCount, setScanPageCount] = useState(0);
+  // PDFViewer 滚动容器引用，给 useTextSelection 挂 mouseup
+  const [pdfContainerEl, setPdfContainerEl] = useState<HTMLDivElement | null>(null);
+  const pdfContainerRef = useRef<HTMLDivElement | null>(null);
+  pdfContainerRef.current = pdfContainerEl;
   const [aiResults, setAiResults] = useState<AIResult[]>([]);
   const [isAIWorking, setIsAIWorking] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
@@ -274,12 +304,15 @@ export default function ReaderPage() {
   const historyStreamsRef = useRef<Map<string, RunStreamHandle>>(new Map());
 
   // Unmount cleanup: abort 所有 in-flight 流，避免回调对已卸载组件 setState。
+  // effect 内先把 ref.current 捕获成局部变量，cleanup 中使用局部变量（react-hooks/exhaustive-deps）。
   useEffect(() => {
+    const cards = cardStreamsRef.current;
+    const histories = historyStreamsRef.current;
     return () => {
-      cardStreamsRef.current.forEach((h) => h.abort());
-      cardStreamsRef.current.clear();
-      historyStreamsRef.current.forEach((h) => h.abort());
-      historyStreamsRef.current.clear();
+      cards.forEach((h) => h.abort());
+      cards.clear();
+      histories.forEach((h) => h.abort());
+      histories.clear();
     };
   }, []);
 
@@ -435,7 +468,9 @@ export default function ReaderPage() {
         setSelectedArea(null);
         setAiResults([]);
         setAiError(null);
-        setIsSelecting(false);
+        setCursorMode('off');
+        scanPagesRef.current = new Set();
+        setScanPageCount(0);
         setUserInput('');
       } else if (file) {
         loadPDF(file);
@@ -447,16 +482,68 @@ export default function ReaderPage() {
     [loadPDF],
   );
 
-  const handleToggleSelectionMode = useCallback(() => {
-    setIsSelecting((prev) => !prev);
+  const handleSelectCursorMode = useCallback((mode: CursorMode) => {
+    setCursorMode((prev) => {
+      if (prev === mode) return prev;
+      // 切到 screenshot → 清残留文本选区由 hook enabled=false 自动完成
+      // 切到 text / off → 清掉残留截图选区（避免两种 selection 同时存在导致 chips 状态歧义）
+      if (mode === 'text' || mode === 'off') {
+        setSelectedArea(null);
+      }
+      return mode;
+    });
   }, []);
 
   const handleSelectionModeExit = useCallback(() => {
-    setIsSelecting(false);
+    // PDFViewer 内部框选完成 / Esc 退出 → 把 cursorMode 拨回 'off'
+    setCursorMode('off');
   }, []);
 
   const handleSelectionChange = useCallback((area: SelectedArea | null) => {
     setSelectedArea(area);
+  }, []);
+
+  // V1.1.4：跨页文本选区 hook（仅在 cursorMode='text' 时挂 mouseup）
+  const { selection: textSelection, clear: clearTextSelection } = useTextSelection({
+    containerRef: pdfContainerRef,
+    enabled: cursorMode === 'text',
+  });
+
+  // 扫描版上报：PDFPage textLayer 渲染完毕若 textContent 为空 → 上报 pageNum
+  // 用 ref 累积（避免每页一次 setState），同时通过 setScanPageCount 触发 Toolbar 重渲染
+  const handleScanPageDetected = useCallback((pageNum: number) => {
+    const set = scanPagesRef.current;
+    if (set.has(pageNum)) return;
+    set.add(pageNum);
+    setScanPageCount(set.size);
+  }, []);
+
+  // 当扫描版被检测到时，若用户当前正处于 cursorMode='text'，回弹到 'off' 并弹 Toast
+  useEffect(() => {
+    if (scanPageCount > 0 && cursorMode === 'text') {
+      setCursorMode('off');
+      setReaderToast('本书为扫描版 PDF，无文本层，已退出文字选择模式。如需 AI 处理请使用「截图」。');
+      if (readerToastTimerRef.current) clearTimeout(readerToastTimerRef.current);
+      readerToastTimerRef.current = setTimeout(() => setReaderToast(null), 5000);
+    }
+  }, [scanPageCount, cursorMode]);
+
+  // PDF 切换时重置扫描页集合
+  useEffect(() => {
+    scanPagesRef.current = new Set();
+    setScanPageCount(0);
+  }, [pdfId]);
+
+  // Toolbar 点击文字按钮但本书为扫描版时弹一次 Toast（不切 cursorMode）
+  const handleTextModeBlockedByScan = useCallback(() => {
+    setReaderToast('本书为扫描版 PDF，无文本层，无法选择文字。如需 AI 处理请使用「截图」。');
+    if (readerToastTimerRef.current) clearTimeout(readerToastTimerRef.current);
+    readerToastTimerRef.current = setTimeout(() => setReaderToast(null), 5000);
+  }, []);
+
+  // PDFViewer 容器 ref 暴露
+  const handleContainerRefReady = useCallback((el: HTMLDivElement | null) => {
+    setPdfContainerEl(el);
   }, []);
 
   const handleTaskTypeToggle = useCallback((type: ChipPluginType) => {
@@ -465,17 +552,22 @@ export default function ReaderPage() {
     );
   }, []);
 
-  // chipsState：首轮发起前，前端无法本地求字数（OCR 文本由首轮 extract 任务产出），
-  // 因此 dictionary 在 UI 上默认 disabled + tooltip，仅作引导；用户即便绕过前端发请求，
-  // 后端 applicable_when（max=3）会兜底返回 400 INVALID_REQUEST。
-  const hasSelection = !!selectedArea;
+  // chipsState：image 路径下 dictionary 默认 disabled（前端无法本地求字数，OCR 文本由首轮 extract 产出）；
+  // text 路径下若 wordCount<=3 才启用 dictionary（前端可本地统计）。
+  // 任一选区（image 或 text）就绪 → translate/explain 可用。
+  const hasSelection = !!selectedArea || !!textSelection;
+  const dictionaryChip: ChipsState['dictionary'] = textSelection
+    ? textSelection.wordCount <= 3
+      ? { state: 'available' }
+      : { state: 'disabled', reason: '仅支持 3 个词以内的文字选区' }
+    : { state: 'disabled', reason: '仅支持 3 个词以内的文字选区' };
   const chipsState: ChipsState = {
     translate: { state: hasSelection ? 'available' : 'disabled' },
     explain: { state: hasSelection ? 'available' : 'disabled' },
-    dictionary: { state: 'disabled', reason: '仅支持 3 个词以内的文字选区' },
+    dictionary: dictionaryChip,
   };
 
-  const captureImage = useCallback(async (): Promise<CaptureResult | null> => {
+  const captureImage = useCallback(async (): Promise<ImageCaptureResult | null> => {
     if (!selectedArea || !pdfDoc) return null;
     // V1.1.3 D-V113-6：以 selectedArea.page（起点页）为基准截图，与 currentPage 解耦
     const targetPage = selectedArea.page;
@@ -514,6 +606,7 @@ export default function ReaderPage() {
 
     const dataUrl = offCanvas.toDataURL('image/png');
     return {
+      kind: 'image',
       dataUrl,
       base64: dataUrl.replace(/^data:image\/png;base64,/, ''),
       width: offCanvas.width,
@@ -529,9 +622,39 @@ export default function ReaderPage() {
     };
   }, [selectedArea, pdfDoc]);
 
+  // V1.1.4：把 useTextSelection 当前快照转成 TextCaptureResult，便于 handleAIRequest 统一处理
+  const captureText = useCallback((): TextCaptureResult | null => {
+    if (!textSelection) return null;
+    let offset = 0;
+    const segments = textSelection.segments.map((seg) => {
+      const offset_start = offset;
+      const offset_end = offset + seg.text.length;
+      offset = offset_end;
+      return {
+        page: seg.page,
+        text: seg.text,
+        offset_start,
+        offset_end,
+      };
+    });
+    return {
+      kind: 'text',
+      dataUrl: '',
+      text: textSelection.normalizedText,
+      pageStart: textSelection.pageStart,
+      pageEnd: textSelection.pageEnd,
+      segments,
+      wordCount: textSelection.wordCount,
+    };
+  }, [textSelection]);
+
   const handleAIRequest = useCallback(
     async (taskTypes: ChipPluginType[], inputText?: string) => {
-      if (!selectedArea || !pdfDoc) return;
+      // V1.1.4：text 选区优先；否则回退 image 选区
+      if (!pdfDoc) return;
+      const hasText = !!textSelection;
+      const hasImage = !!selectedArea;
+      if (!hasText && !hasImage) return;
       const trimmedInput = inputText?.trim();
       // V1.1.1：空 chip 列表时需有用户输入才能成立（自由 Chat 模式）
       if (taskTypes.length === 0 && !trimmedInput) return;
@@ -544,9 +667,15 @@ export default function ReaderPage() {
 
       let capture: CaptureResult;
       try {
-        const captured = await captureImage();
-        if (!captured) throw new Error('Failed to capture image');
-        capture = captured;
+        if (hasText) {
+          const captured = captureText();
+          if (!captured) throw new Error('Failed to capture text selection');
+          capture = captured;
+        } else {
+          const captured = await captureImage();
+          if (!captured) throw new Error('Failed to capture image');
+          capture = captured;
+        }
       } catch (err) {
         const { display } = errorMessageFrom(err);
         setAiError(display);
@@ -738,14 +867,27 @@ export default function ReaderPage() {
 
       const handle = runTaskStream(
         taskTypes,
-        capture.selection,
-        { data: capture.base64, width: capture.width, height: capture.height },
+        capture.kind === 'image'
+          ? ({
+              kind: 'image',
+              selection: capture.selection,
+              image: { data: capture.base64, width: capture.width, height: capture.height },
+            } as FirstTurnSelection)
+          : ({
+              kind: 'text',
+              selection: {
+                page: capture.pageStart,
+                page_end: capture.pageEnd,
+                text: capture.text,
+                segments: capture.segments,
+              },
+            } as FirstTurnSelection),
         { targetLang: 'zh-CN', userInput: trimmedInput, pdfId },
         callbacks,
       );
       cardStreamsRef.current.set(cardId, handle);
     },
-    [selectedArea, pdfDoc, captureImage, pdfId],
+    [selectedArea, textSelection, pdfDoc, captureImage, captureText, pdfId],
   );
 
   const handleFollowUp = useCallback(
@@ -1305,8 +1447,21 @@ export default function ReaderPage() {
 
         const handle = runTaskStream(
           r.plugins,
-          r.capture.selection,
-          { data: r.capture.base64, width: r.capture.width, height: r.capture.height },
+          r.capture.kind === 'image'
+            ? ({
+                kind: 'image',
+                selection: r.capture.selection,
+                image: { data: r.capture.base64, width: r.capture.width, height: r.capture.height },
+              } as FirstTurnSelection)
+            : ({
+                kind: 'text',
+                selection: {
+                  page: r.capture.pageStart,
+                  page_end: r.capture.pageEnd,
+                  text: r.capture.text,
+                  segments: r.capture.segments,
+                },
+              } as FirstTurnSelection),
           { targetLang: 'zh-CN', userInput: r.userInput, pdfId: r.pdfId },
           callbacks,
         );
@@ -1603,14 +1758,16 @@ export default function ReaderPage() {
         numPages={numPages}
         currentPage={currentPage}
         scale={scale}
-        isSelecting={isSelecting}
+        cursorMode={cursorMode}
+        scanPageCount={scanPageCount}
         onOpenFile={handleOpenFile}
         onPrevPage={prevPage}
         onNextPage={nextPage}
         onGoToPage={goToPage}
         onZoomIn={zoomIn}
         onZoomOut={zoomOut}
-        onToggleSelectionMode={handleToggleSelectionMode}
+        onSelectCursorMode={handleSelectCursorMode}
+        onTextModeBlockedByScan={handleTextModeBlockedByScan}
         onOpenSettings={() => navigate('/settings', { state: { from: `/reader/${pdfId}` } })}
       />
 
@@ -1639,6 +1796,9 @@ export default function ReaderPage() {
           pendingScrollTarget={pendingScrollTarget}
           onScrollTargetConsumed={consumeScrollTarget}
           onPositionChange={reportPosition}
+          cursorMode={cursorMode}
+          onScanPageDetected={handleScanPageDetected}
+          onContainerRefReady={handleContainerRefReady}
         />
         <AIAssistantPanel
           results={aiResults}
@@ -1650,7 +1810,7 @@ export default function ReaderPage() {
           onDeleteHistory={handleDeleteHistory}
           isAIWorking={isAIWorking}
           error={aiError}
-          hasSelection={!!selectedArea}
+          hasSelection={hasSelection}
           activeTaskTypes={activeTaskTypes}
           userInput={userInput}
           panelMode={panelMode}

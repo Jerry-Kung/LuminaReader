@@ -123,6 +123,74 @@ body {
   );
 }
 
+/* PDF.js TextLayer 基础样式（V1.1.4）
+   注意：未引用 pdfjs-dist/web/pdf_viewer.css 全套（其中包含编辑器/批注层等大量
+   我们用不到的规则）。仅保留文本选择所必需的最小子集，并改写 .textLayer 的
+   .overflow / .opacity 让我们的"隐形文本层 + 浏览器原生 Selection 高亮"工作。
+   - span 必须 position:absolute / white-space:pre / color:transparent
+   - left / top / fontSize 由 pdfjs 写为 calc(var(--scale-factor) * Xpx)，
+     容器需注入 --scale-factor（在 PDFPage 渲染逻辑里设置）
+*/
+.textLayer {
+  position: absolute;
+  text-align: initial;
+  inset: 0;
+  overflow: clip;
+  opacity: 1;
+  line-height: 1;
+  -webkit-text-size-adjust: none;
+  -moz-text-size-adjust: none;
+  text-size-adjust: none;
+  forced-color-adjust: none;
+  transform-origin: 0 0;
+  caret-color: CanvasText;
+  z-index: 0;
+}
+.textLayer :is(span, br) {
+  color: transparent;
+  position: absolute;
+  white-space: pre;
+  cursor: text;
+  transform-origin: 0% 0%;
+}
+.textLayer > :not(.markedContent),
+.textLayer .markedContent span:not(.markedContent) {
+  z-index: 1;
+}
+.textLayer span.markedContent {
+  top: 0;
+  height: 0;
+}
+.textLayer span[role="img"] {
+  -webkit-user-select: none;
+  -moz-user-select: none;
+  user-select: none;
+  cursor: default;
+}
+/* 选区高亮：textLayer 内必须显式把 color 压回 transparent，
+   否则全局 ::selection 的 color: #292524 会让本来隐形的 span 文字
+   在选中瞬间变成可见黑字，叠在 canvas 渲染的 PDF 文字之上造成重影。 */
+.textLayer ::-moz-selection {
+  background: rgba(251, 191, 36, 0.35);
+  color: transparent;
+}
+.textLayer ::selection {
+  background: rgba(251, 191, 36, 0.35);
+  color: transparent;
+}
+/* 防止 end-of-content guard 元素抢事件 */
+.textLayer .endOfContent {
+  display: block;
+  position: absolute;
+  inset: 100% 0 0;
+  z-index: 0;
+  cursor: default;
+  user-select: none;
+}
+.textLayer.selecting .endOfContent {
+  top: 0;
+}
+
 /* Thin scrollbar for thumbnail panel */
 .scrollbar-thin::-webkit-scrollbar {
   width: 3px;

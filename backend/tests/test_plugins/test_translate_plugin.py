@@ -80,3 +80,12 @@ def test_t08_image_field_ignored_by_build_segments() -> None:
         )
     )
     assert with_image == baseline
+
+
+def test_translate_text_path_build_segments() -> None:
+    plugin = _translate_plugin()
+    segments = plugin.build_segments(
+        PluginContext(selection_type="text", selection_text="Hello text path")
+    )
+    assert "Hello text path" in segments.user
+    assert "${selection_text}" not in segments.user

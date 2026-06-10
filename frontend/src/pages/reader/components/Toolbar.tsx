@@ -1,16 +1,21 @@
+export type CursorMode = 'off' | 'text' | 'screenshot';
+
 interface ToolbarProps {
   fileName: string;
   numPages: number;
   currentPage: number;
   scale: number;
-  isSelecting: boolean;
+  cursorMode: CursorMode;
+  /** 扫描版 PDF 检测到的页集合 size。>0 时 text 模式按钮 disabled 并提示 Toast。 */
+  scanPageCount: number;
   onOpenFile: () => void;
   onPrevPage: () => void;
   onNextPage: () => void;
   onGoToPage: (page: number) => void;
   onZoomIn: () => void;
   onZoomOut: () => void;
-  onToggleSelectionMode: () => void;
+  onSelectCursorMode: (mode: CursorMode) => void;
+  onTextModeBlockedByScan?: () => void;
   onOpenSettings: () => void;
 }
 
@@ -19,14 +24,16 @@ export default function Toolbar({
   numPages,
   currentPage,
   scale,
-  isSelecting,
+  cursorMode,
+  scanPageCount,
   onOpenFile,
   onPrevPage,
   onNextPage,
   onGoToPage,
   onZoomIn,
   onZoomOut,
-  onToggleSelectionMode,
+  onSelectCursorMode,
+  onTextModeBlockedByScan,
   onOpenSettings,
 }: ToolbarProps) {
   const handlePageInput = (e: React.KeyboardEvent<HTMLInputElement>) => {
@@ -36,6 +43,22 @@ export default function Toolbar({
         onGoToPage(val);
       }
     }
+  };
+
+  const isScanBook = scanPageCount > 0;
+  const isText = cursorMode === 'text';
+  const isShot = cursorMode === 'screenshot';
+
+  const handleTextClick = () => {
+    if (isScanBook) {
+      onTextModeBlockedByScan?.();
+      return;
+    }
+    onSelectCursorMode(isText ? 'off' : 'text');
+  };
+
+  const handleShotClick = () => {
+    onSelectCursorMode(isShot ? 'off' : 'screenshot');
   };
 
   return (
@@ -56,18 +79,41 @@ export default function Toolbar({
           Open PDF
         </button>
         {numPages > 0 && (
-          <button
-            onClick={onToggleSelectionMode}
-            className={`whitespace-nowrap flex items-center gap-2 px-3 py-2 text-sm font-medium rounded-md transition-colors cursor-pointer border ${
-              isSelecting
-                ? 'bg-amber-100 text-amber-700 border-amber-300'
-                : 'bg-stone-100 text-stone-700 hover:bg-stone-200 border-transparent'
-            }`}
-            title={isSelecting ? 'Press Esc to cancel' : 'Select an area on the PDF'}
-          >
-            <i className="ri-crop-line"></i>
-            {isSelecting ? 'Selecting...' : 'Select'}
-          </button>
+          <div className="flex items-center gap-1 border border-stone-200 rounded-md p-0.5 bg-stone-50">
+            <button
+              onClick={handleTextClick}
+              disabled={isScanBook}
+              className={`whitespace-nowrap flex items-center gap-1.5 px-2.5 py-1.5 text-sm font-medium rounded transition-colors ${
+                isText
+                  ? 'bg-amber-100 text-amber-700'
+                  : isScanBook
+                    ? 'text-stone-300 cursor-not-allowed'
+                    : 'text-stone-600 hover:bg-stone-100 cursor-pointer'
+              }`}
+              title={
+                isScanBook
+                  ? '本书为扫描版，无法选择文字'
+                  : isText
+                    ? '退出文字选择（Esc）'
+                    : '选择文字'
+              }
+            >
+              <i className="ri-text"></i>
+              文字
+            </button>
+            <button
+              onClick={handleShotClick}
+              className={`whitespace-nowrap flex items-center gap-1.5 px-2.5 py-1.5 text-sm font-medium rounded transition-colors cursor-pointer ${
+                isShot
+                  ? 'bg-amber-100 text-amber-700'
+                  : 'text-stone-600 hover:bg-stone-100'
+              }`}
+              title={isShot ? '退出截图选择（Esc）' : '截图选择'}
+            >
+              <i className="ri-crop-line"></i>
+              截图
+            </button>
+          </div>
         )}
         {fileName && (
           <span className="text-sm text-stone-500 truncate max-w-[200px]" title={fileName}>

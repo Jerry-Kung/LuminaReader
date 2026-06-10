@@ -1,5 +1,5 @@
 import { useRef, useEffect, useState, useCallback, useMemo, memo } from 'react';
-import type * as pdfjsLib from 'pdfjs-dist';
+import * as pdfjsLib from 'pdfjs-dist';
 
 /**
  * V1.1.3 F1 / F4 / F6 / F7 / F8 多页连续滚动 PDFViewer。
@@ -44,6 +44,25 @@ interface PDFViewerProps {
   pendingScrollTarget: { page: number; offset: number } | null;
   onScrollTargetConsumed: () => void;
   onPositionChange: (page: number, offset: number) => void;
+  /**
+   * V1.1.4 三态光标：
+   *  - 'off'         默认手型，textLayer 不接收鼠标事件
+   *  - 'text'        I-beam，textLayer pointer-events:auto，允许原生文本选区
+   *  - 'screenshot'  crosshair（沿用 V1.1.3 框选），textLayer 不接收事件
+   * 默认 'off'；不传时等价于 'off'。
+   */
+  cursorMode?: 'off' | 'text' | 'screenshot';
+  /**
+   * V1.1.4：扫描版 PDF 检测回调。
+   * PDFPage textLayer 渲染完毕后，若 textContent.trim()==='' 则上报该 pageNum；
+   * 父组件据此累积 set 判断是否拦截 cursorMode='text' 切换并提示 Toast。
+   */
+  onScanPageDetected?: (pageNum: number) => void;
+  /**
+   * 当父组件需要把 PDFViewer 滚动容器引用给到其他 hook（如 useTextSelection）时，
+   * 通过此函数把内部 containerRef 暴露给上层。仅在 mount/unmount 时调用。
+   */
+  onContainerRefReady?: (el: HTMLDivElement | null) => void;
 }
 
 export interface SelectedArea {
@@ -70,6 +89,13 @@ const PAGE_GAP = 16;
 const SIDE_PADDING = 24;
 const POSITION_REPORT_OFFSET_EPSILON = 0.005;
 
+/**
+ * V1.1.4 PoC 期改造为常态：textLayer 始终渲染；交互由 cursorMode prop 控制。
+ *  - cursorMode='text' 时 textLayer pointer-events:auto，允许原生文本选区
+ *  - 其余模式下 pointer-events:none，保持 V1.1.3 既有行为
+ * 跨页 Selection 抓取由 useTextSelection hook 在父组件层完成（监听同一容器的 mouseup）。
+ */
+
 export default function PDFViewer({
   pdfDoc,
   numPages,
@@ -85,6 +111,9 @@ export default function PDFViewer({
   pendingScrollTarget,
   onScrollTargetConsumed,
   onPositionChange,
+  cursorMode = 'off',
+  onScanPageDetected,
+  onContainerRefReady,
 }: PDFViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerWidth, setContainerWidth] = useState(0);
@@ -108,6 +137,14 @@ export default function PDFViewer({
     ro.observe(el);
     return () => ro.disconnect();
   }, []);
+
+  // ---- 把 containerRef 暴露给父组件（用于 useTextSelection 在同一容器上挂 mouseup）----
+  useEffect(() => {
+    onContainerRefReady?.(containerRef.current);
+    return () => {
+      onContainerRefReady?.(null);
+    };
+  }, [onContainerRefReady]);
 
   // ---- 预读所有页 baseDim（pdfDoc 内部对 getPage 有缓存）----
   useEffect(() => {
@@ -301,6 +338,9 @@ export default function PDFViewer({
     return () => window.removeEventListener('keydown', onKey);
   }, [isSelecting, selectedArea, onSelectionChange, onSelectionModeExit]);
 
+  // ---- V1.1.4：跨页 Selection 抓取已迁出至 useTextSelection hook（由父组件调用）。----
+  // PDFViewer 仅负责 textLayer DOM 渲染；mouseup 监听由 hook 在同一 container 上挂载。
+
   // ---- 框选事件（起点页 clamp）----
   const findPageForY = useCallback(
     (clientY: number): PageMeta | null => {
@@ -421,7 +461,14 @@ export default function PDFViewer({
       onMouseUp={handleMouseUp}
       onMouseLeave={handleMouseUp}
       className="flex-1 overflow-auto bg-stone-100 outline-none"
-      style={{ cursor: isSelecting ? 'crosshair' : 'default' }}
+      style={{
+        cursor:
+          cursorMode === 'screenshot' || isSelecting
+            ? 'crosshair'
+            : cursorMode === 'text'
+              ? 'text'
+              : 'default',
+      }}
     >
       {isLoading && (
         <div className="flex flex-col items-center justify-center h-full gap-3 text-stone-400">
@@ -467,6 +514,8 @@ export default function PDFViewer({
                 visible={visiblePages.has(meta.pageNum)}
                 dragRect={dragRectForPage(meta.pageNum)}
                 selectionRect={selectionRectForPage(meta.pageNum)}
+                cursorMode={cursorMode}
+                onScanPageDetected={onScanPageDetected}
               />
             </div>
           ))}
@@ -484,6 +533,8 @@ interface PDFPageProps {
   visible: boolean;
   dragRect: { left: number; top: number; width: number; height: number } | null;
   selectionRect: { x: number; y: number; width: number; height: number } | null;
+  cursorMode: 'off' | 'text' | 'screenshot';
+  onScanPageDetected?: (pageNum: number) => void;
 }
 
 const PDFPage = memo(function PDFPage({
@@ -494,9 +545,15 @@ const PDFPage = memo(function PDFPage({
   visible,
   dragRect,
   selectionRect,
+  cursorMode,
+  onScanPageDetected,
 }: PDFPageProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const textLayerRef = useRef<HTMLDivElement>(null);
   const renderTaskRef = useRef<pdfjsLib.RenderTask | null>(null);
+  // V1.1.4 PoC: TextLayer 实例引用（pdfjs-dist 4.x 引入的类）
+  // 类型用 InstanceType 推导而非 import（避免无 default export 的 TextLayer 类型路径声明摩擦）
+  const textLayerInstanceRef = useRef<InstanceType<typeof pdfjsLib.TextLayer> | null>(null);
 
   useEffect(() => {
     if (!visible) return;
@@ -524,6 +581,46 @@ const PDFPage = memo(function PDFPage({
           const name = (err as { name?: string })?.name;
           if (name !== 'RenderingCancelledException') console.error('render error:', err);
         }
+
+        // V1.1.4：textLayer 常态渲染 + 扫描版检测（textContent.trim()==='' 视为扫描版/无文本层）
+        if (!cancelled) {
+          const textLayerEl = textLayerRef.current;
+          if (textLayerEl) {
+            try {
+              // pdfjs 4.x TextLayer 把 span 的 left/top/fontSize 都写成
+              // calc(var(--scale-factor) * Xpx)，必须在容器上注入 --scale-factor
+              // 否则 calc() 解析为 0 → 所有字堆叠在左上角且 font-size 为 0。
+              // 这里用 renderScale（不含 dpr，因为我们用 CSS 像素布局 textLayer）。
+              const tlViewport = page.getViewport({ scale: renderScale });
+              textLayerEl.style.setProperty('--scale-factor', String(renderScale));
+              const textContentSource = page.streamTextContent({ disableNormalization: true });
+              // 清空旧内容（pageNum 不变但 width/height 变化会重入此 effect）
+              if (textLayerInstanceRef.current) {
+                try { textLayerInstanceRef.current.cancel(); } catch { /* ignore */ }
+                textLayerInstanceRef.current = null;
+              }
+              while (textLayerEl.firstChild) textLayerEl.removeChild(textLayerEl.firstChild);
+              const tl = new pdfjsLib.TextLayer({
+                textContentSource,
+                container: textLayerEl,
+                viewport: tlViewport,
+              });
+              textLayerInstanceRef.current = tl;
+              await tl.render();
+              if (cancelled) return;
+              // 扫描版检测：textLayer 为空 → 上报给父组件（FE-6 Toast + cursorMode 拦截）
+              const trimmed = (textLayerEl.textContent || '').trim();
+              if (trimmed === '') {
+                onScanPageDetected?.(pageNum);
+              }
+            } catch (err: unknown) {
+              const name = (err as { name?: string })?.name;
+              if (name !== 'AbortException') {
+                console.error(`textLayer 渲染失败 page=${pageNum}:`, err);
+              }
+            }
+          }
+        }
       } catch (err) {
         console.error('page render error:', err);
       }
@@ -531,8 +628,12 @@ const PDFPage = memo(function PDFPage({
     return () => {
       cancelled = true;
       if (renderTaskRef.current) renderTaskRef.current.cancel();
+      if (textLayerInstanceRef.current) {
+        try { textLayerInstanceRef.current.cancel(); } catch { /* ignore */ }
+        textLayerInstanceRef.current = null;
+      }
     };
-  }, [pdfDoc, pageNum, width, height, visible]);
+  }, [pdfDoc, pageNum, width, height, visible, onScanPageDetected]);
 
   return (
     <div
@@ -547,8 +648,18 @@ const PDFPage = memo(function PDFPage({
           {pageNum}
         </div>
       )}
-      {/* V1.1.4 textLayer 同位插槽（V1.1.3 仅占位）*/}
-      <div className="textLayer absolute inset-0 pointer-events-none" />
+      {/* V1.1.4：textLayer 常态渲染，pointer-events 由 cursorMode 控制；
+          只有 'text' 模式才接收鼠标事件以触发原生文本选区。
+          注意：opacity 必须为 1 让浏览器原生 ::selection 高亮可见；
+          span 自身 color:transparent（来自 .textLayer 全局样式）保证文字隐形不遮挡 canvas。*/}
+      <div
+        ref={textLayerRef}
+        className="textLayer"
+        style={{
+          pointerEvents: cursorMode === 'text' ? 'auto' : 'none',
+          cursor: cursorMode === 'text' ? 'text' : 'inherit',
+        }}
+      />
       {dragRect && (
         <div
           className="absolute pointer-events-none border-2 border-amber-400 bg-amber-400/15"

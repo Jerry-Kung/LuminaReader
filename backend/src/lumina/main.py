@@ -32,6 +32,28 @@ def register_exception_handlers(app: FastAPI) -> None:
         request: Request, exc: RequestValidationError
     ) -> JSONResponse:
         request_id = generate_request_id()
+        errors = exc.errors()
+        overlong = any(
+            "exceeds LUMINA_SELECTION_TEXT_MAX_CHARS" in str(err.get("msg", ""))
+            for err in errors
+        )
+        if overlong:
+            log_with_fields(
+                logger,
+                logging.WARNING,
+                "selection text too large",
+                request_id=request_id,
+                path=str(request.url.path),
+                error_code="PAYLOAD_TOO_LARGE",
+            )
+            return JSONResponse(
+                status_code=413,
+                content=error_response(
+                    code="PAYLOAD_TOO_LARGE",
+                    message="selection.text exceeds maximum size.",
+                    request_id=request_id,
+                ),
+            )
         log_with_fields(
             logger,
             logging.WARNING,

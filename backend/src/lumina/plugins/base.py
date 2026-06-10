@@ -48,6 +48,10 @@ class PluginContext(BaseModel):
     target_lang: str = "zh-CN"
     history: list[LLMMessage] = Field(default_factory=list)
     image: ImagePart | None = None
+    # V1.1.4：原始请求中的 plugin chip 列表。image 路径下后端强制激活 screenshot-qa，
+    # 但 screenshot-qa 需要感知用户真正点的是哪个 chip（translate / explain / dictionary）
+    # 才能让 <answer> 段的任务语义与对应文本路径的 plugin 保持一致。
+    requested_plugins: list[str] = Field(default_factory=list)
 
 
 class PluginPromptSegments(BaseModel):

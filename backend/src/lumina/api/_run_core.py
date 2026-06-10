@@ -6,6 +6,7 @@ import logging
 import time
 from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
+from typing import Literal
 
 from fastapi import Request
 from fastapi.responses import JSONResponse
@@ -656,11 +657,11 @@ async def _execute_first_turn_v1(
             image_bytes=0,
         )
 
-    if body.selection is None or body.image is None:
+    if body.selection is None:
         return _error_json(
             status_code=400,
             code="INVALID_REQUEST",
-            message="First turn requires selection and image.",
+            message="First turn requires selection.",
             request_id=request_id,
             api_version="v1",
             task_type=task_type,
@@ -668,6 +669,47 @@ async def _execute_first_turn_v1(
             image_bytes=0,
             pdf_id=body.pdf_id,
         )
+
+    selection_type = body.selection.type
+
+    if selection_type == "image":
+        if body.image is None:
+            return _error_json(
+                status_code=400,
+                code="INVALID_REQUEST",
+                message="Image selection requires image payload.",
+                request_id=request_id,
+                api_version="v1",
+                task_type=task_type,
+                page=page,
+                image_bytes=0,
+                pdf_id=body.pdf_id,
+            )
+    else:
+        if body.image is not None:
+            return _error_json(
+                status_code=400,
+                code="INVALID_REQUEST",
+                message="Text selection must not include image payload.",
+                request_id=request_id,
+                api_version="v1",
+                task_type=task_type,
+                page=page,
+                image_bytes=0,
+                pdf_id=body.pdf_id,
+            )
+        if len(body.selection.text or "") > settings.selection_text_max_chars:
+            return _error_json(
+                status_code=413,
+                code="PAYLOAD_TOO_LARGE",
+                message="selection.text exceeds maximum size.",
+                request_id=request_id,
+                api_version="v1",
+                task_type=task_type,
+                page=page,
+                image_bytes=0,
+                pdf_id=body.pdf_id,
+            )
 
     try:
         catalog_entry = lookup_project_by_pdf_id(body.pdf_id)
@@ -686,40 +728,197 @@ async def _execute_first_turn_v1(
 
     project_id = catalog_entry.id
     pdf_id = body.pdf_id
+    image_bytes = 0
 
-    image_bytes, image_error = _validate_image_payload(
-        request=request,
-        body=body,
-        request_id=request_id,
-        api_version="v1",
-        task_type=task_type,
-        page=page,
-    )
-    if image_error is not None:
-        return image_error
+    if selection_type == "image":
+        image_bytes, image_error = _validate_image_payload(
+            request=request,
+            body=body,
+            request_id=request_id,
+            api_version="v1",
+            task_type=task_type,
+            page=page,
+        )
+        if image_error is not None:
+            return image_error
 
-    request_plugins = ",".join(body.plugins) if body.plugins else ""
-    log_with_fields(
-        logger,
-        logging.INFO,
-        "screenshot-qa auto-activated",
-        request_id=request_id,
-        request_plugins=request_plugins,
-        request_task_type=body.task_type,
-    )
+        request_plugins = ",".join(body.plugins) if body.plugins else ""
+        log_with_fields(
+            logger,
+            logging.INFO,
+            "screenshot-qa auto-activated",
+            request_id=request_id,
+            request_plugins=request_plugins,
+            request_task_type=body.task_type,
+        )
 
+        user_input = _first_turn_user_input(body)
+        plugin_ids = [SCREENSHOT_QA_PLUGIN_ID]
+        conversation_task_type = SCREENSHOT_QA_PLUGIN_ID
+        plugin_ctx = PluginContext(
+            selection_text=None,
+            selection_type="image",
+            selection_word_count=0,
+            image=_image_part_from_payload(body.image),
+            target_lang=body.options.target_lang,
+            history=[],
+            user_input=user_input,
+            requested_plugins=list(body.plugins or []),
+        )
+
+        result, llm_resp, invoke_error = await _invoke_pipeline(
+            pipeline=pipeline,
+            plugin_ids=plugin_ids,
+            plugin_ctx=plugin_ctx,
+            provider=provider,
+            request_id=request_id,
+            api_version="v1",
+            task_type=conversation_task_type,
+            page=page,
+            image_bytes=image_bytes,
+            start=start,
+            model_override_task=None,
+            turn_index=0,
+            project_id=project_id,
+            pdf_id=pdf_id,
+        )
+        if invoke_error is not None:
+            return invoke_error
+
+        plugin = registry.get(SCREENSHOT_QA_PLUGIN_ID)
+        parse_result = plugin.parse_response(llm_resp.text)
+        parse_failure_reason = getattr(plugin, "last_failure_reason", None)
+        extracted_text = parse_result.extracted_text or ""
+        answer_text = parse_result.answer
+        extracted_text_chars = len(extracted_text)
+
+        conversation_id = f"conv_{ULID()}"
+        selection_id = f"sel_{ULID()}"
+        user_history_text = _compose_user_history_text(extracted_text, user_input)
+
+        store = get_session_store()
+        meta = {
+            "page": body.selection.page,
+            "x": body.selection.x,
+            "y": body.selection.y,
+            "w": body.selection.w,
+            "h": body.selection.h,
+            "dpi": body.selection.dpi,
+            "image_bytes": image_bytes,
+        }
+        thumbnail_png = None
+        try:
+            thumbnail_png = render_thumbnail(body.image.data)
+        except Exception:
+            thumbnail_png = None
+        selection_row = SelectionRow(
+            id=selection_id,
+            pdf_id=pdf_id,
+            page=body.selection.page,
+            x=body.selection.x,
+            y=body.selection.y,
+            w=body.selection.w,
+            h=body.selection.h,
+            dpi=body.selection.dpi,
+            thumbnail_png=thumbnail_png,
+            created_at=int(time.time()),
+            type="image",
+        )
+        assistant_meta = {
+            "model": llm_resp.model,
+            "prompt_tokens": llm_resp.usage.prompt_tokens if llm_resp.usage else None,
+            "completion_tokens": llm_resp.usage.completion_tokens if llm_resp.usage else None,
+            "latency_ms": int((time.perf_counter() - start) * 1000),
+        }
+
+        try:
+            session = await store.create(
+                conversation_id=conversation_id,
+                project_id=project_id,
+                pdf_id=pdf_id,
+                selection_id=selection_id,
+                task_type=conversation_task_type,
+                extracted_text=extracted_text,
+                selection_row=selection_row,
+                first_user_question=user_input,
+                first_user_content=user_history_text,
+                first_assistant_text=answer_text,
+                first_assistant_meta=assistant_meta,
+                meta=meta,
+                selection_type="image",
+            )
+        except Exception:
+            return _error_json(
+                status_code=500,
+                code="INTERNAL_ERROR",
+                message="An internal server error occurred.",
+                request_id=request_id,
+                api_version="v1",
+                task_type=conversation_task_type,
+                page=page,
+                image_bytes=image_bytes,
+                project_id=project_id,
+                pdf_id=pdf_id,
+            )
+
+        if settings.session_log_extracted_text:
+            log_with_fields(
+                logger,
+                logging.DEBUG,
+                "extracted text captured",
+                request_id=request_id,
+                session_id=session.session_id,
+                extracted_text=extracted_text,
+            )
+
+        return _build_success_response(
+            request_id=request_id,
+            api_version="v1",
+            task_type=conversation_task_type,
+            page=page,
+            image_bytes=image_bytes,
+            start=start,
+            llm_resp=llm_resp,
+            result=TaskResult(text=answer_text),
+            session_id=session.session_id,
+            turn_index=0,
+            parse_failure_reason=parse_failure_reason,
+            extracted_text=parse_result.extracted_text,
+            extracted_text_chars=extracted_text_chars,
+            project_id=project_id,
+            pdf_id=pdf_id,
+            conversation_id=conversation_id,
+            plugins=plugin_ids,
+        )
+
+    # text path
     user_input = _first_turn_user_input(body)
-    plugin_ids = [SCREENSHOT_QA_PLUGIN_ID]
-    conversation_task_type = SCREENSHOT_QA_PLUGIN_ID
+    selection_text = body.selection.text or ""
+    selection_word_count = estimate_word_count(selection_text)
     plugin_ctx = PluginContext(
-        selection_text=None,
-        selection_type="image",
-        selection_word_count=0,
-        image=_image_part_from_payload(body.image),
+        selection_text=selection_text,
+        selection_type="text",
+        selection_word_count=selection_word_count,
+        image=None,
         target_lang=body.options.target_lang,
         history=[],
         user_input=user_input,
     )
+    try:
+        plugin_ids, user_input = resolve_plugin_routing(body, registry, plugin_ctx)
+    except (UnsupportedTaskError, RunInvalidRequestError) as exc:
+        return _routing_error_response(
+            exc=exc,
+            request_id=request_id,
+            api_version="v1",
+            task_type=task_type,
+            page=page,
+            image_bytes=0,
+            pdf_id=pdf_id,
+        )
+
+    plugin_ctx = plugin_ctx.model_copy(update={"user_input": user_input})
+    conversation_task_type = _conversation_task_type(plugin_ids)
 
     result, llm_resp, invoke_error = await _invoke_pipeline(
         pipeline=pipeline,
@@ -730,9 +929,9 @@ async def _execute_first_turn_v1(
         api_version="v1",
         task_type=conversation_task_type,
         page=page,
-        image_bytes=image_bytes,
+        image_bytes=0,
         start=start,
-        model_override_task=None,
+        model_override_task=_model_override_task(plugin_ids),
         turn_index=0,
         project_id=project_id,
         pdf_id=pdf_id,
@@ -740,12 +939,10 @@ async def _execute_first_turn_v1(
     if invoke_error is not None:
         return invoke_error
 
-    plugin = registry.get(SCREENSHOT_QA_PLUGIN_ID)
-    parse_result = plugin.parse_response(llm_resp.text)
-    parse_failure_reason = getattr(plugin, "last_failure_reason", None)
-    extracted_text = parse_result.extracted_text or ""
-    answer_text = parse_result.answer
+    extracted_text = selection_text
+    answer_text = result.text
     extracted_text_chars = len(extracted_text)
+    parse_failure_reason = None
 
     conversation_id = f"conv_{ULID()}"
     selection_id = f"sel_{ULID()}"
@@ -754,29 +951,26 @@ async def _execute_first_turn_v1(
     store = get_session_store()
     meta = {
         "page": body.selection.page,
-        "x": body.selection.x,
-        "y": body.selection.y,
-        "w": body.selection.w,
-        "h": body.selection.h,
-        "dpi": body.selection.dpi,
-        "image_bytes": image_bytes,
+        "page_end": body.selection.page_end,
     }
-    thumbnail_png = None
-    try:
-        thumbnail_png = render_thumbnail(body.image.data)
-    except Exception:
-        thumbnail_png = None
     selection_row = SelectionRow(
         id=selection_id,
         pdf_id=pdf_id,
         page=body.selection.page,
-        x=body.selection.x,
-        y=body.selection.y,
-        w=body.selection.w,
-        h=body.selection.h,
-        dpi=body.selection.dpi,
-        thumbnail_png=thumbnail_png,
+        x=None,
+        y=None,
+        w=None,
+        h=None,
+        dpi=None,
+        thumbnail_png=None,
         created_at=int(time.time()),
+        type="text",
+        text=selection_text,
+        page_end=body.selection.page_end,
+        segments_json=json.dumps(
+            [s.model_dump() for s in body.selection.segments or []],
+            ensure_ascii=False,
+        ),
     )
     assistant_meta = {
         "model": llm_resp.model,
@@ -799,6 +993,7 @@ async def _execute_first_turn_v1(
             first_assistant_text=answer_text,
             first_assistant_meta=assistant_meta,
             meta=meta,
+            selection_type="text",
         )
     except Exception:
         return _error_json(
@@ -809,7 +1004,7 @@ async def _execute_first_turn_v1(
             api_version="v1",
             task_type=conversation_task_type,
             page=page,
-            image_bytes=image_bytes,
+            image_bytes=0,
             project_id=project_id,
             pdf_id=pdf_id,
         )
@@ -821,7 +1016,7 @@ async def _execute_first_turn_v1(
             "extracted text captured",
             request_id=request_id,
             session_id=session.session_id,
-            extracted_text=extracted_text,
+            extracted_text_chars=extracted_text_chars,
         )
 
     return _build_success_response(
@@ -829,14 +1024,14 @@ async def _execute_first_turn_v1(
         api_version="v1",
         task_type=conversation_task_type,
         page=page,
-        image_bytes=image_bytes,
+        image_bytes=0,
         start=start,
         llm_resp=llm_resp,
         result=TaskResult(text=answer_text),
         session_id=session.session_id,
         turn_index=0,
         parse_failure_reason=parse_failure_reason,
-        extracted_text=parse_result.extracted_text,
+        extracted_text=extracted_text,
         extracted_text_chars=extracted_text_chars,
         project_id=project_id,
         pdf_id=pdf_id,
@@ -889,7 +1084,7 @@ async def _execute_follow_up_v1(
 
     # V1.1.1: cross-plugin follow-up allowed; SESSION_TASK_MISMATCH check removed.
 
-    if not session.extracted_text:
+    if session.selection_type == "image" and not session.extracted_text:
         return _error_json(
             status_code=400,
             code="OCR_TEXT_UNAVAILABLE",
@@ -909,7 +1104,7 @@ async def _execute_follow_up_v1(
 
     plugin_ctx = PluginContext(
         selection_text=session.extracted_text,
-        selection_type="image",
+        selection_type=session.selection_type,
         selection_word_count=estimate_word_count(session.extracted_text),
         target_lang=body.options.target_lang,
         history=list(session.messages),
@@ -1166,11 +1361,11 @@ async def prepare_stream_run(
                 page=page,
                 image_bytes=0,
             )
-        if body.selection is None or body.image is None:
+        if body.selection is None:
             return _error_json(
                 status_code=400,
                 code="INVALID_REQUEST",
-                message="First turn requires selection and image.",
+                message="First turn requires selection.",
                 request_id=request_id,
                 api_version=API_VERSION,
                 task_type=task_type,
@@ -1178,6 +1373,47 @@ async def prepare_stream_run(
                 image_bytes=0,
                 pdf_id=body.pdf_id,
             )
+
+        selection_type = body.selection.type
+
+        if selection_type == "image":
+            if body.image is None:
+                return _error_json(
+                    status_code=400,
+                    code="INVALID_REQUEST",
+                    message="Image selection requires image payload.",
+                    request_id=request_id,
+                    api_version=API_VERSION,
+                    task_type=task_type,
+                    page=page,
+                    image_bytes=0,
+                    pdf_id=body.pdf_id,
+                )
+        else:
+            if body.image is not None:
+                return _error_json(
+                    status_code=400,
+                    code="INVALID_REQUEST",
+                    message="Text selection must not include image payload.",
+                    request_id=request_id,
+                    api_version=API_VERSION,
+                    task_type=task_type,
+                    page=page,
+                    image_bytes=0,
+                    pdf_id=body.pdf_id,
+                )
+            if len(body.selection.text or "") > settings.selection_text_max_chars:
+                return _error_json(
+                    status_code=413,
+                    code="PAYLOAD_TOO_LARGE",
+                    message="selection.text exceeds maximum size.",
+                    request_id=request_id,
+                    api_version=API_VERSION,
+                    task_type=task_type,
+                    page=page,
+                    image_bytes=0,
+                    pdf_id=body.pdf_id,
+                )
         try:
             catalog_entry = lookup_project_by_pdf_id(body.pdf_id)
         except PdfNotFoundError:
@@ -1195,70 +1431,131 @@ async def prepare_stream_run(
 
         project_id = catalog_entry.id
         pdf_id = body.pdf_id
-        image_bytes, image_error = _validate_image_payload(
-            request=request,
-            body=body,
-            request_id=request_id,
-            api_version=API_VERSION,
-            task_type=task_type,
-            page=page,
-        )
-        if image_error is not None:
-            return image_error
-
-        request_plugins = ",".join(body.plugins) if body.plugins else ""
-        log_with_fields(
-            logger,
-            logging.INFO,
-            "screenshot-qa auto-activated",
-            request_id=request_id,
-            request_plugins=request_plugins,
-            request_task_type=body.task_type,
-        )
-
         user_input = _first_turn_user_input(body)
-        plugin_ids = [SCREENSHOT_QA_PLUGIN_ID]
-        conversation_task_type = SCREENSHOT_QA_PLUGIN_ID
-        plugin_ctx = PluginContext(
-            selection_text=None,
-            selection_type="image",
-            selection_word_count=0,
-            image=_image_part_from_payload(body.image),
-            target_lang=body.options.target_lang,
-            history=[],
-            user_input=user_input,
-        )
-
         conversation_id = f"conv_{ULID()}"
         selection_id = f"sel_{ULID()}"
-        user_history_text = _compose_user_history_text("", user_input)
         store = get_session_store()
-        meta = {
-            "page": body.selection.page,
-            "x": body.selection.x,
-            "y": body.selection.y,
-            "w": body.selection.w,
-            "h": body.selection.h,
-            "dpi": body.selection.dpi,
-            "image_bytes": image_bytes,
-        }
-        thumbnail_png = None
-        try:
-            thumbnail_png = render_thumbnail(body.image.data)
-        except Exception:
+
+        if selection_type == "image":
+            image_bytes, image_error = _validate_image_payload(
+                request=request,
+                body=body,
+                request_id=request_id,
+                api_version=API_VERSION,
+                task_type=task_type,
+                page=page,
+            )
+            if image_error is not None:
+                return image_error
+
+            request_plugins = ",".join(body.plugins) if body.plugins else ""
+            log_with_fields(
+                logger,
+                logging.INFO,
+                "screenshot-qa auto-activated",
+                request_id=request_id,
+                request_plugins=request_plugins,
+                request_task_type=body.task_type,
+            )
+
+            plugin_ids = [SCREENSHOT_QA_PLUGIN_ID]
+            conversation_task_type = SCREENSHOT_QA_PLUGIN_ID
+            plugin_ctx = PluginContext(
+                selection_text=None,
+                selection_type="image",
+                selection_word_count=0,
+                image=_image_part_from_payload(body.image),
+                target_lang=body.options.target_lang,
+                history=[],
+                user_input=user_input,
+                requested_plugins=list(body.plugins or []),
+            )
+            user_history_text = _compose_user_history_text("", user_input)
+            meta = {
+                "page": body.selection.page,
+                "x": body.selection.x,
+                "y": body.selection.y,
+                "w": body.selection.w,
+                "h": body.selection.h,
+                "dpi": body.selection.dpi,
+                "image_bytes": image_bytes,
+            }
             thumbnail_png = None
-        selection_row = SelectionRow(
-            id=selection_id,
-            pdf_id=pdf_id,
-            page=body.selection.page,
-            x=body.selection.x,
-            y=body.selection.y,
-            w=body.selection.w,
-            h=body.selection.h,
-            dpi=body.selection.dpi,
-            thumbnail_png=thumbnail_png,
-            created_at=int(time.time()),
-        )
+            try:
+                thumbnail_png = render_thumbnail(body.image.data)
+            except Exception:
+                thumbnail_png = None
+            selection_row = SelectionRow(
+                id=selection_id,
+                pdf_id=pdf_id,
+                page=body.selection.page,
+                x=body.selection.x,
+                y=body.selection.y,
+                w=body.selection.w,
+                h=body.selection.h,
+                dpi=body.selection.dpi,
+                thumbnail_png=thumbnail_png,
+                created_at=int(time.time()),
+                type="image",
+            )
+            session_selection_type: Literal["text", "image"] = "image"
+            initial_extracted_text = ""
+            is_screenshot_qa = True
+        else:
+            image_bytes = 0
+            selection_text = body.selection.text or ""
+            selection_word_count = estimate_word_count(selection_text)
+            plugin_ctx = PluginContext(
+                selection_text=selection_text,
+                selection_type="text",
+                selection_word_count=selection_word_count,
+                image=None,
+                target_lang=body.options.target_lang,
+                history=[],
+                user_input=user_input,
+            )
+            try:
+                plugin_ids, user_input = resolve_plugin_routing(body, registry, plugin_ctx)
+            except (UnsupportedTaskError, RunInvalidRequestError) as exc:
+                return _routing_error_response(
+                    exc=exc,
+                    request_id=request_id,
+                    api_version=API_VERSION,
+                    task_type=task_type,
+                    page=page,
+                    image_bytes=0,
+                    pdf_id=pdf_id,
+                )
+            plugin_ctx = plugin_ctx.model_copy(update={"user_input": user_input})
+            conversation_task_type = _conversation_task_type(plugin_ids)
+            user_history_text = _compose_user_history_text(selection_text, user_input)
+            meta = {
+                "page": body.selection.page,
+                "page_end": body.selection.page_end,
+            }
+            selection_row = SelectionRow(
+                id=selection_id,
+                pdf_id=pdf_id,
+                page=body.selection.page,
+                x=None,
+                y=None,
+                w=None,
+                h=None,
+                dpi=None,
+                thumbnail_png=None,
+                created_at=int(time.time()),
+                type="text",
+                text=selection_text,
+                page_end=body.selection.page_end,
+                segments_json=json.dumps(
+                    [s.model_dump() for s in body.selection.segments or []],
+                    ensure_ascii=False,
+                ),
+            )
+            session_selection_type = "text"
+            initial_extracted_text = selection_text
+            is_screenshot_qa = False
+
         try:
             await store.create(
                 conversation_id=conversation_id,
@@ -1266,13 +1563,14 @@ async def prepare_stream_run(
                 pdf_id=pdf_id,
                 selection_id=selection_id,
                 task_type=conversation_task_type,
-                extracted_text="",
+                extracted_text=initial_extracted_text,
                 selection_row=selection_row,
                 first_user_question=user_input,
                 first_user_content=user_history_text,
                 first_assistant_text="",
                 first_assistant_meta={"model": None},
                 meta=meta,
+                selection_type=session_selection_type,
             )
         except Exception:
             return _error_json(
@@ -1314,8 +1612,8 @@ async def prepare_stream_run(
             conversation_id=conversation_id,
             turn_index=0,
             is_first_turn=True,
-            is_screenshot_qa=True,
-            extracted_text_chars=None,
+            is_screenshot_qa=is_screenshot_qa,
+            extracted_text_chars=len(initial_extracted_text) if initial_extracted_text else None,
             plugin_ids=plugin_ids,
             plugin_ctx=plugin_ctx,
             pipeline=pipeline,
@@ -1356,7 +1654,7 @@ async def prepare_stream_run(
 
     # V1.1.1: cross-plugin follow-up allowed; SESSION_TASK_MISMATCH check removed.
 
-    if not session.extracted_text:
+    if session.selection_type == "image" and not session.extracted_text:
         return _error_json(
             status_code=400,
             code="OCR_TEXT_UNAVAILABLE",
@@ -1375,7 +1673,7 @@ async def prepare_stream_run(
     turn_index = len(session.messages) // 2
     plugin_ctx = PluginContext(
         selection_text=session.extracted_text,
-        selection_type="image",
+        selection_type=session.selection_type,
         selection_word_count=estimate_word_count(session.extracted_text),
         target_lang=body.options.target_lang,
         history=list(session.messages),

@@ -9,7 +9,8 @@
     "system": "prompts/system.md",
     "user": {
       "default": "prompts/user_default.md",
-      "with_input": "prompts/user.md"
+      "with_input": "prompts/user.md",
+      "translate": "prompts/user_translate.md"
     }
   }
 }

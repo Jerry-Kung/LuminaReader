@@ -4,7 +4,15 @@ import time
 import pytest
 
 from lumina.db.migrations import initialize_schema
-from lumina.db.models import MessageRow, insert_message, list_messages
+from lumina.db.models import (
+    MessageRow,
+    SelectionRow,
+    get_selection,
+    get_selection_type,
+    insert_message,
+    insert_selection,
+    list_messages,
+)
 
 
 @pytest.fixture
@@ -64,3 +72,98 @@ def test_list_messages_orders_by_turn_index_first(conn):
         )
     rows = list_messages(conn, conv_id)
     assert [row.content for row in rows] == ["u0", "a0", "u1", "a1"]
+
+
+def test_insert_get_selection_image_path(conn) -> None:
+    row = SelectionRow(
+        id="sel_img",
+        pdf_id="pdf_1",
+        page=1,
+        x=1.0,
+        y=2.0,
+        w=10.0,
+        h=20.0,
+        dpi=144.0,
+        thumbnail_png=b"png",
+        created_at=int(time.time()),
+        type="image",
+    )
+    insert_selection(conn, row)
+    loaded = get_selection(conn, "sel_img")
+    assert loaded is not None
+    assert loaded.type == "image"
+    assert loaded.x == 1.0
+    assert loaded.text is None
+
+
+def test_insert_get_selection_text_path(conn) -> None:
+    row = SelectionRow(
+        id="sel_txt",
+        pdf_id="pdf_1",
+        page=5,
+        x=None,
+        y=None,
+        w=None,
+        h=None,
+        dpi=None,
+        thumbnail_png=None,
+        created_at=int(time.time()),
+        type="text",
+        text="Hello",
+        page_end=7,
+        segments_json='[{"page":5,"text":"Hello","offset_start":0,"offset_end":5}]',
+    )
+    insert_selection(conn, row)
+    loaded = get_selection(conn, "sel_txt")
+    assert loaded is not None
+    assert loaded.type == "text"
+    assert loaded.text == "Hello"
+    assert loaded.page_end == 7
+    assert loaded.x is None
+
+
+def test_get_selection_type_image(conn) -> None:
+    insert_selection(
+        conn,
+        SelectionRow(
+            id="sel_a",
+            pdf_id="pdf_1",
+            page=1,
+            x=1.0,
+            y=1.0,
+            w=1.0,
+            h=1.0,
+            dpi=144.0,
+            thumbnail_png=None,
+            created_at=0,
+            type="image",
+        ),
+    )
+    assert get_selection_type(conn, "sel_a") == "image"
+
+
+def test_get_selection_type_text(conn) -> None:
+    insert_selection(
+        conn,
+        SelectionRow(
+            id="sel_b",
+            pdf_id="pdf_1",
+            page=1,
+            x=None,
+            y=None,
+            w=None,
+            h=None,
+            dpi=None,
+            thumbnail_png=None,
+            created_at=0,
+            type="text",
+            text="word",
+            page_end=1,
+            segments_json="[]",
+        ),
+    )
+    assert get_selection_type(conn, "sel_b") == "text"
+
+
+def test_get_selection_type_not_found(conn) -> None:
+    assert get_selection_type(conn, "missing") is None

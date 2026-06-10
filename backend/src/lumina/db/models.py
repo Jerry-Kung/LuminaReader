@@ -27,13 +27,17 @@ class SelectionRow:
     id: str
     pdf_id: str
     page: int
-    x: float
-    y: float
-    w: float
-    h: float
-    dpi: float
+    x: float | None
+    y: float | None
+    w: float | None
+    h: float | None
+    dpi: float | None
     thumbnail_png: bytes | None
     created_at: int
+    type: str = "image"
+    text: str | None = None
+    page_end: int | None = None
+    segments_json: str | None = None
 
 
 @dataclass
@@ -96,8 +100,9 @@ def insert_selection(conn, row: SelectionRow) -> None:
     conn.execute(
         """
         INSERT INTO selections (
-            id, pdf_id, page, x, y, w, h, dpi, thumbnail_png, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            id, pdf_id, page, x, y, w, h, dpi, thumbnail_png, created_at,
+            type, text, page_end, segments_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             row.id,
@@ -110,6 +115,10 @@ def insert_selection(conn, row: SelectionRow) -> None:
             row.dpi,
             row.thumbnail_png,
             row.created_at,
+            row.type,
+            row.text,
+            row.page_end,
+            row.segments_json,
         ),
     )
 
@@ -279,14 +288,39 @@ def list_conversations_by_pdf(
 def get_selection(conn, selection_id: str) -> SelectionRow | None:
     row = conn.execute(
         """
-        SELECT id, pdf_id, page, x, y, w, h, dpi, thumbnail_png, created_at
+        SELECT id, pdf_id, page, x, y, w, h, dpi, thumbnail_png, created_at,
+               type, text, page_end, segments_json
         FROM selections WHERE id = ?
         """,
         (selection_id,),
     ).fetchone()
     if row is None:
         return None
-    return SelectionRow(*row)
+    return SelectionRow(
+        id=row[0],
+        pdf_id=row[1],
+        page=row[2],
+        x=row[3],
+        y=row[4],
+        w=row[5],
+        h=row[6],
+        dpi=row[7],
+        thumbnail_png=row[8],
+        created_at=row[9],
+        type=row[10],
+        text=row[11],
+        page_end=row[12],
+        segments_json=row[13],
+    )
+
+
+def get_selection_type(conn, selection_id: str) -> str | None:
+    """Lightweight query for follow-up routing fallback path."""
+    row = conn.execute(
+        "SELECT type FROM selections WHERE id = ?",
+        (selection_id,),
+    ).fetchone()
+    return row[0] if row else None
 
 
 def get_first_assistant_message(conn, conversation_id: str) -> MessageRow | None:

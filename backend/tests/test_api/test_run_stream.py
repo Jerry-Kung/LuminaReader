@@ -451,3 +451,50 @@ async def test_sse_generator_marks_stream_aborted_on_cancel(
     ]
     assert stream_logs
     assert stream_logs[-1].get("stream_aborted") is True
+
+
+def test_text_first_turn_stream_no_extracted_event(stream_client: TestClient) -> None:
+    provider = MockStreamRunProvider(
+        events=[
+            LLMStreamEvent(type="text_delta", delta="translated"),
+            LLMStreamEvent(
+                type="done",
+                model="gpt-4o",
+                usage=LLMUsage(prompt_tokens=1, completion_tokens=1, total_tokens=2),
+            ),
+        ]
+    )
+    stream_client.app.dependency_overrides[get_provider] = lambda: provider
+    text = "Hello, world."
+    payload = {
+        "task_type": "translate",
+        "pdf_id": stream_client.stream_pdf_id,
+        "selection": {
+            "type": "text",
+            "pdf_id": None,
+            "page": 5,
+            "page_end": 5,
+            "text": text,
+            "segments": [
+                {
+                    "page": 5,
+                    "text": text,
+                    "offset_start": 0,
+                    "offset_end": len(text),
+                }
+            ],
+        },
+        "image": None,
+        "plugins": ["translate"],
+        "options": {"target_lang": "zh-CN", "stream": True},
+    }
+    with stream_client.stream("POST", "/api/v1/run", json=payload) as response:
+        frames = _parse_sse("".join(response.iter_text()))
+    names = [name for name, _ in frames]
+    assert "extracted_text" not in names
+    meta = next(data for name, data in frames if name == "meta")
+    assert meta["plugins"] == ["translate"]
+    assert meta["task_type"] == "translate"
+    deltas = [data for name, data in frames if name == "text_delta"]
+    assert deltas
+    assert all(data.get("section") is None for data in deltas)

@@ -14,6 +14,26 @@ export interface TranslateSelection {
   dpi: number;
 }
 
+// V1.1.4：文字选区上行结构（与后端 SelectionSegment / Selection type='text' 对齐）
+export interface TextSelectionSegmentPayload {
+  page: number;
+  text: string;
+  offset_start: number;
+  offset_end: number;
+}
+
+export interface TextSelectionPayload {
+  page: number;
+  page_end: number;
+  text: string;
+  segments: TextSelectionSegmentPayload[];
+}
+
+// V1.1.4：首轮 selection 三态：截图 / 文字 / null（追问）
+export type FirstTurnSelection =
+  | { kind: 'image'; selection: TranslateSelection; image: TranslateImage }
+  | { kind: 'text'; selection: TextSelectionPayload };
+
 export interface TranslateImage {
   data: string;
   width: number;
@@ -426,13 +446,46 @@ function startSSEFetch(
 
 function buildFirstTurnBody(
   plugins: TaskType[],
-  selection: TranslateSelection,
-  image: TranslateImage,
+  firstTurn: FirstTurnSelection,
   options: RunOptions,
 ): Record<string, unknown> {
   // V1.1.1 契约：plugins[] + user_input 为新字段；task_type 仍必填（后端用作回退）。
   // 空 plugins → 走 chat 模式，task_type 传 "chat" 让后端 resolve_plugin_routing 走空 plugin 分支。
+  // V1.1.4：selection 区分 image / text；text 路径 image=null，selection 含 type/text/page_end/segments。
   const taskType: TaskType = plugins[0] ?? 'chat';
+  if (firstTurn.kind === 'image') {
+    const { selection, image } = firstTurn;
+    return {
+      task_type: taskType,
+      plugins,
+      user_input: options.userInput ?? null,
+      session_id: null,
+      pdf_id: options.pdfId ?? null,
+      selection: {
+        type: 'image',
+        pdf_id: options.pdfId ?? null,
+        page: selection.page,
+        x: selection.x,
+        y: selection.y,
+        w: selection.w,
+        h: selection.h,
+        dpi: selection.dpi,
+      },
+      image: {
+        mime: 'image/png',
+        data: image.data,
+        width: image.width,
+        height: image.height,
+      },
+      options: {
+        target_lang: options.targetLang ?? 'zh-CN',
+        user_question: options.userQuestion ?? null,
+        stream: true,
+      },
+    };
+  }
+  // text 路径
+  const { selection } = firstTurn;
   return {
     task_type: taskType,
     plugins,
@@ -440,20 +493,14 @@ function buildFirstTurnBody(
     session_id: null,
     pdf_id: options.pdfId ?? null,
     selection: {
+      type: 'text',
       pdf_id: options.pdfId ?? null,
       page: selection.page,
-      x: selection.x,
-      y: selection.y,
-      w: selection.w,
-      h: selection.h,
-      dpi: selection.dpi,
+      page_end: selection.page_end,
+      text: selection.text,
+      segments: selection.segments,
     },
-    image: {
-      mime: 'image/png',
-      data: image.data,
-      width: image.width,
-      height: image.height,
-    },
+    image: null,
     options: {
       target_lang: options.targetLang ?? 'zh-CN',
       user_question: options.userQuestion ?? null,
@@ -486,18 +533,18 @@ function buildFollowUpBody(
   };
 }
 
-// First turn streaming: image + selection required; backend creates the session.
+// First turn streaming: selection 必填（image 或 text），其中 image 路径附带 PNG payload。
+// V1.1.4：text 路径 selection.kind='text'，image 不再传，后端依据 selection.type='text' 跳过 OCR。
 export function runTaskStream(
   plugins: TaskType[],
-  selection: TranslateSelection,
-  image: TranslateImage,
+  firstTurn: FirstTurnSelection,
   options: RunOptions,
   callbacks: RunStreamCallbacks,
 ): RunStreamHandle {
   if (!API_BASE) {
     return mockRunStream(plugins, '', options.userInput, false, callbacks);
   }
-  return startSSEFetch(`${API_BASE}/api/v1/run`, buildFirstTurnBody(plugins, selection, image, options), callbacks);
+  return startSSEFetch(`${API_BASE}/api/v1/run`, buildFirstTurnBody(plugins, firstTurn, options), callbacks);
 }
 
 // Follow-up streaming: text-driven only (Scheme D).

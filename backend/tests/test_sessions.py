@@ -70,6 +70,7 @@ async def _create_session(
         first_assistant_text="answer",
         first_assistant_meta={"model": "gpt-4o"},
         meta={"page": 1},
+        selection_type="image",
     )
 
 
@@ -446,3 +447,48 @@ async def test_delete_db_failure_raises() -> None:
     ):
         with pytest.raises(DbWriteError):
             await store.delete(session.session_id)
+
+
+@pytest.mark.asyncio
+async def test_session_create_text_path_writes_selection_type() -> None:
+    store = SessionStore()
+    created = auto_create_project(PDF_BYTES, f"book-{ULID()}.pdf")
+    sel_id = f"sel_{ULID()}"
+    session = await store.create(
+        conversation_id=f"conv_{ULID()}",
+        project_id=created.project_id,
+        pdf_id=created.pdf_id,
+        selection_id=sel_id,
+        task_type="translate",
+        extracted_text="hello",
+        selection_row=SelectionRow(
+            id=sel_id,
+            pdf_id=created.pdf_id,
+            page=1,
+            x=None,
+            y=None,
+            w=None,
+            h=None,
+            dpi=None,
+            thumbnail_png=None,
+            created_at=int(time.time()),
+            type="text",
+            text="hello",
+            page_end=1,
+            segments_json="[]",
+        ),
+        first_user_question=None,
+        first_user_content="hello",
+        first_assistant_text="answer",
+        first_assistant_meta={"model": "gpt-4o"},
+        meta={"page": 1},
+        selection_type="text",
+    )
+    assert session.selection_type == "text"
+
+
+@pytest.mark.asyncio
+async def test_session_create_image_path_writes_selection_type() -> None:
+    store = SessionStore()
+    session = await _create_session(store)
+    assert session.selection_type == "image"

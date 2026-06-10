@@ -1,6 +1,6 @@
 from typing import Any, Literal, TypeVar
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 from lumina.schemas.selection import ImagePayload, Selection
 
@@ -22,6 +22,20 @@ class TranslateRequest(BaseModel):
     plugins: list[str] = Field(default_factory=list)
     user_input: str | None = None
     options: TranslateOptions = Field(default_factory=TranslateOptions)
+
+    @model_validator(mode="after")
+    def _check_image_selection_consistency(self) -> "TranslateRequest":
+        if self.selection is None:
+            if self.image is not None:
+                raise ValueError("Follow-up turn must not include image")
+            return self
+        if self.selection.type == "text":
+            if self.image is not None:
+                raise ValueError("Text selection must not include image payload")
+        elif self.selection.type == "image":
+            if self.image is None:
+                raise ValueError("Image selection requires image payload")
+        return self
 
 
 class HealthData(BaseModel):

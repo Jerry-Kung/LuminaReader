@@ -42,18 +42,19 @@ def _seed_v1_project_meta(conn) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_schema_version_is_three_in_v113():
-    assert SCHEMA_VERSION == 3
+def test_schema_version_constant_is_4():
+    assert SCHEMA_VERSION == 4
 
 
-def test_registry_contains_001_002_003_in_order():
+def test_registry_contains_001_through_004_in_order():
     migrations = registered_migrations()
     versions = [m.target_version for m in migrations]
     filenames = [m.filename for m in migrations]
-    assert versions == [1, 2, 3]
+    assert versions == [1, 2, 3, 4]
     assert filenames[0] == "001_initial.py"
     assert filenames[1] == "002_add_pdf_last_read_page.py"
     assert filenames[2] == "003_add_pdf_last_read_offset.py"
+    assert filenames[3] == "004_selection_text_columns.py"
 
 
 # ---------------------------------------------------------------------------
@@ -168,8 +169,8 @@ def test_apply_pending_upgrades_v103_db_to_current(conn):
 
     new_version = apply_pending(conn)
 
-    assert new_version == SCHEMA_VERSION == 3
-    assert read_schema_version(conn) == 3
+    assert new_version == SCHEMA_VERSION == 4
+    assert read_schema_version(conn) == 4
     cols_after = {row[1] for row in conn.execute("PRAGMA table_info(pdfs)").fetchall()}
     assert "last_read_page" in cols_after
     assert "last_read_offset" in cols_after
@@ -409,7 +410,174 @@ def test_init_sql_does_not_include_last_read_offset():
     assert "last_read_offset" not in INIT_SQL
 
 
+def test_initialize_schema_at_v4_clean_db(conn):
+    initialize_schema(conn)
+    insert_project_meta(
+        conn,
+        ProjectMetaRow(id="proj_x", name="x", created_at=0, schema_version=4),
+    )
+    cols = {row[1]: row for row in conn.execute("PRAGMA table_info(selections)").fetchall()}
+    assert len(cols) == 14
+    assert cols["type"][2] == "TEXT"
+    assert cols["type"][3] == 1  # NOT NULL
+    assert cols["type"][4] == "'image'"
+    for name in ("x", "y", "w", "h", "dpi", "thumbnail_png"):
+        assert cols[name][3] == 0  # notnull=0
+    assert cols["page"][3] == 1  # notnull=1
+    indexes = {
+        row[1]
+        for row in conn.execute("PRAGMA index_list(selections)").fetchall()
+    }
+    assert "idx_selections_pdf" in indexes
+
+
+def _seed_v3_db(conn, selections_rows: list[tuple] | None = None) -> None:
+    """Simulate a V1.1.3 schema=3 DB with optional selection rows."""
+    _seed_v1_project_meta(conn)
+    conn.execute(
+        "ALTER TABLE pdfs ADD COLUMN last_read_page INTEGER NOT NULL DEFAULT 1"
+    )
+    conn.execute(
+        "ALTER TABLE pdfs ADD COLUMN last_read_offset REAL NOT NULL DEFAULT 0"
+    )
+    conn.execute("UPDATE project_meta SET schema_version = 3")
+    if selections_rows:
+        for row in selections_rows:
+            conn.execute(
+                """
+                INSERT INTO selections (
+                    id, pdf_id, page, x, y, w, h, dpi, thumbnail_png, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                row,
+            )
+
+
+def test_migration_004_from_v3_preserves_image_rows(conn):
+    thumb = b"\x89PNG\r\n\x1a\n"
+    rows = [
+        ("sel_1", "pdf_x", 1, 1.0, 2.0, 10.0, 20.0, 144.0, thumb, 100),
+        ("sel_2", "pdf_x", 2, 3.0, 4.0, 11.0, 21.0, 150.0, None, 101),
+        ("sel_3", "pdf_y", 5, 5.0, 6.0, 12.0, 22.0, 96.0, thumb, 102),
+    ]
+    _seed_v3_db(conn, rows)
+    apply_pending(conn)
+    assert read_schema_version(conn) == 4
+    upgraded = conn.execute(
+        """
+        SELECT id, pdf_id, page, x, y, w, h, dpi, thumbnail_png, created_at,
+               type, text, page_end, segments_json
+        FROM selections ORDER BY id
+        """
+    ).fetchall()
+    assert len(upgraded) == 3
+    for original, row in zip(rows, upgraded):
+        assert row[0] == original[0]
+        assert row[1] == original[1]
+        assert row[2] == original[2]
+        assert row[3] == original[3]
+        assert row[4] == original[4]
+        assert row[5] == original[5]
+        assert row[6] == original[6]
+        assert row[7] == original[7]
+        assert row[8] == original[8]
+        assert row[9] == original[9]
+        assert row[10] == "image"
+        assert row[11] is None
+        assert row[12] is None
+        assert row[13] is None
+
+
+def test_migration_004_idempotent(conn):
+    _seed_v3_db(conn, [("sel_1", "pdf_x", 1, 1.0, 2.0, 10.0, 20.0, 144.0, None, 100)])
+    apply_pending(conn)
+    info_before = conn.execute("PRAGMA table_info(selections)").fetchall()
+    count_before = conn.execute("SELECT COUNT(*) FROM selections").fetchone()[0]
+    version_before = read_schema_version(conn)
+    apply_pending(conn)
+    assert conn.execute("PRAGMA table_info(selections)").fetchall() == info_before
+    assert conn.execute("SELECT COUNT(*) FROM selections").fetchone()[0] == count_before
+    assert read_schema_version(conn) == version_before
+
+
+def test_migration_004_keeps_index(conn):
+    _seed_v3_db(conn)
+    apply_pending(conn)
+    indexes = {
+        row[1]
+        for row in conn.execute("PRAGMA index_list(selections)").fetchall()
+    }
+    assert "idx_selections_pdf" in indexes
+    plan = conn.execute(
+        "EXPLAIN QUERY PLAN SELECT * FROM selections WHERE pdf_id='pdf_x' ORDER BY created_at DESC"
+    ).fetchall()
+    plan_text = " ".join(str(cell) for row in plan for cell in row)
+    assert "idx_selections_pdf" in plan_text or "USING INDEX" in plan_text
+
+
+def test_migration_004_preserves_conversation_fk(conn):
+    _seed_v3_db(conn, [("sel_x", "pdf_a", 1, 1.0, 2.0, 10.0, 20.0, 144.0, None, 100)])
+    conn.execute(
+        """
+        INSERT INTO conversations (
+            id, pdf_id, selection_id, task_type, extracted_text,
+            created_at, last_used_at, status
+        ) VALUES ('conv_1', 'pdf_a', 'sel_x', 'translate', 'text', 0, 0, 'active')
+        """
+    )
+    apply_pending(conn)
+    conv = conn.execute(
+        "SELECT selection_id FROM conversations WHERE id='conv_1'"
+    ).fetchone()
+    assert conv[0] == "sel_x"
+    sel = conn.execute("SELECT type FROM selections WHERE id='sel_x'").fetchone()
+    assert sel[0] == "image"
+
+
+def test_migration_004_empty_selections_table(conn):
+    _seed_v3_db(conn)
+    apply_pending(conn)
+    assert read_schema_version(conn) == 4
+    assert conn.execute("SELECT COUNT(*) FROM selections").fetchone()[0] == 0
+    assert len(conn.execute("PRAGMA table_info(selections)").fetchall()) == 14
+
+
+def test_apply_pending_runs_only_004_when_at_v3(monkeypatch, conn):
+    _seed_v3_db(conn)
+    from lumina.db import migrations as mig
+
+    calls: list[int] = []
+    original = list(mig._REGISTRY)
+    patched = []
+    for entry in mig._REGISTRY:
+        original_apply = entry.apply_fn
+
+        def _spy(apply_fn=original_apply, version=entry.target_version):
+            def wrapped(c):
+                calls.append(version)
+                return apply_fn(c)
+
+            return wrapped
+
+        patched.append(
+            mig._LoadedMigration(
+                target_version=entry.target_version,
+                description=entry.description,
+                filename=entry.filename,
+                apply_fn=_spy(),
+            )
+        )
+    monkeypatch.setattr(mig, "_REGISTRY", patched)
+    try:
+        apply_pending(conn)
+        assert calls == [4]
+    finally:
+        monkeypatch.setattr(mig, "_REGISTRY", original)
+
+
 def test_initialize_schema_includes_last_read_offset_column(conn):
     initialize_schema(conn)
     cols = {row[1] for row in conn.execute("PRAGMA table_info(pdfs)").fetchall()}
     assert "last_read_offset" in cols
+    sel_cols = {row[1] for row in conn.execute("PRAGMA table_info(selections)").fetchall()}
+    assert {"type", "text", "page_end", "segments_json"} <= sel_cols

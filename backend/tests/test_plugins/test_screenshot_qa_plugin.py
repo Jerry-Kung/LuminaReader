@@ -84,3 +84,38 @@ async def test_sq07_wrap_stream_no_tag_fragments() -> None:
     combined = "".join(e.delta or "" for e in out if e.type == "text_delta")
     for tag in ("<ocr>", "</ocr>", "<answer>", "</answer>"):
         assert tag not in combined
+
+
+def test_sq08_translate_mode_aligns_with_translate_plugin() -> None:
+    """V1.1.4：requested_plugins 含 translate 时，<answer> 段应被强制为翻译语义，
+    与 translate plugin 文本路径保持一致；user 段切到 user_translate.md，
+    system 段追加翻译模式覆盖指令。"""
+    plugin = _screenshot_qa_plugin()
+    ctx = PluginContext(
+        selection_type="image",
+        user_input=None,
+        target_lang="zh-CN",
+        requested_plugins=["translate"],
+    )
+    seg = plugin.build_segments(ctx)
+    # user 段使用 user_translate.md：含明确"translate ... into zh-CN"指令，
+    # 不能落到 user_default 的"提取并总结"指令
+    assert "Translate the source content" in seg.user
+    assert "总结" not in seg.user
+    # system 段追加 TASK MODE OVERRIDE：禁止总结/解释
+    assert "TASK MODE OVERRIDE" in seg.system
+    assert "Do NOT summarize" in seg.system
+
+
+def test_sq09_non_translate_mode_unchanged() -> None:
+    plugin = _screenshot_qa_plugin()
+    # requested_plugins 不含 translate → 不应注入 OVERRIDE，走原默认 user/with_input
+    ctx = PluginContext(
+        selection_type="image",
+        user_input="问个问题",
+        target_lang="zh-CN",
+        requested_plugins=["explain"],
+    )
+    seg = plugin.build_segments(ctx)
+    assert "TASK MODE OVERRIDE" not in seg.system
+    assert "问个问题" in seg.user

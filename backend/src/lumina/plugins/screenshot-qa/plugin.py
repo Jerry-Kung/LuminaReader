@@ -33,6 +33,21 @@ parse_full_response = _parser.parse_full_response
 
 
 class ScreenshotQaPlugin(Plugin):
+    # 与 translate plugin 的 system.md 对齐的核心指令，确保截图翻译与文字翻译两条路径
+    # 走到 LLM 的"翻译"语义一致（直译，无解释，无总结）。
+    _TRANSLATE_SYSTEM_OVERRIDE = (
+        "\n\n"
+        "TASK MODE OVERRIDE — TRANSLATION:\n"
+        "The user has selected the translation capability. Treat the screenshot strictly as a source-text container.\n"
+        "Inside <answer>: produce a high-quality direct translation of the text extracted in <ocr> into ${target_lang}.\n"
+        "Translate naturally in the target language, use context when available, avoid word-for-word literalism,\n"
+        "and preserve technical terms and proper nouns appropriately.\n"
+        "Output ONLY the translated text inside <answer> — no summaries, no explanations, no commentary,\n"
+        "no preface, no meta remarks about the screenshot. Do NOT summarize, paraphrase, or interpret.\n"
+        "If the user provided extra instruction in their input, treat it as a translation style hint only,\n"
+        "never as a request to switch to summarization or Q&A.\n"
+    )
+
     def __init__(
         self,
         manifest,
@@ -43,7 +58,13 @@ class ScreenshotQaPlugin(Plugin):
 
     def build_segments(self, ctx: PluginContext) -> PluginPromptSegments:
         system_tmpl = self._prompts["system"]
-        if ctx.user_input:
+        is_translate = "translate" in (ctx.requested_plugins or [])
+        if is_translate:
+            user_tmpl = self._prompts["user"].get(
+                "translate", self._prompts["user"]["with_input"]
+            )
+            system_tmpl = system_tmpl + self._TRANSLATE_SYSTEM_OVERRIDE
+        elif ctx.user_input:
             user_tmpl = self._prompts["user"]["with_input"]
         else:
             user_tmpl = self._prompts["user"]["default"]

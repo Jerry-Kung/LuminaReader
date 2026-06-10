@@ -11,6 +11,7 @@ from lumina.projects.manager import auto_create_project
 from lumina import settings_store
 from lumina.providers import get_provider, reset_provider
 from lumina.providers.base import (
+    ImagePart,
     LLMRequest,
     LLMResponse,
     LLMStreamEvent,
@@ -154,6 +155,50 @@ def follow_up_payload(session_id: str, **overrides: object) -> dict:
     }
     payload.update(overrides)
     return payload
+
+
+def text_selection_payload(
+    pdf_id: str,
+    *,
+    text: str = "Hello, world.",
+    page: int = 5,
+    page_end: int | None = None,
+    plugins: list[str] | None = None,
+    **overrides: object,
+) -> dict:
+    page_end = page_end if page_end is not None else page
+    payload = {
+        "task_type": "translate",
+        "pdf_id": pdf_id,
+        "selection": {
+            "type": "text",
+            "pdf_id": None,
+            "page": page,
+            "page_end": page_end,
+            "text": text,
+            "segments": [
+                {
+                    "page": page,
+                    "text": text,
+                    "offset_start": 0,
+                    "offset_end": len(text),
+                }
+            ],
+        },
+        "image": None,
+        "plugins": plugins if plugins is not None else ["translate"],
+        "options": {"target_lang": "zh-CN"},
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _request_has_image_part(req: LLMRequest) -> bool:
+    for msg in req.messages:
+        for part in msg.content:
+            if isinstance(part, ImagePart):
+                return True
+    return False
 
 
 def test_run_translate_success(run_client: TestClient) -> None:
@@ -958,3 +1003,232 @@ def test_v112_legacy_translate_coerced(run_client: TestClient) -> None:
     assert data["meta"]["plugins"] == ["screenshot-qa"]
     user_text = provider.all_requests[0].messages[-1].content[0].text
     assert "翻译这段" in user_text
+
+
+def test_text_first_turn_translate(run_client: TestClient) -> None:
+    provider = MockRunProvider(response_text="translated text")
+    run_client.app.dependency_overrides[get_provider] = lambda: provider
+    body = text_selection_payload(run_client.default_pdf_id, plugins=["translate"])
+    resp = run_client.post("/api/v1/run", json=body)
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["extracted_text"] == "Hello, world."
+    assert data["meta"]["task_type"] == "translate"
+    assert data["meta"]["plugins"] == ["translate"]
+    assert provider.invoke_count == 1
+    assert provider.last_request is not None
+    assert not _request_has_image_part(provider.last_request)
+
+
+def test_text_first_turn_explain(run_client: TestClient) -> None:
+    provider = MockRunProvider(response_text="explained")
+    run_client.app.dependency_overrides[get_provider] = lambda: provider
+    body = text_selection_payload(
+        run_client.default_pdf_id,
+        plugins=["explain"],
+        user_input="为什么",
+    )
+    resp = run_client.post("/api/v1/run", json=body)
+    assert resp.status_code == 200
+    assert resp.json()["data"]["meta"]["task_type"] == "explain"
+
+
+def test_text_first_turn_dictionary_legal(run_client: TestClient) -> None:
+    provider = MockRunProvider(response_text="dict")
+    run_client.app.dependency_overrides[get_provider] = lambda: provider
+    body = text_selection_payload(
+        run_client.default_pdf_id,
+        text="hello world",
+        plugins=["dictionary"],
+    )
+    resp = run_client.post("/api/v1/run", json=body)
+    assert resp.status_code == 200
+    assert resp.json()["data"]["meta"]["plugins"] == ["dictionary"]
+
+
+def test_text_first_turn_dictionary_overword(run_client: TestClient) -> None:
+    body = text_selection_payload(
+        run_client.default_pdf_id,
+        text="one two three four five six seven eight nine ten",
+        plugins=["dictionary"],
+    )
+    resp = run_client.post("/api/v1/run", json=body)
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "INVALID_REQUEST"
+
+
+def test_text_first_turn_chat(run_client: TestClient) -> None:
+    provider = MockRunProvider(response_text="chat reply")
+    run_client.app.dependency_overrides[get_provider] = lambda: provider
+    body = text_selection_payload(
+        run_client.default_pdf_id,
+        plugins=[],
+        user_input="hi",
+        task_type="chat",
+    )
+    resp = run_client.post("/api/v1/run", json=body)
+    assert resp.status_code == 200
+    assert resp.json()["data"]["meta"]["task_type"] == "chat"
+
+
+def test_text_first_turn_with_image_rejected(run_client: TestClient) -> None:
+    body = text_selection_payload(run_client.default_pdf_id)
+    body["image"] = {
+        "mime": "image/png",
+        "data": MINIMAL_PNG_B64,
+        "width": 1,
+        "height": 1,
+    }
+    resp = run_client.post("/api/v1/run", json=body)
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "INVALID_REQUEST"
+
+
+def test_text_first_turn_overlong_text(run_client: TestClient, monkeypatch) -> None:
+    get_settings.cache_clear()
+    monkeypatch.setenv("LUMINA_SELECTION_TEXT_MAX_CHARS", "5000")
+    get_settings.cache_clear()
+    run_client.app.dependency_overrides[get_settings] = lambda: Settings(
+        openai_api_key="test-key-not-real",
+        openai_base_url="https://api.openai.com/v1",
+        openai_model="gpt-4o",
+        selection_text_max_chars=5000,
+    )
+    body = text_selection_payload(run_client.default_pdf_id, text="a" * 5001)
+    resp = run_client.post("/api/v1/run", json=body)
+    assert resp.status_code == 413
+    assert resp.json()["error"]["code"] == "PAYLOAD_TOO_LARGE"
+    get_settings.cache_clear()
+
+
+def test_text_first_turn_extracted_text_in_response(run_client: TestClient) -> None:
+    provider = MockRunProvider(response_text="ok")
+    run_client.app.dependency_overrides[get_provider] = lambda: provider
+    text = "Sample paragraph."
+    body = text_selection_payload(run_client.default_pdf_id, text=text)
+    resp = run_client.post("/api/v1/run", json=body)
+    assert resp.json()["data"]["extracted_text"] == text
+
+
+def test_text_first_turn_selection_row_persisted(run_client: TestClient) -> None:
+    provider = MockRunProvider(response_text="ok")
+    run_client.app.dependency_overrides[get_provider] = lambda: provider
+    text = "Persist me."
+    body = text_selection_payload(run_client.default_pdf_id, text=text)
+    resp = run_client.post("/api/v1/run", json=body)
+    session_id = resp.json()["data"]["session_id"]
+    from lumina.db.engine import get_connection
+    from lumina.db.models import get_conversation, get_selection
+
+    session = asyncio.run(get_session_store().get(session_id))
+    assert session is not None
+    conn = get_connection(session.project_id)
+    conv = get_conversation(conn, session_id)
+    assert conv is not None
+    sel = get_selection(conn, conv.selection_id)
+    assert sel is not None
+    assert sel.type == "text"
+    assert sel.text == text
+    assert sel.x is None
+    assert sel.thumbnail_png is None
+
+
+def test_image_first_turn_default_type(run_client: TestClient) -> None:
+    resp = run_client.post("/api/v1/run", json=run_payload(run_client))
+    assert resp.status_code == 200
+    assert resp.json()["data"]["meta"]["task_type"] == "screenshot-qa"
+
+
+def test_image_first_turn_explicit_type_image_with_text_rejected(run_client: TestClient) -> None:
+    payload = run_payload(run_client)
+    payload["selection"]["type"] = "image"
+    payload["selection"]["text"] = "foo"
+    resp = run_client.post("/api/v1/run", json=payload)
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "INVALID_REQUEST"
+
+
+def test_text_followup_same_plugin(run_client: TestClient) -> None:
+    provider = MockRunProvider(response_text="answer")
+    run_client.app.dependency_overrides[get_provider] = lambda: provider
+    first = run_client.post(
+        "/api/v1/run",
+        json=text_selection_payload(run_client.default_pdf_id, plugins=["translate"]),
+    )
+    session_id = first.json()["data"]["session_id"]
+    session = asyncio.run(get_session_store().get(session_id))
+    assert session is not None
+    assert session.selection_type == "text"
+    assert session.extracted_text == "Hello, world."
+    second = run_client.post(
+        "/api/v1/run",
+        json=follow_up_payload(session_id, plugins=["translate"]),
+    )
+    assert second.status_code == 200
+
+
+def test_text_followup_cross_plugin(run_client: TestClient) -> None:
+    provider = MockRunProvider(response_text="answer")
+    run_client.app.dependency_overrides[get_provider] = lambda: provider
+    first = run_client.post(
+        "/api/v1/run",
+        json=text_selection_payload(run_client.default_pdf_id, plugins=["translate"]),
+    )
+    session_id = first.json()["data"]["session_id"]
+    second = run_client.post(
+        "/api/v1/run",
+        json=follow_up_payload(
+            session_id,
+            task_type="explain",
+            plugins=["explain"],
+            options={"target_lang": "zh-CN", "user_question": "再解释"},
+        ),
+    )
+    assert second.status_code == 200
+    assert second.json()["data"]["meta"]["plugins"] == ["explain"]
+
+
+def test_text_followup_no_ocr_error(run_client: TestClient) -> None:
+    provider = MockRunProvider(response_text="answer")
+    run_client.app.dependency_overrides[get_provider] = lambda: provider
+    first = run_client.post(
+        "/api/v1/run",
+        json=text_selection_payload(run_client.default_pdf_id, plugins=["translate"]),
+    )
+    session_id = first.json()["data"]["session_id"]
+    store = get_session_store()
+    session = asyncio.run(store.get(session_id))
+    assert session is not None
+    session.extracted_text = ""
+    async def _patch():
+        async with store._lock:
+            store._sessions[session_id] = session
+    asyncio.run(_patch())
+    resp = run_client.post(
+        "/api/v1/run",
+        json=follow_up_payload(session_id, plugins=["explain"]),
+    )
+    assert resp.status_code == 200
+
+
+def test_session_miss_load_recovers_selection_type_text(run_client: TestClient) -> None:
+    provider = MockRunProvider(response_text="answer")
+    run_client.app.dependency_overrides[get_provider] = lambda: provider
+    first = run_client.post(
+        "/api/v1/run",
+        json=text_selection_payload(run_client.default_pdf_id, plugins=["translate"]),
+    )
+    session_id = first.json()["data"]["session_id"]
+    store = get_session_store()
+    async def _evict():
+        async with store._lock:
+            store._sessions.pop(session_id, None)
+    asyncio.run(_evict())
+    second = run_client.post(
+        "/api/v1/run",
+        json=follow_up_payload(session_id, plugins=["translate"]),
+    )
+    assert second.status_code == 200
+    session = asyncio.run(store.get(session_id))
+    assert session is not None
+    assert session.selection_type == "text"

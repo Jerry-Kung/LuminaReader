@@ -99,7 +99,7 @@ def test_startup_upgrades_v103_projects_to_v104(data_root):
     for project_id in ("proj_alpha", "proj_beta"):
         conn = sqlite3.connect(project_sqlite_path(project_id))
         try:
-            assert read_schema_version(conn) == SCHEMA_VERSION == 3
+            assert read_schema_version(conn) == SCHEMA_VERSION
             cols = {row[1] for row in conn.execute("PRAGMA table_info(pdfs)").fetchall()}
             assert "last_read_page" in cols
             assert "last_read_offset" in cols

@@ -1,6 +1,7 @@
 from functools import lru_cache
 from urllib.parse import urlparse
 
+from pydantic import AliasChoices, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -9,6 +10,7 @@ class Settings(BaseSettings):
         env_file=".env",
         env_file_encoding="utf-8",
         case_sensitive=False,
+        populate_by_name=True,
     )
 
     openai_api_key: str = ""
@@ -28,6 +30,15 @@ class Settings(BaseSettings):
     lumina_sqlite_busy_timeout_ms: int = 5000
     lumina_pdf_max_size_mb: int = 100
     thinking_enabled: bool = False
+    selection_text_max_chars: int = Field(
+        default=32000,
+        ge=1000,
+        le=200_000,
+        validation_alias=AliasChoices(
+            "LUMINA_SELECTION_TEXT_MAX_CHARS",
+            "selection_text_max_chars",
+        ),
+    )
 
     @property
     def cors_origins_list(self) -> list[str]:

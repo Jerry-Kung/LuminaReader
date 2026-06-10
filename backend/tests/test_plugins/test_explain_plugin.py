@@ -100,3 +100,27 @@ def test_e09_image_field_ignored_by_build_segments() -> None:
         )
     )
     assert with_image == baseline
+
+
+def test_explain_text_path_qa_branch() -> None:
+    plugin = _explain_plugin()
+    segments = plugin.build_segments(
+        PluginContext(
+            selection_type="text",
+            selection_text="source",
+            user_input="为什么",
+        )
+    )
+    assert "为什么" in segments.user
+
+
+def test_explain_text_path_full_branch() -> None:
+    plugin = _explain_plugin()
+    segments = plugin.build_segments(
+        PluginContext(
+            selection_type="text",
+            selection_text="source",
+            user_input=None,
+        )
+    )
+    assert "source" in segments.user

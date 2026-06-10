@@ -97,3 +97,15 @@ def test_d11_image_field_ignored_by_build_segments() -> None:
         )
     )
     assert with_image == baseline
+
+
+def test_dictionary_text_path_applicable() -> None:
+    plugin = _dictionary_plugin()
+    ctx = PluginContext(selection_type="text", selection_word_count=2)
+    assert plugin.is_applicable(ctx) is True
+
+
+def test_dictionary_text_path_overword_rejected() -> None:
+    plugin = _dictionary_plugin()
+    ctx = PluginContext(selection_type="text", selection_word_count=10)
+    assert plugin.is_applicable(ctx) is False
