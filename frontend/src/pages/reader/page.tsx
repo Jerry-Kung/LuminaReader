@@ -661,6 +661,7 @@ export default function ReaderPage() {
 
       setIsAIWorking(true);
       setAiError(null);
+      setActiveTaskTypes([]);
 
       const cardId = nextMsgId();
       const loadingId = nextMsgId();

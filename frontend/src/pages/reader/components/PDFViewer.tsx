@@ -257,9 +257,22 @@ export default function PDFViewer({
     rafRef.current = window.requestAnimationFrame(computePosition);
   }, [computePosition]);
 
-  // pageMetas 变化（首次就绪 / scale 改变 / 容器宽度改变）→ 立即重算一次
+  // pageMetas 变化（首次就绪 / scale 改变 / 容器宽度改变，比如 AI 边栏 narrow/wide/overlay 切换）
+  // → 先按 lastReportedRef 把 scrollTop 恢复到原阅读位置（与反推算法对称），再重算 currentPage / visiblePages。
+  // 不区分 scale vs containerWidth：两条路径都会让坐标系整体重算，恢复逻辑相同。
   useEffect(() => {
-    if (pageMetas.length > 0) computePosition();
+    if (pageMetas.length === 0) return;
+    const el = containerRef.current;
+    const last = lastReportedRef.current;
+    if (el && last) {
+      const meta = pageMetas.find((m) => m.pageNum === last.page);
+      if (meta) {
+        const desiredCenter = meta.top + last.offset * meta.height;
+        const max = Math.max(0, el.scrollHeight - el.clientHeight);
+        el.scrollTop = Math.max(0, Math.min(max, desiredCenter - el.clientHeight / 2));
+      }
+    }
+    computePosition();
   }, [pageMetas, computePosition]);
 
   // ---- pendingScrollTarget 消费 ----
@@ -279,22 +292,6 @@ export default function PDFViewer({
     el.scrollTop = Math.max(0, Math.min(max, desiredCenter - el.clientHeight / 2));
     onScrollTargetConsumed();
   }, [pendingScrollTarget, pageMetas, onScrollTargetConsumed]);
-
-  // ---- scale 改变时保持视觉位置 ----
-  // pageMetas 已随 scale 变化重新计算；这里把 scrollTop 重设到"上次反推位置"对应的新坐标。
-  const prevScaleRef = useRef(scale);
-  useEffect(() => {
-    if (prevScaleRef.current === scale) return;
-    prevScaleRef.current = scale;
-    const el = containerRef.current;
-    const last = lastReportedRef.current;
-    if (!el || pageMetas.length === 0 || !last) return;
-    const meta = pageMetas.find((m) => m.pageNum === last.page);
-    if (!meta) return;
-    const desiredCenter = meta.top + last.offset * meta.height;
-    const max = Math.max(0, el.scrollHeight - el.clientHeight);
-    el.scrollTop = Math.max(0, Math.min(max, desiredCenter - el.clientHeight / 2));
-  }, [scale, pageMetas]);
 
   // ---- Ctrl+wheel 缩放（原生监听以确保 preventDefault 生效）----
   useEffect(() => {
