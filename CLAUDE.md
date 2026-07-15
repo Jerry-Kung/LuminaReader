@@ -14,7 +14,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - 涉及整体架构/核心数据结构/跨模块接口契约/前后端配合等重要变更行为的改动，请同步更新./claude_docs中的相关文档
 - 默认不进行全量文档阅读，仅阅读与当前任务直接相关的项目文档，默认不阅读历史版本归档文件
 - 如有必要更新CLAUDE.md与README.md等核心文档，遵守最小化更新原则，不得添加任务无关的冗余内容
-- 小规模的代码改动（更新范围不超过100行代码/3个文件，不涉及重要的前端UI/数据结构/API/架构改动）由你直接执行。中等规模及以上的设计与开发工作请转交给readdy.ai和Cursor（参考第5和第6节内容）
 
 ## 3. 核心文档
 
