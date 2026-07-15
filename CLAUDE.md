@@ -54,19 +54,3 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### 4.3 单仓库结构
 
 前后端代码在同一个 Git 仓库内，**目录树结构由 `claude_docs/project-structure.md` 定义**，不得自行偏离。
-
-## 5. 外部协作：readdy.ai（前端 UI 设计）
-
-- 涉及前端页面及 UI 的重要设计，一般交由 readdy.ai 执行；用户会在输入中明确要求时启用。
-- readdy.ai 交付物为前端工程代码（统一上传到 `reader-page` 分支），通过 git 方式合入主仓库。
-- 交付给 readdy.ai 的 Prompt 必须在 `./claude_docs/prompts/` 中归档。
-- **详细规则**：`./claude_docs/readdy-collaboration.md`（代码同步规则、Prompt 编写规范、长度上限等全部细节）。涉及 readdy.ai 工作前必读。
-
-## 6. 外部协作：Cursor（代码级开发）
-
-- 后端及其他代码级开发任务交由 Cursor 按文档执行；Claude Code 负责将需求拆解为 Task 文档。
-- 每个 Task 独立成目录，置于 `claude_docs/<版本>/tasks/`（如 `claude_docs/v0/tasks/`），Cursor 只读 `claude_docs/`。
-- 目录内含：`README.md`（Task 总纲：目标、范围、子任务索引、整体验收）、若干 `NN-*.md`子任务文档（目标/涉及文件/实现要点/交付边界/测试用例/验收标准）、一份 `prompt.md`（启动提示词）。
-- 每个 Task 尽量只交付一个独立功能点；版本过大时拆为多个顺序 Task，依赖关系在 `tasks/README.md` 标明。
-- 每个 Task 只配一份 `prompt.md`（不为子任务各配一份），用于指示 Cursor 先读文档再编码。
-- 新增/删除 Task 目录后，同步更新 `tasks/README.md` 的 Task 清单。

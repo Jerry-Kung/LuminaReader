@@ -264,9 +264,10 @@ export default function ReaderPage() {
   const [cursorMode, setCursorMode] = useState<CursorMode>('off');
   const isSelecting = cursorMode === 'screenshot';
   const [selectedArea, setSelectedArea] = useState<SelectedArea | null>(null);
-  // 扫描版（textLayer 全空）页号集合：用 ref 累积避免 setState 风暴；count 用 state 触发 Toolbar disable。
-  const scanPagesRef = useRef<Set<number>>(new Set());
-  const [scanPageCount, setScanPageCount] = useState(0);
+  // 无文本层（textLayer 全空）的页号集合。ISSUE-010：按页判定（D9/FE-6），
+  // 不再"任一页为空 → 整本判扫描版"（封面/整页图/空白分隔页会误伤正常 PDF）。
+  // 用 state 存整个 Set，使 isCurrentPageScanned 能随 currentPage / Set 变化重算。
+  const [scanPages, setScanPages] = useState<Set<number>>(new Set());
   // PDFViewer 滚动容器引用，给 useTextSelection 挂 mouseup
   const [pdfContainerEl, setPdfContainerEl] = useState<HTMLDivElement | null>(null);
   const pdfContainerRef = useRef<HTMLDivElement | null>(null);
@@ -469,8 +470,7 @@ export default function ReaderPage() {
         setAiResults([]);
         setAiError(null);
         setCursorMode('off');
-        scanPagesRef.current = new Set();
-        setScanPageCount(0);
+        setScanPages(new Set());
         setUserInput('');
       } else if (file) {
         loadPDF(file);
@@ -509,34 +509,38 @@ export default function ReaderPage() {
     enabled: cursorMode === 'text',
   });
 
-  // 扫描版上报：PDFPage textLayer 渲染完毕若 textContent 为空 → 上报 pageNum
-  // 用 ref 累积（避免每页一次 setState），同时通过 setScanPageCount 触发 Toolbar 重渲染
+  // 无文本层页上报：PDFPage textLayer 渲染完毕若 textContent 为空 → 记入 scanPages。
+  // 已在集合内则跳过 setState，避免重复渲染引发的状态风暴。
   const handleScanPageDetected = useCallback((pageNum: number) => {
-    const set = scanPagesRef.current;
-    if (set.has(pageNum)) return;
-    set.add(pageNum);
-    setScanPageCount(set.size);
+    setScanPages((prev) => {
+      if (prev.has(pageNum)) return prev;
+      const next = new Set(prev);
+      next.add(pageNum);
+      return next;
+    });
   }, []);
 
-  // 当扫描版被检测到时，若用户当前正处于 cursorMode='text'，回弹到 'off' 并弹 Toast
+  // ISSUE-010：仅当"当前所在页"无文本层时才判为不可选文字，而非整本禁用。
+  const isCurrentPageScanned = scanPages.has(currentPage);
+
+  // 当前页无文本层且用户正处于 cursorMode='text'，回弹到 'off' 并弹 Toast
   useEffect(() => {
-    if (scanPageCount > 0 && cursorMode === 'text') {
+    if (isCurrentPageScanned && cursorMode === 'text') {
       setCursorMode('off');
-      setReaderToast('本书为扫描版 PDF，无文本层，已退出文字选择模式。如需 AI 处理请使用「截图」。');
+      setReaderToast('当前页无文本层（可能为扫描页 / 整页图），已退出文字选择模式。如需 AI 处理请使用「截图」。');
       if (readerToastTimerRef.current) clearTimeout(readerToastTimerRef.current);
       readerToastTimerRef.current = setTimeout(() => setReaderToast(null), 5000);
     }
-  }, [scanPageCount, cursorMode]);
+  }, [isCurrentPageScanned, cursorMode]);
 
-  // PDF 切换时重置扫描页集合
+  // PDF 切换时重置无文本层页集合
   useEffect(() => {
-    scanPagesRef.current = new Set();
-    setScanPageCount(0);
+    setScanPages(new Set());
   }, [pdfId]);
 
-  // Toolbar 点击文字按钮但本书为扫描版时弹一次 Toast（不切 cursorMode）
+  // Toolbar 点击文字按钮但当前页无文本层时弹一次 Toast（不切 cursorMode）
   const handleTextModeBlockedByScan = useCallback(() => {
-    setReaderToast('本书为扫描版 PDF，无文本层，无法选择文字。如需 AI 处理请使用「截图」。');
+    setReaderToast('当前页无文本层（可能为扫描页 / 整页图），无法选择文字。如需 AI 处理请使用「截图」。');
     if (readerToastTimerRef.current) clearTimeout(readerToastTimerRef.current);
     readerToastTimerRef.current = setTimeout(() => setReaderToast(null), 5000);
   }, []);
@@ -1760,7 +1764,7 @@ export default function ReaderPage() {
         currentPage={currentPage}
         scale={scale}
         cursorMode={cursorMode}
-        scanPageCount={scanPageCount}
+        isCurrentPageScanned={isCurrentPageScanned}
         onOpenFile={handleOpenFile}
         onPrevPage={prevPage}
         onNextPage={nextPage}

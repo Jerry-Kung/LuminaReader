@@ -6,8 +6,8 @@ interface ToolbarProps {
   currentPage: number;
   scale: number;
   cursorMode: CursorMode;
-  /** 扫描版 PDF 检测到的页集合 size。>0 时 text 模式按钮 disabled 并提示 Toast。 */
-  scanPageCount: number;
+  /** 当前页无文本层（扫描页 / 整页图）时为 true：text 模式按钮 disabled 并提示 Toast。ISSUE-010：按页判定，非整本。 */
+  isCurrentPageScanned: boolean;
   onOpenFile: () => void;
   onPrevPage: () => void;
   onNextPage: () => void;
@@ -25,7 +25,7 @@ export default function Toolbar({
   currentPage,
   scale,
   cursorMode,
-  scanPageCount,
+  isCurrentPageScanned,
   onOpenFile,
   onPrevPage,
   onNextPage,
@@ -45,7 +45,7 @@ export default function Toolbar({
     }
   };
 
-  const isScanBook = scanPageCount > 0;
+  const isScanBook = isCurrentPageScanned;
   const isText = cursorMode === 'text';
   const isShot = cursorMode === 'screenshot';
 
@@ -92,7 +92,7 @@ export default function Toolbar({
               }`}
               title={
                 isScanBook
-                  ? '本书为扫描版，无法选择文字'
+                  ? '当前页无文本层，无法选择文字'
                   : isText
                     ? '退出文字选择（Esc）'
                     : '选择文字'
