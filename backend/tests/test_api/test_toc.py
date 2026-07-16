@@ -5,7 +5,7 @@ import json
 from lumina.pdftext.service import run_extraction_sync
 from lumina.projects.manager import auto_create_project
 from lumina.providers import get_provider
-from lumina.providers.base import LLMRequest, LLMResponse, Provider
+from lumina.providers.base import LLMRequest, LLMResponse, Provider, ProviderUpstreamError
 
 from tests.test_pdftext.pdf_fixtures import make_outline_pdf, make_text_pdf
 
@@ -110,3 +110,18 @@ def test_recognize_llm_409_when_text_unavailable(client, data_root):
     resp = client.post(f"/api/v1/pdfs/{created.pdf_id}/toc/recognize-llm")
     assert resp.status_code == 409
     assert resp.json()["error"]["code"] == "TOC_LLM_UNAVAILABLE"
+
+
+class FailingProvider(CannedProvider):
+    async def invoke(self, req):
+        raise ProviderUpstreamError("upstream 500")
+
+
+def test_recognize_llm_provider_error_502(client, data_root):
+    created = auto_create_project(make_text_pdf(PLAIN_PAGES), "boom.pdf")
+    run_extraction_sync(created.project_id, created.pdf_id)
+    client.get(f"/api/v1/pdfs/{created.pdf_id}/toc")
+    client.app.dependency_overrides[get_provider] = lambda: FailingProvider("")
+    resp = client.post(f"/api/v1/pdfs/{created.pdf_id}/toc/recognize-llm")
+    assert resp.status_code == 502
+    assert resp.json()["error"]["code"] == "TOC_LLM_FAILED"
