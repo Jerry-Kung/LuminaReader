@@ -38,6 +38,34 @@ def test_t04_empty_user_input_no_literal_placeholder() -> None:
     assert "${user_input}" not in segments.user
 
 
+def test_t09_no_user_input_selects_plain_template() -> None:
+    plugin = _translate_plugin()
+    segments = plugin.build_segments(
+        PluginContext(selection_text="Hello", user_input=None)
+    )
+    assert "Output only the translation" in segments.user
+    assert "Additional request" not in segments.user
+
+
+def test_t10_user_input_selects_with_input_template() -> None:
+    plugin = _translate_plugin()
+    segments = plugin.build_segments(
+        PluginContext(selection_text="Hello", user_input="explain the term")
+    )
+    assert "address the user's" in segments.user
+    assert "explain the term" in segments.user
+    assert "Hello" in segments.user
+
+
+def test_t11_empty_string_user_input_selects_plain_template() -> None:
+    plugin = _translate_plugin()
+    segments = plugin.build_segments(
+        PluginContext(selection_text="Hello", user_input="")
+    )
+    assert "Output only the translation" in segments.user
+    assert "Additional request" not in segments.user
+
+
 def test_t05_system_contains_professional_translator() -> None:
     plugin = _translate_plugin()
     segments = plugin.build_segments(PluginContext())

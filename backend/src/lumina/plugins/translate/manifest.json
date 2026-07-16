@@ -6,6 +6,9 @@
   "thinking_default": false,
   "prompt_files": {
     "system": "prompts/system.md",
-    "user": "prompts/user.md"
+    "user": {
+      "plain": "prompts/user_plain.md",
+      "with_input": "prompts/user_with_input.md"
+    }
   }
 }
