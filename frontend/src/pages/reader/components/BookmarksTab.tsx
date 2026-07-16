@@ -89,10 +89,13 @@ function BookmarkRow({ bookmark, editing, onEditingDone, onRename, onRemove, onJ
   const [localEditing, setLocalEditing] = useState(false);
   const [draft, setDraft] = useState(bookmark.name);
   const inputRef = useRef<HTMLInputElement>(null);
+  // Enter/Escape 已处理本轮编辑后置位，拦截输入框卸载触发的 blur 重复提交
+  const handledRef = useRef(false);
   const isEditing = editing || localEditing;
 
   useEffect(() => {
     if (isEditing) {
+      handledRef.current = false;
       setDraft(bookmark.name);
       // 渲染后聚焦全选，直接输入即覆盖默认名"第 N 页"
       requestAnimationFrame(() => inputRef.current?.select());
@@ -100,6 +103,8 @@ function BookmarkRow({ bookmark, editing, onEditingDone, onRename, onRemove, onJ
   }, [isEditing, bookmark.name]);
 
   const commit = async () => {
+    if (handledRef.current) return;
+    handledRef.current = true;
     const name = draft.trim();
     setLocalEditing(false);
     onEditingDone();
@@ -112,6 +117,13 @@ function BookmarkRow({ bookmark, editing, onEditingDone, onRename, onRemove, onJ
     }
   };
 
+  const cancel = () => {
+    handledRef.current = true;
+    setDraft(bookmark.name);
+    setLocalEditing(false);
+    onEditingDone();
+  };
+
   if (isEditing) {
     return (
       <div className="px-2 py-1.5 rounded-md bg-white border border-amber-300">
@@ -122,11 +134,7 @@ function BookmarkRow({ bookmark, editing, onEditingDone, onRename, onRemove, onJ
           onBlur={() => void commit()}
           onKeyDown={(e) => {
             if (e.key === 'Enter') void commit();
-            if (e.key === 'Escape') {
-              setDraft(bookmark.name);
-              setLocalEditing(false);
-              onEditingDone();
-            }
+            if (e.key === 'Escape') cancel();
           }}
           className="w-full text-[12px] text-stone-700 bg-transparent focus:outline-none"
         />
