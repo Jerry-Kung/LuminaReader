@@ -137,6 +137,16 @@ class ReadingPositionUpdate(BaseModel):
     last_read_offset: float = Field(0.0, ge=0.0, le=1.0)
 
 
+class BookmarkCreate(BaseModel):
+    name: str | None = Field(None, max_length=200)
+    page: int = Field(..., ge=1)
+    offset_ratio: float = Field(0.0, ge=0.0, le=1.0)
+
+
+class BookmarkRename(BaseModel):
+    name: str = Field(..., min_length=1, max_length=200)
+
+
 class LibraryListData(BaseModel):
     items: list[LibraryItem]
 

@@ -1,11 +1,22 @@
 import logging
+import time as _time
+
+from ulid import ULID
 
 from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 
 from lumina.config import get_settings
 from lumina.db.engine import get_connection
-from lumina.db.models import update_pdf_reading_position
+from lumina.db.models import (
+    BookmarkRow,
+    delete_bookmark,
+    get_pdf_text_meta,
+    insert_bookmark,
+    list_bookmarks,
+    rename_bookmark,
+    update_pdf_reading_position,
+)
 from lumina.logging import get_logger, log_with_fields
 from lumina.projects.catalog import find_by_pdf_id
 from lumina.projects.manager import (
@@ -19,7 +30,14 @@ from lumina.pdftext import read_status, schedule_extraction, wait_for_pdf
 from lumina.providers import get_provider
 from lumina.providers.base import Provider, ProviderError
 from lumina.request_id import generate_request_id
-from lumina.schemas.api import PdfUploadData, ReadingPositionUpdate, error_response, ok_response
+from lumina.schemas.api import (
+    BookmarkCreate,
+    BookmarkRename,
+    PdfUploadData,
+    ReadingPositionUpdate,
+    error_response,
+    ok_response,
+)
 from lumina.sessions import get_session_store
 from lumina.toc import (
     TocResult,
@@ -601,3 +619,109 @@ async def recognize_toc_llm(pdf_id: str, provider: Provider = Depends(get_provid
         )
     _log_pdf_call(request_id=request_id, http_status=200, pdf_id=pdf_id, project_id=entry.id)
     return ok_response(_toc_payload(pdf_id, result))
+
+
+# ---------------------------------------------------------------------------
+# V1.2.2: 书签端点
+# ---------------------------------------------------------------------------
+
+
+def _bookmark_payload(row: BookmarkRow) -> dict:
+    return {
+        "id": row.id,
+        "name": row.name,
+        "page": row.page,
+        "offset_ratio": row.offset_ratio,
+        "created_at": row.created_at,
+    }
+
+
+@router.get("/{pdf_id}/bookmarks")
+async def get_bookmarks(pdf_id: str):
+    request_id = generate_request_id()
+    entry = find_by_pdf_id(pdf_id)
+    if entry is None:
+        return _pdf_not_found(request_id, pdf_id)
+    conn = get_connection(entry.id)
+    rows = list_bookmarks(conn, pdf_id)
+    _log_pdf_call(request_id=request_id, http_status=200, pdf_id=pdf_id, project_id=entry.id)
+    return ok_response({"bookmarks": [_bookmark_payload(r) for r in rows]})
+
+
+@router.post("/{pdf_id}/bookmarks", status_code=201)
+async def create_bookmark(pdf_id: str, payload: BookmarkCreate):
+    request_id = generate_request_id()
+    entry = find_by_pdf_id(pdf_id)
+    if entry is None:
+        return _pdf_not_found(request_id, pdf_id)
+    conn = get_connection(entry.id)
+    # 页码上界仅在全书文本已提取（page_count 可知）时校验；下界由 pydantic ge=1 保证
+    text_meta = get_pdf_text_meta(conn, pdf_id)
+    if text_meta is not None and text_meta.page_count and payload.page > text_meta.page_count:
+        _log_pdf_call(
+            request_id=request_id,
+            http_status=422,
+            error_code="BOOKMARK_PAGE_OUT_OF_RANGE",
+            pdf_id=pdf_id,
+            project_id=entry.id,
+        )
+        return JSONResponse(
+            status_code=422,
+            content=error_response(
+                code="BOOKMARK_PAGE_OUT_OF_RANGE",
+                message=f"页码超出范围（全书共 {text_meta.page_count} 页）。",
+                request_id=request_id,
+            ),
+        )
+    row = BookmarkRow(
+        id=f"bm_{ULID()}",
+        pdf_id=pdf_id,
+        name=(payload.name or "").strip() or f"第 {payload.page} 页",
+        page=payload.page,
+        offset_ratio=payload.offset_ratio,
+        created_at=int(_time.time()),
+    )
+    insert_bookmark(conn, row)
+    _log_pdf_call(request_id=request_id, http_status=201, pdf_id=pdf_id, project_id=entry.id)
+    return JSONResponse(status_code=201, content=ok_response(_bookmark_payload(row)))
+
+
+@router.patch("/{pdf_id}/bookmarks/{bookmark_id}")
+async def patch_bookmark(pdf_id: str, bookmark_id: str, payload: BookmarkRename):
+    request_id = generate_request_id()
+    entry = find_by_pdf_id(pdf_id)
+    if entry is None:
+        return _pdf_not_found(request_id, pdf_id)
+    conn = get_connection(entry.id)
+    updated = rename_bookmark(conn, pdf_id, bookmark_id, payload.name.strip())
+    if updated == 0:
+        _log_pdf_call(
+            request_id=request_id,
+            http_status=404,
+            error_code="BOOKMARK_NOT_FOUND",
+            pdf_id=pdf_id,
+            project_id=entry.id,
+        )
+        return JSONResponse(
+            status_code=404,
+            content=error_response(
+                code="BOOKMARK_NOT_FOUND",
+                message="Bookmark not found.",
+                request_id=request_id,
+            ),
+        )
+    _log_pdf_call(request_id=request_id, http_status=200, pdf_id=pdf_id, project_id=entry.id)
+    return ok_response({"id": bookmark_id, "name": payload.name.strip()})
+
+
+@router.delete("/{pdf_id}/bookmarks/{bookmark_id}", status_code=204)
+async def remove_bookmark(pdf_id: str, bookmark_id: str):
+    request_id = generate_request_id()
+    entry = find_by_pdf_id(pdf_id)
+    if entry is None:
+        return _pdf_not_found(request_id, pdf_id)
+    conn = get_connection(entry.id)
+    delete_bookmark(conn, pdf_id, bookmark_id)  # 重复删除幂等：rowcount=0 也返回 204
+    _log_pdf_call(request_id=request_id, http_status=204, pdf_id=pdf_id, project_id=entry.id)
+    return Response(status_code=204)
+
