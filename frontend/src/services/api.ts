@@ -964,6 +964,190 @@ export async function triggerTextExtraction(pdfId: string): Promise<void> {
   );
 }
 
+// V1.2.2：目录（GET/POST /api/v1/pdfs/{id}/toc*）与书签（/bookmarks*）
+
+export type TocStatus = 'none' | 'ready' | 'failed';
+export type TocSource = 'outline' | 'heuristic' | 'llm';
+
+export interface TocChapter {
+  id: string;
+  title: string;
+  page: number;
+  depth: number;
+  parent_id: string | null;
+  order_index: number;
+}
+
+export interface TocInfo {
+  pdf_id: string;
+  status: TocStatus;
+  source: TocSource | null;
+  chapters: TocChapter[];
+  llm_available: boolean;
+  text_status: TextExtractionStatus;
+  error: string | null;
+}
+
+export interface TocLlmEstimate {
+  model: string;
+  estimated_input_tokens: number;
+  estimated_cost: number | null;
+  currency: string;
+}
+
+export interface BookmarkItem {
+  id: string;
+  name: string;
+  page: number;
+  offset_ratio: number;
+  created_at: number;
+}
+
+const EMPTY_TOC = (pdfId: string): TocInfo => ({
+  pdf_id: pdfId,
+  status: 'none',
+  source: null,
+  chapters: [],
+  llm_available: false,
+  text_status: 'none',
+  error: null,
+});
+
+async function fetchToc(url: string, method: 'GET' | 'POST'): Promise<TocInfo> {
+  let response: Response;
+  try {
+    response = await fetch(url, { method });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to reach backend.';
+    throw new TranslateApiError('NETWORK_ERROR', msg);
+  }
+  return parseEnvelope<TocInfo>(response);
+}
+
+export async function getToc(pdfId: string): Promise<TocInfo> {
+  if (!API_BASE) return EMPTY_TOC(pdfId);
+  return fetchToc(`${API_BASE}/api/v1/pdfs/${encodeURIComponent(pdfId)}/toc`, 'GET');
+}
+
+export async function recognizeToc(pdfId: string): Promise<TocInfo> {
+  if (!API_BASE) return EMPTY_TOC(pdfId);
+  return fetchToc(
+    `${API_BASE}/api/v1/pdfs/${encodeURIComponent(pdfId)}/toc/recognize`,
+    'POST',
+  );
+}
+
+export async function getTocLlmEstimate(pdfId: string): Promise<TocLlmEstimate> {
+  if (!API_BASE) {
+    return { model: 'mock', estimated_input_tokens: 0, estimated_cost: null, currency: 'USD' };
+  }
+  const url = `${API_BASE}/api/v1/pdfs/${encodeURIComponent(pdfId)}/toc/llm-estimate`;
+  let response: Response;
+  try {
+    response = await fetch(url);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to reach backend.';
+    throw new TranslateApiError('NETWORK_ERROR', msg);
+  }
+  return parseEnvelope<TocLlmEstimate>(response);
+}
+
+export async function recognizeTocWithLlm(pdfId: string): Promise<TocInfo> {
+  if (!API_BASE) return EMPTY_TOC(pdfId);
+  return fetchToc(
+    `${API_BASE}/api/v1/pdfs/${encodeURIComponent(pdfId)}/toc/recognize-llm`,
+    'POST',
+  );
+}
+
+export async function listBookmarks(pdfId: string): Promise<BookmarkItem[]> {
+  if (!API_BASE) return [];
+  const url = `${API_BASE}/api/v1/pdfs/${encodeURIComponent(pdfId)}/bookmarks`;
+  let response: Response;
+  try {
+    response = await fetch(url);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to reach backend.';
+    throw new TranslateApiError('NETWORK_ERROR', msg);
+  }
+  const data = await parseEnvelope<{ bookmarks: BookmarkItem[] }>(response);
+  return data.bookmarks;
+}
+
+export async function createBookmark(
+  pdfId: string,
+  input: { name?: string; page: number; offset_ratio?: number },
+): Promise<BookmarkItem> {
+  if (!API_BASE) {
+    return {
+      id: `bm_mock_${Date.now()}`,
+      name: input.name || `第 ${input.page} 页`,
+      page: input.page,
+      offset_ratio: input.offset_ratio ?? 0,
+      created_at: Math.floor(Date.now() / 1000),
+    };
+  }
+  const url = `${API_BASE}/api/v1/pdfs/${encodeURIComponent(pdfId)}/bookmarks`;
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to reach backend.';
+    throw new TranslateApiError('NETWORK_ERROR', msg);
+  }
+  return parseEnvelope<BookmarkItem>(response);
+}
+
+export async function renameBookmark(
+  pdfId: string,
+  bookmarkId: string,
+  name: string,
+): Promise<void> {
+  if (!API_BASE) return;
+  const url = `${API_BASE}/api/v1/pdfs/${encodeURIComponent(pdfId)}/bookmarks/${encodeURIComponent(bookmarkId)}`;
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name }),
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to reach backend.';
+    throw new TranslateApiError('NETWORK_ERROR', msg);
+  }
+  await parseEnvelope<{ id: string; name: string }>(response);
+}
+
+export async function deleteBookmark(pdfId: string, bookmarkId: string): Promise<void> {
+  if (!API_BASE) return;
+  const url = `${API_BASE}/api/v1/pdfs/${encodeURIComponent(pdfId)}/bookmarks/${encodeURIComponent(bookmarkId)}`;
+  let response: Response;
+  try {
+    response = await fetch(url, { method: 'DELETE' });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to reach backend.';
+    throw new TranslateApiError('NETWORK_ERROR', msg);
+  }
+  if (response.status === 204) return;
+  let envelope: ErrorEnvelope | null = null;
+  try {
+    envelope = await response.json();
+  } catch {
+    envelope = null;
+  }
+  throw new TranslateApiError(
+    envelope?.error?.code || 'INTERNAL_ERROR',
+    envelope?.error?.message || `Failed to delete bookmark (HTTP ${response.status}).`,
+    envelope?.error?.request_id,
+    response.status,
+  );
+}
+
 export async function listConversations(pdfId: string): Promise<ConversationSummary[]> {
   if (!API_BASE) return [];
   const url = `${API_BASE}/api/v1/pdfs/${encodeURIComponent(pdfId)}/conversations`;
