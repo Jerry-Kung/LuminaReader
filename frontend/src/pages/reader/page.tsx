@@ -25,7 +25,9 @@ import Toolbar, { type CursorMode } from './components/Toolbar';
 import PDFViewer, { type SelectedArea } from './components/PDFViewer';
 import AIAssistantPanel, { type ChipPluginType, type ChipsState } from './components/AIAssistantPanel';
 import ThumbnailPanel from './components/ThumbnailPanel';
+import TextExtractionBanner from './components/TextExtractionBanner';
 import { useTextSelection } from './hooks/useTextSelection';
+import { useTextExtraction } from '@/hooks/useTextExtraction';
 
 type RetryPayload =
   | {
@@ -332,6 +334,9 @@ export default function ReaderPage() {
   }, []);
 
   usePdfReadingPosition(pdfId, currentPage, currentOffset, restoreAppliedForPdfId === pdfId);
+
+  // V1.2.1：全书文本提取状态（状态条 + 补提取入口）
+  const textExtraction = useTextExtraction(pdfId);
 
   // Load PDF bytes from backend when pdfId changes.
   useEffect(() => {
@@ -1775,6 +1780,14 @@ export default function ReaderPage() {
         onTextModeBlockedByScan={handleTextModeBlockedByScan}
         onOpenSettings={() => navigate('/settings', { state: { from: `/reader/${pdfId}` } })}
       />
+
+      {pdfId && (
+        <TextExtractionBanner
+          pdfId={pdfId}
+          status={textExtraction.status}
+          onTrigger={textExtraction.trigger}
+        />
+      )}
 
       <div className="flex-1 flex overflow-hidden relative">
         <ThumbnailPanel

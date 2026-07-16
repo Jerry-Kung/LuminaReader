@@ -42,19 +42,20 @@ def _seed_v1_project_meta(conn) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_schema_version_constant_is_4():
-    assert SCHEMA_VERSION == 4
+def test_schema_version_constant_is_5():
+    assert SCHEMA_VERSION == 5
 
 
-def test_registry_contains_001_through_004_in_order():
+def test_registry_contains_001_through_005_in_order():
     migrations = registered_migrations()
     versions = [m.target_version for m in migrations]
     filenames = [m.filename for m in migrations]
-    assert versions == [1, 2, 3, 4]
+    assert versions == [1, 2, 3, 4, 5]
     assert filenames[0] == "001_initial.py"
     assert filenames[1] == "002_add_pdf_last_read_page.py"
     assert filenames[2] == "003_add_pdf_last_read_offset.py"
     assert filenames[3] == "004_selection_text_columns.py"
+    assert filenames[4] == "005_pdf_text_tables.py"
 
 
 # ---------------------------------------------------------------------------
@@ -169,8 +170,8 @@ def test_apply_pending_upgrades_v103_db_to_current(conn):
 
     new_version = apply_pending(conn)
 
-    assert new_version == SCHEMA_VERSION == 4
-    assert read_schema_version(conn) == 4
+    assert new_version == SCHEMA_VERSION == 5
+    assert read_schema_version(conn) == 5
     cols_after = {row[1] for row in conn.execute("PRAGMA table_info(pdfs)").fetchall()}
     assert "last_read_page" in cols_after
     assert "last_read_offset" in cols_after
@@ -462,7 +463,7 @@ def test_migration_004_from_v3_preserves_image_rows(conn):
     ]
     _seed_v3_db(conn, rows)
     apply_pending(conn)
-    assert read_schema_version(conn) == 4
+    assert read_schema_version(conn) == 5
     upgraded = conn.execute(
         """
         SELECT id, pdf_id, page, x, y, w, h, dpi, thumbnail_png, created_at,
@@ -537,12 +538,12 @@ def test_migration_004_preserves_conversation_fk(conn):
 def test_migration_004_empty_selections_table(conn):
     _seed_v3_db(conn)
     apply_pending(conn)
-    assert read_schema_version(conn) == 4
+    assert read_schema_version(conn) == 5
     assert conn.execute("SELECT COUNT(*) FROM selections").fetchone()[0] == 0
     assert len(conn.execute("PRAGMA table_info(selections)").fetchall()) == 14
 
 
-def test_apply_pending_runs_only_004_when_at_v3(monkeypatch, conn):
+def test_apply_pending_runs_004_and_005_when_at_v3(monkeypatch, conn):
     _seed_v3_db(conn)
     from lumina.db import migrations as mig
 
@@ -570,7 +571,7 @@ def test_apply_pending_runs_only_004_when_at_v3(monkeypatch, conn):
     monkeypatch.setattr(mig, "_REGISTRY", patched)
     try:
         apply_pending(conn)
-        assert calls == [4]
+        assert calls == [4, 5]
     finally:
         monkeypatch.setattr(mig, "_REGISTRY", original)
 

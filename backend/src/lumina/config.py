@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     lumina_sqlite_busy_timeout_ms: int = 5000
     lumina_pdf_max_size_mb: int = 100
     thinking_enabled: bool = False
+    # V1.2.1：跨页自动上下文（env 仅作 settings.json 缺省时的回退与调参）
+    context_expansion_enabled: bool = True
+    lumina_context_window_pages: int = Field(default=2, ge=0, le=10)
+    lumina_context_max_chars: int = Field(default=16000, ge=1000, le=100_000)
     selection_text_max_chars: int = Field(
         default=32000,
         ge=1000,

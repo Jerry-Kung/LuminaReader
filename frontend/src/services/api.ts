@@ -902,6 +902,68 @@ export async function updateReadingPosition(
   );
 }
 
+// V1.2.1：全书文本提取状态 / 手动触发（GET / POST /api/v1/pdfs/{id}/text-extraction）
+
+export type TextExtractionStatus = 'none' | 'pending' | 'ok' | 'unsupported' | 'failed';
+
+export interface TextExtractionInfo {
+  pdf_id: string;
+  status: TextExtractionStatus;
+  page_count: number | null;
+  textual_page_count: number | null;
+  char_count: number | null;
+  extracted_at: number | null;
+  error: string | null;
+}
+
+export async function getTextExtraction(pdfId: string): Promise<TextExtractionInfo> {
+  if (!API_BASE) {
+    return {
+      pdf_id: pdfId,
+      status: 'ok',
+      page_count: null,
+      textual_page_count: null,
+      char_count: null,
+      extracted_at: null,
+      error: null,
+    };
+  }
+  const url = `${API_BASE}/api/v1/pdfs/${encodeURIComponent(pdfId)}/text-extraction`;
+  let response: Response;
+  try {
+    response = await fetch(url);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to reach backend.';
+    throw new TranslateApiError('NETWORK_ERROR', msg);
+  }
+  return parseEnvelope<TextExtractionInfo>(response);
+}
+
+export async function triggerTextExtraction(pdfId: string): Promise<void> {
+  if (!API_BASE) return;
+  const url = `${API_BASE}/api/v1/pdfs/${encodeURIComponent(pdfId)}/text-extraction`;
+  let response: Response;
+  try {
+    response = await fetch(url, { method: 'POST' });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to reach backend.';
+    throw new TranslateApiError('NETWORK_ERROR', msg);
+  }
+  if (response.status === 202) return;
+  let envelope: ErrorEnvelope | null = null;
+  try {
+    envelope = await response.json();
+  } catch {
+    envelope = null;
+  }
+  throw new TranslateApiError(
+    envelope?.error?.code || 'INTERNAL_ERROR',
+    envelope?.error?.message || `Failed to trigger text extraction (HTTP ${response.status}).`,
+    envelope?.error?.request_id,
+    response.status,
+  );
+}
+
 export async function listConversations(pdfId: string): Promise<ConversationSummary[]> {
   if (!API_BASE) return [];
   const url = `${API_BASE}/api/v1/pdfs/${encodeURIComponent(pdfId)}/conversations`;
@@ -954,10 +1016,16 @@ export interface SettingsThinking {
   enabled: boolean;
 }
 
+// V1.2.1：跨页自动上下文开关
+export interface SettingsContextExpansion {
+  enabled: boolean;
+}
+
 export interface SettingsSource {
   provider: SettingsProvider;
   task_models: SettingsTaskModels;
   thinking: SettingsThinking;
+  context_expansion: SettingsContextExpansion;
   source: 'user_data' | 'env_fallback';
   writable: boolean;
   provider_ready: boolean;
@@ -979,6 +1047,7 @@ export interface SettingsUpdateInput {
   timeout_seconds: number;
   task_models: SettingsTaskModels;
   thinking: SettingsThinking;
+  context_expansion: SettingsContextExpansion;
   api_key: ApiKeyIntent;
 }
 
@@ -1001,6 +1070,7 @@ export async function getSettings(): Promise<SettingsSource> {
       },
       task_models: { extract: null, translate: null, explain: null },
       thinking: { enabled: false },
+      context_expansion: { enabled: true },
       source: 'env_fallback',
       writable: false,
       provider_ready: false,
@@ -1040,6 +1110,9 @@ export async function saveSettings(input: SettingsUpdateInput): Promise<SaveSett
     thinking: {
       enabled: input.thinking.enabled,
     },
+    context_expansion: {
+      enabled: input.context_expansion.enabled,
+    },
   };
 
   if (!API_BASE) {
@@ -1076,6 +1149,7 @@ export async function saveSettings(input: SettingsUpdateInput): Promise<SaveSett
         },
         task_models: input.task_models,
         thinking: input.thinking,
+        context_expansion: input.context_expansion,
         source: 'user_data',
         writable: true,
         provider_ready: input.api_key.kind === 'replace',

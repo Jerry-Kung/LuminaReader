@@ -26,6 +26,7 @@ interface FormState {
   translate_model: string;
   explain_model: string;
   thinking_enabled: boolean;
+  context_expansion_enabled: boolean;
 }
 
 interface FormErrors {
@@ -78,6 +79,7 @@ export default function SettingsPage() {
     translate_model: '',
     explain_model: '',
     thinking_enabled: false,
+    context_expansion_enabled: true,
   });
   const [errors, setErrors] = useState<FormErrors>({
     base_url: null,
@@ -110,6 +112,7 @@ export default function SettingsPage() {
         translate_model: data.task_models.translate ?? '',
         explain_model: data.task_models.explain ?? '',
         thinking_enabled: data.thinking?.enabled ?? false,
+        context_expansion_enabled: data.context_expansion?.enabled ?? true,
       });
       if (data.source === 'env_fallback') {
         setShowEnvHint(true);
@@ -139,7 +142,9 @@ export default function SettingsPage() {
       form.extract_model !== (originalSettings.task_models.extract ?? '') ||
       form.translate_model !== (originalSettings.task_models.translate ?? '') ||
       form.explain_model !== (originalSettings.task_models.explain ?? '') ||
-      form.thinking_enabled !== (originalSettings.thinking?.enabled ?? false);
+      form.thinking_enabled !== (originalSettings.thinking?.enabled ?? false) ||
+      form.context_expansion_enabled !==
+        (originalSettings.context_expansion?.enabled ?? true);
     setHasChanges(keyChanged || otherChanged);
   }, [form, originalSettings]);
 
@@ -220,6 +225,9 @@ export default function SettingsPage() {
       },
       thinking: {
         enabled: form.thinking_enabled,
+      },
+      context_expansion: {
+        enabled: form.context_expansion_enabled,
       },
       api_key: intent,
     };
@@ -433,6 +441,22 @@ export default function SettingsPage() {
             </SettingsSection>
 
             <SettingsSection title="高级">
+              <label className="flex items-start gap-3 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={form.context_expansion_enabled}
+                  onChange={(e) => updateField('context_expansion_enabled', e.target.checked)}
+                  className="mt-0.5 w-4 h-4 rounded border-stone-300 text-amber-600 focus:ring-amber-500 cursor-pointer"
+                />
+                <div className="flex-1">
+                  <div className="text-sm font-medium text-stone-700">
+                    跨页自动上下文
+                  </div>
+                  <p className="text-xs text-stone-400 mt-1">
+                    选中内容提问时，自动附带选区前后几页的书内原文作为参考上下文，让 AI 理解跨页语境（需要该书已完成全书文本提取）。会小幅增加每次提问的 token 消耗。
+                  </p>
+                </div>
+              </label>
               <label className="flex items-start gap-3 cursor-pointer">
                 <input
                   type="checkbox"

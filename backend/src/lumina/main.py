@@ -14,6 +14,7 @@ from lumina.config import Settings, get_settings
 from lumina.db.engine import close_all
 from lumina.db.startup import apply_pending_for_all_projects
 from lumina.logging import get_logger, log_with_fields, setup_logging
+from lumina.pdftext import wait_for_inflight
 from lumina.projects.catalog import load_catalog
 from lumina.projects.paths import resolve_data_root
 from lumina import settings_store
@@ -150,6 +151,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             try:
                 await cleanup_task
             except (asyncio.CancelledError, Exception):
+                pass
+            # V1.2.1：等待进行中的全书文本提取收尾，再关数据库连接
+            try:
+                await wait_for_inflight()
+            except Exception:
                 pass
             close_all()
             reset_session_store()

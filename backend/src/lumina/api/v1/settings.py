@@ -5,7 +5,12 @@ from fastapi.responses import JSONResponse
 
 from lumina import settings_store
 from lumina.request_id import generate_request_id
-from lumina.schemas.api import SettingsProviderOut, SettingsResponse, ThinkingSettingsOut
+from lumina.schemas.api import (
+    ContextExpansionSettingsOut,
+    SettingsProviderOut,
+    SettingsResponse,
+    ThinkingSettingsOut,
+)
 
 router = APIRouter(tags=["settings"])
 
@@ -21,6 +26,9 @@ def _build_settings_response(current: settings_store.ResolvedSettings) -> Settin
         ),
         task_models=dict(current.task_models),
         thinking=ThinkingSettingsOut(enabled=current.thinking.enabled),
+        context_expansion=ContextExpansionSettingsOut(
+            enabled=current.context_expansion.enabled
+        ),
         source=current.source,
         writable=settings_store.is_writable(),
         provider_ready=current.api_key is not None and bool(current.base_url),

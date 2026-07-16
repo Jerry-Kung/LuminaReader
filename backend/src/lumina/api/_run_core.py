@@ -17,6 +17,7 @@ from lumina.api._thumbnail import render_thumbnail
 from lumina.config import Settings
 from lumina.db.models import SelectionRow
 from lumina.logging import get_logger, log_with_fields
+from lumina.pdftext.context import build_context_block
 from lumina.projects.manager import PdfNotFoundError, lookup_project_by_pdf_id
 from lumina.request_id import generate_request_id
 from lumina import settings_store
@@ -235,14 +236,63 @@ def decode_image_data(image_data_b64: str) -> bytes:
         raise ValueError("Invalid base64 image data.") from exc
 
 
-def _compose_user_history_text(extracted_text: str, user_question: str | None) -> str:
+def _compose_user_history_text(
+    extracted_text: str,
+    user_question: str | None,
+    context_block: str | None = None,
+) -> str:
     parts = [
         "Source content (extracted from the user's screenshot):\n\n",
         extracted_text,
     ]
     if user_question:
         parts.append(f"\n\nAdditional question from the user: {user_question}")
+    if context_block:
+        # V1.2.1：上下文随首轮 user 历史消息持久化，追问轮经 history 自动可见
+        parts.append(f"\n\n{context_block}")
     return "".join(parts)
+
+
+def _context_expansion_enabled() -> bool:
+    try:
+        return settings_store.get_current().context_expansion.enabled
+    except RuntimeError:
+        return True
+
+
+def _build_run_context(
+    settings: Settings,
+    project_id: str,
+    pdf_id: str,
+    page_start: int,
+    page_end: int | None,
+) -> str | None:
+    """V1.2.1 跨页自动上下文：开关关闭 / 提取状态非 ok / 无文本时返回 None。"""
+    if not _context_expansion_enabled():
+        return None
+    try:
+        block = build_context_block(
+            project_id,
+            pdf_id,
+            page_start,
+            page_end or page_start,
+            window_pages=settings.lumina_context_window_pages,
+            max_chars=settings.lumina_context_max_chars,
+        )
+    except Exception:
+        # 上下文是增强项：任何异常都不允许拖垮主问答链路
+        logger.warning("failed to build context block", exc_info=True)
+        return None
+    if block is not None:
+        log_with_fields(
+            logger,
+            logging.INFO,
+            "context expansion applied",
+            project_id=project_id,
+            pdf_id=pdf_id,
+            context_chars=len(block),
+        )
+    return block
 
 
 def _log_run_call(
@@ -755,6 +805,9 @@ async def _execute_first_turn_v1(
         user_input = _first_turn_user_input(body)
         plugin_ids = [SCREENSHOT_QA_PLUGIN_ID]
         conversation_task_type = SCREENSHOT_QA_PLUGIN_ID
+        context_block = _build_run_context(
+            settings, project_id, pdf_id, body.selection.page, None
+        )
         plugin_ctx = PluginContext(
             selection_text=None,
             selection_type="image",
@@ -764,6 +817,7 @@ async def _execute_first_turn_v1(
             history=[],
             user_input=user_input,
             requested_plugins=list(body.plugins or []),
+            context_pages=context_block,
         )
 
         result, llm_resp, invoke_error = await _invoke_pipeline(
@@ -794,7 +848,9 @@ async def _execute_first_turn_v1(
 
         conversation_id = f"conv_{ULID()}"
         selection_id = f"sel_{ULID()}"
-        user_history_text = _compose_user_history_text(extracted_text, user_input)
+        user_history_text = _compose_user_history_text(
+            extracted_text, user_input, context_block
+        )
 
         store = get_session_store()
         meta = {
@@ -895,6 +951,9 @@ async def _execute_first_turn_v1(
     user_input = _first_turn_user_input(body)
     selection_text = body.selection.text or ""
     selection_word_count = estimate_word_count(selection_text)
+    context_block = _build_run_context(
+        settings, project_id, pdf_id, body.selection.page, body.selection.page_end
+    )
     plugin_ctx = PluginContext(
         selection_text=selection_text,
         selection_type="text",
@@ -903,6 +962,7 @@ async def _execute_first_turn_v1(
         target_lang=body.options.target_lang,
         history=[],
         user_input=user_input,
+        context_pages=context_block,
     )
     try:
         plugin_ids, user_input = resolve_plugin_routing(body, registry, plugin_ctx)
@@ -946,7 +1006,9 @@ async def _execute_first_turn_v1(
 
     conversation_id = f"conv_{ULID()}"
     selection_id = f"sel_{ULID()}"
-    user_history_text = _compose_user_history_text(extracted_text, user_input)
+    user_history_text = _compose_user_history_text(
+        extracted_text, user_input, context_block
+    )
 
     store = get_session_store()
     meta = {
@@ -1460,6 +1522,9 @@ async def prepare_stream_run(
 
             plugin_ids = [SCREENSHOT_QA_PLUGIN_ID]
             conversation_task_type = SCREENSHOT_QA_PLUGIN_ID
+            context_block = _build_run_context(
+                settings, project_id, pdf_id, body.selection.page, None
+            )
             plugin_ctx = PluginContext(
                 selection_text=None,
                 selection_type="image",
@@ -1469,8 +1534,9 @@ async def prepare_stream_run(
                 history=[],
                 user_input=user_input,
                 requested_plugins=list(body.plugins or []),
+                context_pages=context_block,
             )
-            user_history_text = _compose_user_history_text("", user_input)
+            user_history_text = _compose_user_history_text("", user_input, context_block)
             meta = {
                 "page": body.selection.page,
                 "x": body.selection.x,
@@ -1505,6 +1571,13 @@ async def prepare_stream_run(
             image_bytes = 0
             selection_text = body.selection.text or ""
             selection_word_count = estimate_word_count(selection_text)
+            context_block = _build_run_context(
+                settings,
+                project_id,
+                pdf_id,
+                body.selection.page,
+                body.selection.page_end,
+            )
             plugin_ctx = PluginContext(
                 selection_text=selection_text,
                 selection_type="text",
@@ -1513,6 +1586,7 @@ async def prepare_stream_run(
                 target_lang=body.options.target_lang,
                 history=[],
                 user_input=user_input,
+                context_pages=context_block,
             )
             try:
                 plugin_ids, user_input = resolve_plugin_routing(body, registry, plugin_ctx)
@@ -1528,7 +1602,9 @@ async def prepare_stream_run(
                 )
             plugin_ctx = plugin_ctx.model_copy(update={"user_input": user_input})
             conversation_task_type = _conversation_task_type(plugin_ids)
-            user_history_text = _compose_user_history_text(selection_text, user_input)
+            user_history_text = _compose_user_history_text(
+                selection_text, user_input, context_block
+            )
             meta = {
                 "page": body.selection.page,
                 "page_end": body.selection.page_end,

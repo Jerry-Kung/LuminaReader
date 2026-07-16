@@ -215,3 +215,46 @@ def test_provider_rebuild_after_put(settings_client: TestClient) -> None:
     provider = get_provider()
     assert isinstance(provider, OpenAICompatProvider)
     assert provider.model == "gpt-4o-mini"
+
+
+# ---------------------------------------------------------------------------
+# V1.2.1: context_expansion
+# ---------------------------------------------------------------------------
+
+
+def test_get_default_context_expansion_enabled(settings_client: TestClient) -> None:
+    response = settings_client.get("/api/v1/settings")
+    assert response.json()["data"]["context_expansion"]["enabled"] is True
+
+
+def test_put_context_expansion_disabled(settings_client: TestClient) -> None:
+    payload = _settings_payload(context_expansion={"enabled": False})
+    response = settings_client.put("/api/v1/settings", json=payload)
+    assert response.status_code == 200
+    assert response.json()["data"]["context_expansion"]["enabled"] is False
+    get_resp = settings_client.get("/api/v1/settings")
+    assert get_resp.json()["data"]["context_expansion"]["enabled"] is False
+
+
+def test_put_context_expansion_omitted_preserves(settings_client: TestClient) -> None:
+    put = settings_client.put(
+        "/api/v1/settings", json=_settings_payload(context_expansion={"enabled": False})
+    )
+    assert put.status_code == 200
+    put2 = settings_client.put("/api/v1/settings", json=_settings_payload())
+    assert put2.status_code == 200
+    assert put2.json()["data"]["context_expansion"]["enabled"] is False
+
+
+def test_put_context_expansion_unknown_field(settings_client: TestClient) -> None:
+    payload = _settings_payload(context_expansion={"enabled": True, "pages": 3})
+    response = settings_client.put("/api/v1/settings", json=payload)
+    assert response.status_code == 422
+    paths = [e["path"] for e in response.json()["error"]["field_errors"]]
+    assert "context_expansion.pages" in paths
+
+
+def test_put_context_expansion_non_bool(settings_client: TestClient) -> None:
+    payload = _settings_payload(context_expansion={"enabled": "yes"})
+    response = settings_client.put("/api/v1/settings", json=payload)
+    assert response.status_code == 422

@@ -59,6 +59,10 @@ class PluginPipeline:
             system_text = "\n\n".join(s.system for s in segments)
             user_text = _join_user_segments(segments)
 
+        # V1.2.1：跨页自动上下文统一追加（run 层已组装好完整参考块）
+        if ctx.context_pages:
+            user_text = f"{user_text}\n\n{ctx.context_pages}"
+
         thinking = self._decide_thinking(plugin_ids)
         messages: list[LLMMessage] = [
             LLMMessage(role="system", content=[TextPart(text=system_text)])

@@ -52,6 +52,9 @@ class PluginContext(BaseModel):
     # 但 screenshot-qa 需要感知用户真正点的是哪个 chip（translate / explain / dictionary）
     # 才能让 <answer> 段的任务语义与对应文本路径的 plugin 保持一致。
     requested_plugins: list[str] = Field(default_factory=list)
+    # V1.2.1：跨页自动上下文。run 层组装好的完整参考块（含框架文案与页码标注），
+    # PluginPipeline.build_request 统一追加到 user 文本末尾；None = 不注入。
+    context_pages: str | None = None
 
 
 class PluginPromptSegments(BaseModel):

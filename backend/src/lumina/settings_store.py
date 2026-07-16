@@ -16,8 +16,11 @@ from lumina.projects.paths import settings_json_path
 logger = logging.getLogger("lumina.settings")
 
 TASK_TYPES = frozenset({"extract", "translate", "explain"})
-ALLOWED_TOP_LEVEL_KEYS = frozenset({"provider", "task_models", "thinking"})
+ALLOWED_TOP_LEVEL_KEYS = frozenset(
+    {"provider", "task_models", "thinking", "context_expansion"}
+)
 THINKING_ALLOWED_KEYS = frozenset({"enabled"})
+CONTEXT_EXPANSION_ALLOWED_KEYS = frozenset({"enabled"})
 MASKED_KEY_PREFIX = "sk-***..."
 
 
@@ -37,6 +40,13 @@ class ThinkingSettings:
 
 
 @dataclass(frozen=True)
+class ContextExpansionSettings:
+    """V1.2.1 跨页自动上下文开关（默认开启）。"""
+
+    enabled: bool = True
+
+
+@dataclass(frozen=True)
 class ResolvedSettings:
     provider_kind: Literal["openai_compat"]
     base_url: str
@@ -45,6 +55,7 @@ class ResolvedSettings:
     timeout_seconds: int
     task_models: dict[Literal["extract", "translate", "explain"], str | None]
     thinking: ThinkingSettings
+    context_expansion: ContextExpansionSettings
     source: Literal["user_data", "env_fallback"]
 
 
@@ -130,6 +141,42 @@ def _validate_thinking(
         )
         return ThinkingSettings(enabled=False)
     return ThinkingSettings(enabled=enabled)
+
+
+def _validate_context_expansion(
+    data: dict[str, Any],
+    errors: list[dict[str, str]],
+) -> ContextExpansionSettings:
+    ce = data.get("context_expansion", _MISSING)
+    if ce is _MISSING:
+        return ContextExpansionSettings(enabled=True)
+    if not isinstance(ce, dict):
+        errors.append(
+            {
+                "path": "context_expansion",
+                "reason": "context_expansion must be an object",
+            }
+        )
+        return ContextExpansionSettings(enabled=True)
+    extra_keys = set(ce.keys()) - CONTEXT_EXPANSION_ALLOWED_KEYS
+    if extra_keys:
+        for key in sorted(extra_keys):
+            errors.append(
+                {
+                    "path": f"context_expansion.{key}",
+                    "reason": f"unknown field context_expansion.{key}",
+                }
+            )
+    enabled = ce.get("enabled", True)
+    if not isinstance(enabled, bool):
+        errors.append(
+            {
+                "path": "context_expansion.enabled",
+                "reason": "context_expansion.enabled must be a boolean",
+            }
+        )
+        return ContextExpansionSettings(enabled=True)
+    return ContextExpansionSettings(enabled=enabled)
 
 
 def _validate_payload(
@@ -239,6 +286,7 @@ def _validate_payload(
     thinking_settings = _validate_thinking(
         data, errors, env_fallback_enabled=env_fallback_enabled
     )
+    context_expansion_settings = _validate_context_expansion(data, errors)
 
     if errors:
         raise InvalidSettingsError(errors)
@@ -264,6 +312,7 @@ def _validate_payload(
         "provider": normalized_provider,
         "task_models": normalized_task_models,
         "thinking": thinking_settings,
+        "context_expansion": context_expansion_settings,
     }
 
 
@@ -290,6 +339,7 @@ def _resolved_from_validated(
             "explain": task_models["explain"],
         },
         thinking=validated["thinking"],
+        context_expansion=validated["context_expansion"],
         source=source,
     )
 
@@ -305,6 +355,7 @@ def _to_disk_document(resolved: ResolvedSettings) -> dict[str, Any]:
         },
         "task_models": dict(resolved.task_models),
         "thinking": {"enabled": resolved.thinking.enabled},
+        "context_expansion": {"enabled": resolved.context_expansion.enabled},
     }
 
 
@@ -399,6 +450,9 @@ def bootstrap() -> ResolvedSettings:
         timeout_seconds=int(env_cfg.llm_timeout_seconds),
         task_models=_default_task_models(),  # type: ignore[assignment]
         thinking=ThinkingSettings(enabled=env_cfg.thinking_enabled),
+        context_expansion=ContextExpansionSettings(
+            enabled=env_cfg.context_expansion_enabled
+        ),
         source="env_fallback",
     )
     logger.info(
@@ -448,10 +502,28 @@ def _merge_update(payload: dict[str, Any], current: ResolvedSettings) -> dict[st
             [{"path": "thinking", "reason": "thinking must be an object"}]
         )
 
+    ce_in = payload.get("context_expansion")
+    if ce_in is None:
+        merged_ce: dict[str, Any] = {"enabled": current.context_expansion.enabled}
+    elif isinstance(ce_in, dict):
+        merged_ce = dict(ce_in)
+        if "enabled" not in merged_ce:
+            merged_ce["enabled"] = current.context_expansion.enabled
+    else:
+        raise InvalidSettingsError(
+            [
+                {
+                    "path": "context_expansion",
+                    "reason": "context_expansion must be an object",
+                }
+            ]
+        )
+
     return {
         "provider": merged_provider,
         "task_models": merged_task_models,
         "thinking": merged_thinking,
+        "context_expansion": merged_ce,
     }
 
 

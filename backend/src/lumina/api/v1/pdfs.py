@@ -15,6 +15,7 @@ from lumina.projects.manager import (
     touch_last_opened_at,
 )
 from lumina.projects.paths import project_pdf_path
+from lumina.pdftext import read_status, schedule_extraction, wait_for_pdf
 from lumina.request_id import generate_request_id
 from lumina.schemas.api import PdfUploadData, ReadingPositionUpdate, error_response, ok_response
 from lumina.sessions import get_session_store
@@ -182,6 +183,13 @@ async def upload_pdf(
         primary_pdf_size=created.primary_pdf_size,
         created_at=created.created_at,
     )
+    # V1.2.1：导入即自动触发全书文本提取（后台异步，不阻塞上传响应）
+    try:
+        schedule_extraction(created.project_id, created.pdf_id)
+    except Exception:
+        logger.warning(
+            "failed to schedule text extraction for pdf_id=%s", created.pdf_id
+        )
     _log_pdf_call(
         request_id=request_id,
         http_status=201,
@@ -255,6 +263,9 @@ async def delete_pdf(pdf_id: str):
     except RuntimeError:
         pass
 
+    # V1.2.1：等待该书进行中的文本提取收尾，避免 Windows 下句柄占用导致目录删除失败
+    await wait_for_pdf(pdf_id)
+
     delete_project(entry.id)
     _log_pdf_call(
         request_id=request_id,
@@ -314,6 +325,72 @@ async def patch_reading_position(pdf_id: str, payload: ReadingPositionUpdate):
         project_id=entry.id,
     )
     return Response(status_code=204)
+
+
+def _pdf_not_found(request_id: str, pdf_id: str) -> JSONResponse:
+    _log_pdf_call(
+        request_id=request_id,
+        http_status=404,
+        error_code="PDF_NOT_FOUND",
+        pdf_id=pdf_id,
+    )
+    return JSONResponse(
+        status_code=404,
+        content=error_response(
+            code="PDF_NOT_FOUND",
+            message="PDF not found.",
+            request_id=request_id,
+        ),
+    )
+
+
+@router.get("/{pdf_id}/text-extraction")
+async def get_text_extraction(pdf_id: str):
+    """V1.2.1：全书文本提取状态。status ∈ none|pending|ok|unsupported|failed。"""
+    request_id = generate_request_id()
+    entry = find_by_pdf_id(pdf_id)
+    if entry is None:
+        return _pdf_not_found(request_id, pdf_id)
+
+    meta = read_status(entry.id, pdf_id)
+    _log_pdf_call(
+        request_id=request_id,
+        http_status=200,
+        pdf_id=pdf_id,
+        project_id=entry.id,
+    )
+    return ok_response(
+        {
+            "pdf_id": pdf_id,
+            "status": meta.status,
+            "page_count": meta.page_count,
+            "textual_page_count": meta.textual_page_count,
+            "char_count": meta.char_count,
+            "extracted_at": meta.extracted_at,
+            "error": meta.error,
+        }
+    )
+
+
+@router.post("/{pdf_id}/text-extraction", status_code=202)
+async def trigger_text_extraction(pdf_id: str):
+    """V1.2.1：手动触发（重新）提取；进行中重复触发幂等返回 202 pending。"""
+    request_id = generate_request_id()
+    entry = find_by_pdf_id(pdf_id)
+    if entry is None:
+        return _pdf_not_found(request_id, pdf_id)
+
+    status = schedule_extraction(entry.id, pdf_id)
+    _log_pdf_call(
+        request_id=request_id,
+        http_status=202,
+        pdf_id=pdf_id,
+        project_id=entry.id,
+    )
+    return JSONResponse(
+        status_code=202,
+        content=ok_response({"pdf_id": pdf_id, "status": status}),
+    )
 
 
 def _summarize(text: str, n: int = 200) -> str:

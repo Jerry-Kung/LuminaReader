@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
 
 
@@ -402,3 +403,100 @@ def get_pdf_last_read_page(conn, pdf_id: str) -> int | None:
 
 def update_pdf_last_read_page(conn, pdf_id: str, last_read_page: int) -> int:
     return update_pdf_reading_position(conn, pdf_id, last_read_page, 0.0)
+
+
+# ---------------------------------------------------------------------------
+# V1.2.1: 全书文本地基（pdf_text_meta / pdf_text_pages，MAY 演化档）
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PdfTextMetaRow:
+    pdf_id: str
+    status: str  # "pending" | "ok" | "unsupported" | "failed"
+    page_count: int | None = None
+    textual_page_count: int | None = None
+    char_count: int | None = None
+    extractor: str | None = None
+    extracted_at: int | None = None
+    error: str | None = None
+
+
+def get_pdf_text_meta(conn, pdf_id: str) -> PdfTextMetaRow | None:
+    try:
+        row = conn.execute(
+            """
+            SELECT pdf_id, status, page_count, textual_page_count, char_count,
+                   extractor, extracted_at, error
+            FROM pdf_text_meta WHERE pdf_id = ?
+            """,
+            (pdf_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        # MAY 档兜底：表缺失 / 损坏一律呈现为"未提取"
+        return None
+    if row is None:
+        return None
+    return PdfTextMetaRow(*row)
+
+
+def upsert_pdf_text_meta(conn, row: PdfTextMetaRow) -> None:
+    conn.execute(
+        """
+        INSERT INTO pdf_text_meta (
+            pdf_id, status, page_count, textual_page_count, char_count,
+            extractor, extracted_at, error
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(pdf_id) DO UPDATE SET
+            status = excluded.status,
+            page_count = excluded.page_count,
+            textual_page_count = excluded.textual_page_count,
+            char_count = excluded.char_count,
+            extractor = excluded.extractor,
+            extracted_at = excluded.extracted_at,
+            error = excluded.error
+        """,
+        (
+            row.pdf_id,
+            row.status,
+            row.page_count,
+            row.textual_page_count,
+            row.char_count,
+            row.extractor,
+            row.extracted_at,
+            row.error,
+        ),
+    )
+
+
+def replace_pdf_text_pages(conn, pdf_id: str, page_texts: list[str]) -> None:
+    """整体替换某 PDF 的按页文本（调用方负责事务包裹）。page_texts[0] = 第 1 页。"""
+    conn.execute("DELETE FROM pdf_text_pages WHERE pdf_id = ?", (pdf_id,))
+    conn.executemany(
+        """
+        INSERT INTO pdf_text_pages (pdf_id, page, text, char_count)
+        VALUES (?, ?, ?, ?)
+        """,
+        [
+            (pdf_id, page_no, text, len(text))
+            for page_no, text in enumerate(page_texts, start=1)
+        ],
+    )
+
+
+def get_pdf_text_pages_range(
+    conn, pdf_id: str, page_start: int, page_end: int
+) -> list[tuple[int, str]]:
+    """返回 [page_start, page_end] 闭区间内的 (page, text)，按页码升序。"""
+    try:
+        rows = conn.execute(
+            """
+            SELECT page, text FROM pdf_text_pages
+            WHERE pdf_id = ? AND page BETWEEN ? AND ?
+            ORDER BY page ASC
+            """,
+            (pdf_id, page_start, page_end),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    return [(int(row[0]), row[1]) for row in rows]
