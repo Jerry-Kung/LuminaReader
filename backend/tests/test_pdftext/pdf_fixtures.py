@@ -43,3 +43,27 @@ def make_text_pdf(page_texts: list[str]) -> bytes:
         f"startxref\n{xref_pos}\n%%EOF"
     ).encode("latin-1")
     return bytes(out)
+
+
+def make_outline_pdf(
+    page_texts: list[str],
+    outline: list[tuple[str, int, list[tuple[str, int]]]],
+) -> bytes:
+    """在 make_text_pdf 基础上用 pypdf 写入内置 outline（支持两级）。
+
+    outline: [(title, page_1based, [(child_title, child_page_1based), ...]), ...]
+    """
+    import io
+
+    import pypdf
+
+    reader = pypdf.PdfReader(io.BytesIO(make_text_pdf(page_texts)))
+    writer = pypdf.PdfWriter()
+    writer.append(reader)
+    for title, page, children in outline:
+        parent = writer.add_outline_item(title, page - 1)
+        for child_title, child_page in children:
+            writer.add_outline_item(child_title, child_page - 1, parent=parent)
+    buf = io.BytesIO()
+    writer.write(buf)
+    return buf.getvalue()
