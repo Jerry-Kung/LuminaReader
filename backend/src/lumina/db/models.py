@@ -500,3 +500,144 @@ def get_pdf_text_pages_range(
     except sqlite3.Error:
         return []
     return [(int(row[0]), row[1]) for row in rows]
+
+
+# ---------------------------------------------------------------------------
+# V1.2.2: 目录与书签（pdf_toc_meta / chapters / bookmarks，MAY 演化档）
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PdfTocMetaRow:
+    pdf_id: str
+    status: str  # "none" | "ready" | "failed"
+    source: str | None = None  # "outline" | "heuristic" | "llm"
+    chapter_count: int | None = None
+    updated_at: int | None = None
+    error: str | None = None
+
+
+@dataclass
+class ChapterRow:
+    id: str
+    pdf_id: str
+    parent_id: str | None
+    order_index: int
+    depth: int
+    title: str
+    start_page: int
+
+
+@dataclass
+class BookmarkRow:
+    id: str
+    pdf_id: str
+    name: str
+    page: int
+    offset_ratio: float
+    created_at: int
+
+
+def get_pdf_toc_meta(conn, pdf_id: str) -> PdfTocMetaRow | None:
+    try:
+        row = conn.execute(
+            """
+            SELECT pdf_id, status, source, chapter_count, updated_at, error
+            FROM pdf_toc_meta WHERE pdf_id = ?
+            """,
+            (pdf_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        # MAY 档兜底：表缺失 / 损坏一律呈现为"未识别"
+        return None
+    if row is None:
+        return None
+    return PdfTocMetaRow(*row)
+
+
+def upsert_pdf_toc_meta(conn, row: PdfTocMetaRow) -> None:
+    conn.execute(
+        """
+        INSERT INTO pdf_toc_meta (
+            pdf_id, status, source, chapter_count, updated_at, error
+        ) VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(pdf_id) DO UPDATE SET
+            status = excluded.status,
+            source = excluded.source,
+            chapter_count = excluded.chapter_count,
+            updated_at = excluded.updated_at,
+            error = excluded.error
+        """,
+        (row.pdf_id, row.status, row.source, row.chapter_count, row.updated_at, row.error),
+    )
+
+
+def list_chapters(conn, pdf_id: str) -> list[ChapterRow]:
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, pdf_id, parent_id, order_index, depth, title, start_page
+            FROM chapters WHERE pdf_id = ?
+            ORDER BY order_index ASC
+            """,
+            (pdf_id,),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    return [ChapterRow(*row) for row in rows]
+
+
+def replace_chapters(conn, pdf_id: str, rows: list[ChapterRow]) -> None:
+    """整体替换某 PDF 的章节结构（调用方负责事务包裹，"先成功后替换"）。"""
+    conn.execute("DELETE FROM chapters WHERE pdf_id = ?", (pdf_id,))
+    conn.executemany(
+        """
+        INSERT INTO chapters (id, pdf_id, parent_id, order_index, depth, title, start_page)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (r.id, r.pdf_id, r.parent_id, r.order_index, r.depth, r.title, r.start_page)
+            for r in rows
+        ],
+    )
+
+
+def list_bookmarks(conn, pdf_id: str) -> list[BookmarkRow]:
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, pdf_id, name, page, offset_ratio, created_at
+            FROM bookmarks WHERE pdf_id = ?
+            ORDER BY page ASC, offset_ratio ASC
+            """,
+            (pdf_id,),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    return [BookmarkRow(*row) for row in rows]
+
+
+def insert_bookmark(conn, row: BookmarkRow) -> None:
+    conn.execute(
+        """
+        INSERT INTO bookmarks (id, pdf_id, name, page, offset_ratio, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        """,
+        (row.id, row.pdf_id, row.name, row.page, row.offset_ratio, row.created_at),
+    )
+
+
+def rename_bookmark(conn, pdf_id: str, bookmark_id: str, name: str) -> int:
+    cursor = conn.execute(
+        "UPDATE bookmarks SET name = ? WHERE id = ? AND pdf_id = ?",
+        (name, bookmark_id, pdf_id),
+    )
+    return cursor.rowcount
+
+
+def delete_bookmark(conn, pdf_id: str, bookmark_id: str) -> int:
+    cursor = conn.execute(
+        "DELETE FROM bookmarks WHERE id = ? AND pdf_id = ?",
+        (bookmark_id, pdf_id),
+    )
+    return cursor.rowcount
