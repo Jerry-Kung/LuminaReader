@@ -207,27 +207,29 @@ export default function PDFViewer({
   const rafRef = useRef<number | null>(null);
   const lastReportedRef = useRef<{ page: number; offset: number } | null>(null);
 
-  // ISSUE-011 根因修复：computePosition 若以闭包捕获 pageMetas，AI 边栏宽度过渡期
-  // （transition 300ms 内 ResizeObserver 连续触发多次 pageMetas 重算）中，
-  // 上一帧排队的 rAF 回调会在新 commit 之后执行，用"新 scrollTop × 旧坐标系"反推出
-  // 错误页码并污染 lastReportedRef，此后每次恢复都锁定在错误页（压缩方向跳到开头页，
-  // 放大方向跳到最后一页）。改为经 ref 读取"最后一次 commit 的 pageMetas"，
-  // 保证任何时刻的 rAF 回调都用同一坐标系的 (scrollTop, pageMetas) 一致数据对。
+  // ISSUE-011（V1.2.0 二次修复）核心不变量：
+  //   **锚点 lastReportedRef 只能被"真实用户手势触发的滚动"改写；程序化滚动
+  //   （布局恢复 / 跳转）与浏览器自动 clamp 一律不改写锚点。**
+  // 为什么不是时间窗：overlay(85% 宽) 切回窄档时页面 DOM 高度骤变，浏览器会同步
+  // clamp scrollTop 并异步派发一个"非我们设置"的 scroll 事件；它与程序化目标值不等，
+  // 时间窗又可能恰好过期 → 被误判为用户滚动 → 反推错误页并永久污染锚点（确定性跳到
+  // 固定页，如第 12 / 7 页）。改用"手势标志"判定：只有近期发生过 wheel / 翻页键 /
+  // pointerdown / touchstart 时，scroll 才被视为用户滚动。对 clamp 与时序完全免疫。
   const pageMetasRef = useRef<PageMeta[]>([]);
   useEffect(() => {
     pageMetasRef.current = pageMetas;
   }, [pageMetas]);
+  // 用户手势有效期（performance.now() 毫秒时间戳）。scroll 时 now < 此值 → 视为用户滚动。
+  const userGestureUntilRef = useRef<number>(0);
+  const markUserGesture = useCallback((extendMs = 1200) => {
+    userGestureUntilRef.current = performance.now() + extendMs;
+  }, []);
 
-  const computePosition = useCallback(() => {
-    rafRef.current = null;
-    const el = containerRef.current;
-    const metas = pageMetasRef.current;
-    if (!el || metas.length === 0) return;
+  // 反推 centerY 所在页 + offset（纯计算，无副作用）
+  const deriveCenter = useCallback((el: HTMLDivElement, metas: PageMeta[]) => {
     const scrollTop = el.scrollTop;
     const vh = el.clientHeight;
     const centerY = scrollTop + vh / 2;
-
-    // 二分找到 centerY 所在页（metas 已按 top 升序）
     let current = metas[0];
     for (const m of metas) {
       if (centerY < m.top + m.height) {
@@ -236,21 +238,14 @@ export default function PDFViewer({
       }
       current = m;
     }
-    const offset = Math.max(
-      0,
-      Math.min(1, (centerY - current.top) / current.height),
-    );
-    const last = lastReportedRef.current;
-    if (
-      !last ||
-      last.page !== current.pageNum ||
-      Math.abs(last.offset - offset) > POSITION_REPORT_OFFSET_EPSILON
-    ) {
-      lastReportedRef.current = { page: current.pageNum, offset };
-      onPositionChange(current.pageNum, offset);
-    }
+    const offset = Math.max(0, Math.min(1, (centerY - current.top) / current.height));
+    return { page: current.pageNum, offset };
+  }, []);
 
-    // visiblePages：可见区上下各扩 1 个 vh + ±1 页 buffer
+  // 按当前 scrollTop 刷新 visiblePages（布局恢复与用户滚动共用；不碰锚点）
+  const refreshVisiblePages = useCallback((el: HTMLDivElement, metas: PageMeta[]) => {
+    const scrollTop = el.scrollTop;
+    const vh = el.clientHeight;
     const lo = scrollTop - vh;
     const hi = scrollTop + vh * 2;
     const base = new Set<number>();
@@ -270,21 +265,65 @@ export default function PDFViewer({
       }
       return expanded;
     });
-  }, [numPages, onPositionChange]);
+  }, [numPages]);
+
+  // scroll 反推：始终刷新可见页；仅当近期有用户手势时才改写锚点 + 上报位置。
+  const computePosition = useCallback(() => {
+    rafRef.current = null;
+    const el = containerRef.current;
+    const metas = pageMetasRef.current;
+    if (!el || metas.length === 0) return;
+
+    refreshVisiblePages(el, metas);
+    if (performance.now() >= userGestureUntilRef.current) return; // 程序化 / clamp echo：不碰锚点
+
+    // 用户滚动：续期手势有效期以覆盖惯性滚动的尾帧
+    markUserGesture(150);
+    const { page, offset } = deriveCenter(el, metas);
+    const last = lastReportedRef.current;
+    if (
+      !last ||
+      last.page !== page ||
+      Math.abs(last.offset - offset) > POSITION_REPORT_OFFSET_EPSILON
+    ) {
+      lastReportedRef.current = { page, offset };
+      onPositionChange(page, offset);
+    }
+  }, [deriveCenter, refreshVisiblePages, markUserGesture, onPositionChange]);
 
   const handleScroll = useCallback(() => {
     if (rafRef.current !== null) return;
     rafRef.current = window.requestAnimationFrame(computePosition);
   }, [computePosition]);
 
+  // 用户手势监听：wheel / touchstart / pointerdown 标记为用户滚动来源。
+  // （PageUp/PageDown 在键盘 effect 内单独 markUserGesture。）
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const onWheel = () => markUserGesture();
+    const onPointerDown = () => markUserGesture();
+    const onTouchStart = () => markUserGesture();
+    el.addEventListener('wheel', onWheel, { passive: true });
+    el.addEventListener('pointerdown', onPointerDown, { passive: true });
+    el.addEventListener('touchstart', onTouchStart, { passive: true });
+    return () => {
+      el.removeEventListener('wheel', onWheel);
+      el.removeEventListener('pointerdown', onPointerDown);
+      el.removeEventListener('touchstart', onTouchStart);
+    };
+  }, [markUserGesture]);
+
   // pageMetas 变化（首次就绪 / scale 改变 / 容器宽度改变，比如 AI 边栏 narrow/wide/overlay 切换）
-  // → 先按 lastReportedRef 把 scrollTop 恢复到原阅读位置（与反推算法对称），再重算 currentPage / visiblePages。
-  // 不区分 scale vs containerWidth：两条路径都会让坐标系整体重算，恢复逻辑相同。
+  // → 按锚点 lastReportedRef 把 scrollTop 恢复到原阅读位置（与反推算法对称），再刷新可见页。
+  // 关键：这条路径**只恢复视觉、不改写锚点**（布局变化不是用户的阅读意图）。
+  // 不 markUserGesture，故随后的程序化 scroll / clamp echo 都不会污染锚点。
   useEffect(() => {
     if (pageMetas.length === 0) return;
     const el = containerRef.current;
+    if (!el) return;
     const last = lastReportedRef.current;
-    if (el && last) {
+    if (last) {
       const meta = pageMetas.find((m) => m.pageNum === last.page);
       if (meta) {
         const desiredCenter = meta.top + last.offset * meta.height;
@@ -292,8 +331,8 @@ export default function PDFViewer({
         el.scrollTop = Math.max(0, Math.min(max, desiredCenter - el.clientHeight / 2));
       }
     }
-    computePosition();
-  }, [pageMetas, computePosition]);
+    refreshVisiblePages(el, pageMetas);
+  }, [pageMetas, refreshVisiblePages]);
 
   // ---- pendingScrollTarget 消费 ----
   useEffect(() => {
@@ -310,8 +349,8 @@ export default function PDFViewer({
     const desiredCenter = meta.top + pendingScrollTarget.offset * meta.height;
     const max = Math.max(0, el.scrollHeight - el.clientHeight);
     el.scrollTop = Math.max(0, Math.min(max, desiredCenter - el.clientHeight / 2));
-    // ISSUE-011 配套：跳转意图即新的位置锚点。若消费恰好发生在容器宽度过渡期
-    // （pageMetas 连续重算），后续的恢复逻辑应回到"用户要去的页"，而非中间态的几何反推值。
+    // 跳转是明确的用户意图：直接把锚点写成目标（不 markUserGesture，避免随后的
+    // 程序化 scroll echo 再按几何反推覆盖它）。
     lastReportedRef.current = {
       page: pendingScrollTarget.page,
       offset: pendingScrollTarget.offset,
@@ -352,15 +391,17 @@ export default function PDFViewer({
       if (!el) return;
       if (e.key === 'PageDown') {
         e.preventDefault();
+        markUserGesture();
         el.scrollBy({ top: el.clientHeight * 0.95, behavior: 'smooth' });
       } else if (e.key === 'PageUp') {
         e.preventDefault();
+        markUserGesture();
         el.scrollBy({ top: -el.clientHeight * 0.95, behavior: 'smooth' });
       }
     };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
-  }, [isSelecting, selectedArea, onSelectionChange, onSelectionModeExit]);
+  }, [isSelecting, selectedArea, onSelectionChange, onSelectionModeExit, markUserGesture]);
 
   // ---- V1.1.4：跨页 Selection 抓取已迁出至 useTextSelection hook（由父组件调用）。----
   // PDFViewer 仅负责 textLayer DOM 渲染；mouseup 监听由 hook 在同一 container 上挂载。
