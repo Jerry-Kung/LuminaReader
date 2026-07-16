@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 from lumina.pdftext.extractor import extract_pdf_text
 
 from tests.test_pdftext.pdf_fixtures import make_text_pdf
@@ -50,3 +52,11 @@ def test_corrupt_pdf_raises(tmp_path):
     except Exception:
         return
     raise AssertionError("expected extraction failure on corrupt pdf")
+
+
+def test_make_text_pdf_rejects_oversized_charset():
+    # 超出单字节码空间（>251 个不同字符）应快速失败而非死循环
+    text = "".join(chr(0x4E00 + i) for i in range(300))
+    with pytest.raises(ValueError, match="too many unique characters"):
+        make_text_pdf([text])
+

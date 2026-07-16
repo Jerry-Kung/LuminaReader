@@ -37,8 +37,14 @@ def make_text_pdf(page_texts: list[str]) -> bytes:
     codes: dict[str, int] = {}
     code = 1
     for ch in chars:
-        while code in _RESERVED_BYTE_CODES or code > 255:
+        while code in _RESERVED_BYTE_CODES:
             code += 1
+        if code > 255:
+            # 单字节码空间已耗尽：fixture 仅支持每页 ≤251 个不同字符，超出时快速失败
+            raise ValueError(
+                "make_text_pdf: too many unique characters for single-byte "
+                f"codespace (limit ~251, got {len(chars)})"
+            )
         codes[ch] = code
         code += 1
     tounicode_cmap = _build_tounicode_cmap(codes)
