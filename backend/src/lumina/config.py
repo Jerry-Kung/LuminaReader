@@ -34,6 +34,8 @@ class Settings(BaseSettings):
     context_expansion_enabled: bool = True
     lumina_context_window_pages: int = Field(default=2, ge=0, le=10)
     lumina_context_max_chars: int = Field(default=16000, ge=1000, le=100_000)
+    # V1.2.2：LLM 目录识别的输入样本字符上限（控成本，不喂全书全文）
+    lumina_toc_sample_max_chars: int = Field(default=60000, ge=5000, le=300_000)
     selection_text_max_chars: int = Field(
         default=32000,
         ge=1000,
