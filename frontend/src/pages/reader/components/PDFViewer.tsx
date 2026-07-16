@@ -1,5 +1,6 @@
 import { useRef, useEffect, useState, useCallback, useMemo, memo } from 'react';
 import * as pdfjsLib from 'pdfjs-dist';
+import type { TextSelectionPageRects, TextSelectionRect } from '../hooks/useTextSelection';
 
 /**
  * V1.1.3 F1 / F4 / F6 / F7 / F8 多页连续滚动 PDFViewer。
@@ -63,6 +64,12 @@ interface PDFViewerProps {
    * 通过此函数把内部 containerRef 暴露给上层。仅在 mount/unmount 时调用。
    */
   onContainerRefReady?: (el: HTMLDivElement | null) => void;
+  /**
+   * V1.2.0 ISSUE-009：持久化文本选区高亮（页内相对坐标 0~1 分数）。
+   * 不依赖浏览器原生 ::selection，焦点移入 AI 输入框后高亮保持；
+   * 分数坐标随页面尺寸等比缩放，滚动 / 缩放 / 容器宽度变化均无需重算。
+   */
+  textHighlights?: TextSelectionPageRects[] | null;
 }
 
 export interface SelectedArea {
@@ -114,6 +121,7 @@ export default function PDFViewer({
   cursorMode = 'off',
   onScanPageDetected,
   onContainerRefReady,
+  textHighlights = null,
 }: PDFViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerWidth, setContainerWidth] = useState(0);
@@ -199,17 +207,29 @@ export default function PDFViewer({
   const rafRef = useRef<number | null>(null);
   const lastReportedRef = useRef<{ page: number; offset: number } | null>(null);
 
+  // ISSUE-011 根因修复：computePosition 若以闭包捕获 pageMetas，AI 边栏宽度过渡期
+  // （transition 300ms 内 ResizeObserver 连续触发多次 pageMetas 重算）中，
+  // 上一帧排队的 rAF 回调会在新 commit 之后执行，用"新 scrollTop × 旧坐标系"反推出
+  // 错误页码并污染 lastReportedRef，此后每次恢复都锁定在错误页（压缩方向跳到开头页，
+  // 放大方向跳到最后一页）。改为经 ref 读取"最后一次 commit 的 pageMetas"，
+  // 保证任何时刻的 rAF 回调都用同一坐标系的 (scrollTop, pageMetas) 一致数据对。
+  const pageMetasRef = useRef<PageMeta[]>([]);
+  useEffect(() => {
+    pageMetasRef.current = pageMetas;
+  }, [pageMetas]);
+
   const computePosition = useCallback(() => {
     rafRef.current = null;
     const el = containerRef.current;
-    if (!el || pageMetas.length === 0) return;
+    const metas = pageMetasRef.current;
+    if (!el || metas.length === 0) return;
     const scrollTop = el.scrollTop;
     const vh = el.clientHeight;
     const centerY = scrollTop + vh / 2;
 
-    // 二分找到 centerY 所在页（pageMetas 已按 top 升序）
-    let current = pageMetas[0];
-    for (const m of pageMetas) {
+    // 二分找到 centerY 所在页（metas 已按 top 升序）
+    let current = metas[0];
+    for (const m of metas) {
       if (centerY < m.top + m.height) {
         current = m;
         break;
@@ -234,7 +254,7 @@ export default function PDFViewer({
     const lo = scrollTop - vh;
     const hi = scrollTop + vh * 2;
     const base = new Set<number>();
-    for (const m of pageMetas) {
+    for (const m of metas) {
       if (m.top + m.height >= lo && m.top <= hi) base.add(m.pageNum);
     }
     const expanded = new Set<number>(base);
@@ -250,7 +270,7 @@ export default function PDFViewer({
       }
       return expanded;
     });
-  }, [pageMetas, numPages, onPositionChange]);
+  }, [numPages, onPositionChange]);
 
   const handleScroll = useCallback(() => {
     if (rafRef.current !== null) return;
@@ -290,8 +310,15 @@ export default function PDFViewer({
     const desiredCenter = meta.top + pendingScrollTarget.offset * meta.height;
     const max = Math.max(0, el.scrollHeight - el.clientHeight);
     el.scrollTop = Math.max(0, Math.min(max, desiredCenter - el.clientHeight / 2));
+    // ISSUE-011 配套：跳转意图即新的位置锚点。若消费恰好发生在容器宽度过渡期
+    // （pageMetas 连续重算），后续的恢复逻辑应回到"用户要去的页"，而非中间态的几何反推值。
+    lastReportedRef.current = {
+      page: pendingScrollTarget.page,
+      offset: pendingScrollTarget.offset,
+    };
+    onPositionChange(pendingScrollTarget.page, pendingScrollTarget.offset);
     onScrollTargetConsumed();
-  }, [pendingScrollTarget, pageMetas, onScrollTargetConsumed]);
+  }, [pendingScrollTarget, pageMetas, onScrollTargetConsumed, onPositionChange]);
 
   // ---- Ctrl+wheel 缩放（原生监听以确保 preventDefault 生效）----
   useEffect(() => {
@@ -449,6 +476,14 @@ export default function PDFViewer({
 
   const hasReadyPages = pdfDoc && !isLoading && pageMetas.length > 0;
 
+  // ISSUE-009：按页索引高亮矩形，保证未涉及页拿到稳定的 null（不破坏 PDFPage memo）
+  const highlightsByPage = useMemo(() => {
+    if (!textHighlights || textHighlights.length === 0) return null;
+    const map = new Map<number, TextSelectionRect[]>();
+    for (const ph of textHighlights) map.set(ph.page, ph.rects);
+    return map;
+  }, [textHighlights]);
+
   return (
     <div
       ref={containerRef}
@@ -513,6 +548,7 @@ export default function PDFViewer({
                 selectionRect={selectionRectForPage(meta.pageNum)}
                 cursorMode={cursorMode}
                 onScanPageDetected={onScanPageDetected}
+                highlightRects={highlightsByPage?.get(meta.pageNum) ?? null}
               />
             </div>
           ))}
@@ -532,6 +568,8 @@ interface PDFPageProps {
   selectionRect: { x: number; y: number; width: number; height: number } | null;
   cursorMode: 'off' | 'text' | 'screenshot';
   onScanPageDetected?: (pageNum: number) => void;
+  /** V1.2.0 ISSUE-009：本页持久化文本选区高亮矩形（页内相对坐标 0~1 分数） */
+  highlightRects: TextSelectionRect[] | null;
 }
 
 const PDFPage = memo(function PDFPage({
@@ -544,6 +582,7 @@ const PDFPage = memo(function PDFPage({
   selectionRect,
   cursorMode,
   onScanPageDetected,
+  highlightRects,
 }: PDFPageProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const textLayerRef = useRef<HTMLDivElement>(null);
@@ -645,6 +684,21 @@ const PDFPage = memo(function PDFPage({
           {pageNum}
         </div>
       )}
+      {/* V1.2.0 ISSUE-009：持久化文本选区高亮层。位于 canvas 之上、textLayer 之下（DOM 顺序），
+          pointer-events-none 不遮挡 textLayer 交互；分数坐标随页面尺寸等比缩放。 */}
+      {highlightRects &&
+        highlightRects.map((r, i) => (
+          <div
+            key={i}
+            className="absolute pointer-events-none bg-blue-300/40"
+            style={{
+              left: `${r.left * 100}%`,
+              top: `${r.top * 100}%`,
+              width: `${r.width * 100}%`,
+              height: `${r.height * 100}%`,
+            }}
+          />
+        ))}
       {/* V1.1.4：textLayer 常态渲染，pointer-events 由 cursorMode 控制；
           只有 'text' 模式才接收鼠标事件以触发原生文本选区。
           注意：opacity 必须为 1 让浏览器原生 ::selection 高亮可见；

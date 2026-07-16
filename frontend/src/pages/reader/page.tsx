@@ -1804,6 +1804,7 @@ export default function ReaderPage() {
           cursorMode={cursorMode}
           onScanPageDetected={handleScanPageDetected}
           onContainerRefReady={handleContainerRefReady}
+          textHighlights={textSelection?.pageRects ?? null}
         />
         <AIAssistantPanel
           results={aiResults}
