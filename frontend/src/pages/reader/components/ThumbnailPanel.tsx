@@ -1,24 +1,24 @@
 /**
- * V1.0.4 F1 左侧页面缩略图栏。
+ * V1.0.4 F1 左侧页面缩略图列表内容（V1.2.2 起外壳由 SidebarPanel 接管）。
  *
  * 视觉来自 readdy.ai 交付（米色背景 / 当前页琥珀左竖条 + 米色块 /
  * skeleton-diagonal 占位 / scrollbar-thin），与 PDF 主视图、AI 助手共用低饱和米色系。
  * 渲染走 usePdfThumbnails（LRU 50 + 串行队列），避免厚书并发 OOM。
  *
- * 折叠状态由 ReaderPage 受控（R-V104-5：< 1280px 首次自动折叠 + 用户手动锁定）。
+ * 折叠/Tab 切换由 SidebarPanel 受控，通过 `active` 暂停 observer 与滚动跟随。
  */
 import { forwardRef, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type * as pdfjsLib from 'pdfjs-dist';
 import { usePdfThumbnails } from '@/hooks/usePdfThumbnails';
 
-interface ThumbnailPanelProps {
+interface ThumbnailListProps {
   pdfDoc: pdfjsLib.PDFDocumentProxy | null;
   numPages: number;
   currentPage: number;
   onPageClick: (page: number) => void;
   isLoading: boolean;
-  collapsed: boolean;
-  onToggleCollapsed: () => void;
+  /** 所在 Tab 是否可见：不可见时暂停 observer 与滚动跟随（原 collapsed 语义） */
+  active: boolean;
 }
 
 interface PageDim {
@@ -26,15 +26,14 @@ interface PageDim {
   height: number;
 }
 
-export default function ThumbnailPanel({
+export default function ThumbnailList({
   pdfDoc,
   numPages,
   currentPage,
   onPageClick,
   isLoading,
-  collapsed,
-  onToggleCollapsed,
-}: ThumbnailPanelProps) {
+  active,
+}: ThumbnailListProps) {
   const scrollRef = useRef<HTMLDivElement>(null);
   const itemRefs = useRef<Map<number, HTMLDivElement>>(new Map());
   const observerRef = useRef<IntersectionObserver | null>(null);
@@ -81,7 +80,7 @@ export default function ThumbnailPanel({
   // IntersectionObserver：仅可见（含 100px 缓冲）页面入 visiblePages
   useEffect(() => {
     const root = scrollRef.current;
-    if (!root || collapsed || numPages === 0) return;
+    if (!root || !active || numPages === 0) return;
     const observer = new IntersectionObserver(
       (entries) => {
         setVisiblePages((prev) => {
@@ -105,7 +104,7 @@ export default function ThumbnailPanel({
       observer.disconnect();
       observerRef.current = null;
     };
-  }, [numPages, collapsed]);
+  }, [numPages, active]);
 
   const setItemRef = useCallback(
     (pageNum: number) => (el: HTMLDivElement | null) => {
@@ -141,7 +140,7 @@ export default function ThumbnailPanel({
   }, []);
 
   useEffect(() => {
-    if (collapsed || numPages === 0) return;
+    if (!active || numPages === 0) return;
     if (!didInitialScrollRef.current) {
       const el = itemRefs.current.get(currentPage);
       if (!el) return;
@@ -174,7 +173,7 @@ export default function ThumbnailPanel({
         }, THROTTLE_MS - elapsed);
       }
     }
-  }, [currentPage, collapsed, numPages, pdfDoc, isLoading, scrollToPage]);
+  }, [currentPage, active, numPages, pdfDoc, isLoading, scrollToPage]);
 
   useEffect(() => {
     return () => {
@@ -202,74 +201,39 @@ export default function ThumbnailPanel({
   const hasContent = pdfDoc && numPages > 0;
 
   return (
-    <div
-      className={`flex-shrink-0 flex flex-col border-r border-stone-200 bg-[#f7f4f0] transition-all duration-200 ease-out overflow-hidden ${
-        collapsed ? 'w-8' : 'w-[180px]'
-      }`}
-    >
-      {/* 顶部小栏 */}
-      <div className="flex-shrink-0 h-9 flex items-center border-b border-stone-200/60">
-        {!collapsed ? (
-          <div className="flex items-center justify-between w-full px-2.5">
-            <span className="text-[11px] font-medium text-stone-400 tracking-wide">页面</span>
-            <button
-              onClick={onToggleCollapsed}
-              className="w-6 h-6 flex items-center justify-center rounded hover:bg-stone-200/50 text-stone-400 hover:text-stone-600 transition-colors cursor-pointer"
-              title="收起"
-            >
-              <i className="ri-arrow-left-s-line text-sm"></i>
-            </button>
-          </div>
-        ) : (
-          <div className="w-full flex justify-center pt-1.5">
-            <button
-              onClick={onToggleCollapsed}
-              className="w-6 h-6 flex items-center justify-center rounded hover:bg-stone-200/50 text-stone-400 hover:text-stone-600 transition-colors cursor-pointer"
-              title="展开"
-            >
-              <i className="ri-arrow-right-s-line text-sm"></i>
-            </button>
-          </div>
-        )}
-      </div>
-
-      {/* 缩略图列表 */}
-      {!collapsed && (
-        <div ref={scrollRef} className="flex-1 overflow-y-auto scrollbar-thin py-3 px-2.5">
-          {isLoading && (
-            <div className="space-y-3">
-              {[1, 2, 3].map((i) => (
-                <div key={i} className="w-full rounded-md overflow-hidden">
-                  <div className="w-full aspect-[3/4] skeleton-diagonal" />
-                  <div className="mt-1.5 h-3 w-8 rounded bg-stone-200" />
-                </div>
-              ))}
+    <div ref={scrollRef} className="flex-1 overflow-y-auto scrollbar-thin py-3 px-2.5">
+      {isLoading && (
+        <div className="space-y-3">
+          {[1, 2, 3].map((i) => (
+            <div key={i} className="w-full rounded-md overflow-hidden">
+              <div className="w-full aspect-[3/4] skeleton-diagonal" />
+              <div className="mt-1.5 h-3 w-8 rounded bg-stone-200" />
             </div>
-          )}
+          ))}
+        </div>
+      )}
 
-          {!isLoading && !hasContent && (
-            <div className="flex flex-col items-center justify-center h-40 gap-2 text-stone-400">
-              <i className="ri-file-pdf-2-line text-lg"></i>
-              <span className="text-[10px]">未打开 PDF</span>
-            </div>
-          )}
+      {!isLoading && !hasContent && (
+        <div className="flex flex-col items-center justify-center h-40 gap-2 text-stone-400">
+          <i className="ri-file-pdf-2-line text-lg"></i>
+          <span className="text-[10px]">未打开 PDF</span>
+        </div>
+      )}
 
-          {!isLoading && hasContent && (
-            <div className="space-y-2.5">
-              {pages.map((pageNum) => (
-                <ThumbnailItem
-                  key={pageNum}
-                  ref={setItemRef(pageNum)}
-                  pageNum={pageNum}
-                  isCurrent={pageNum === currentPage}
-                  visible={visiblePages.has(pageNum)}
-                  aspectRatio={aspectRatioFor(pageNum)}
-                  onClick={() => onPageClick(pageNum)}
-                  getThumbnail={getThumbnail}
-                />
-              ))}
-            </div>
-          )}
+      {!isLoading && hasContent && (
+        <div className="space-y-2.5">
+          {pages.map((pageNum) => (
+            <ThumbnailItem
+              key={pageNum}
+              ref={setItemRef(pageNum)}
+              pageNum={pageNum}
+              isCurrent={pageNum === currentPage}
+              visible={visiblePages.has(pageNum)}
+              aspectRatio={aspectRatioFor(pageNum)}
+              onClick={() => onPageClick(pageNum)}
+              getThumbnail={getThumbnail}
+            />
+          ))}
         </div>
       )}
     </div>

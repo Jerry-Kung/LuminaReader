@@ -24,10 +24,12 @@ import {
 import Toolbar, { type CursorMode } from './components/Toolbar';
 import PDFViewer, { type SelectedArea } from './components/PDFViewer';
 import AIAssistantPanel, { type ChipPluginType, type ChipsState } from './components/AIAssistantPanel';
-import ThumbnailPanel from './components/ThumbnailPanel';
+import SidebarPanel from './components/SidebarPanel';
 import TextExtractionBanner from './components/TextExtractionBanner';
 import { useTextSelection } from './hooks/useTextSelection';
 import { useTextExtraction } from '@/hooks/useTextExtraction';
+import { useToc } from '@/hooks/useToc';
+import { useBookmarks } from '@/hooks/useBookmarks';
 
 type RetryPayload =
   | {
@@ -337,6 +339,28 @@ export default function ReaderPage() {
 
   // V1.2.1：全书文本提取状态（状态条 + 补提取入口）
   const textExtraction = useTextExtraction(pdfId);
+
+  // V1.2.2：目录 + 书签
+  const toc = useToc(pdfId, textExtraction.status);
+  const bookmarksApi = useBookmarks(pdfId);
+  const [editingBookmarkId, setEditingBookmarkId] = useState<string | null>(null);
+
+  // 添加书签：记录当前视口（页码 + 页内偏移，复用 reportPosition 维护的 currentPage/currentOffset）
+  const handleAddBookmark = useCallback(async () => {
+    try {
+      const created = await bookmarksApi.add(currentPage, currentOffset);
+      if (created) {
+        setEditingBookmarkId(created.id);
+        setReaderToast(`已添加书签：${created.name}（可在左侧「书签」中改名）`);
+        if (readerToastTimerRef.current) clearTimeout(readerToastTimerRef.current);
+        readerToastTimerRef.current = setTimeout(() => setReaderToast(null), 5000);
+      }
+    } catch {
+      setReaderToast('添加书签失败，请重试。');
+      if (readerToastTimerRef.current) clearTimeout(readerToastTimerRef.current);
+      readerToastTimerRef.current = setTimeout(() => setReaderToast(null), 5000);
+    }
+  }, [bookmarksApi, currentPage, currentOffset]);
 
   // Load PDF bytes from backend when pdfId changes.
   useEffect(() => {
@@ -1779,6 +1803,7 @@ export default function ReaderPage() {
         onSelectCursorMode={handleSelectCursorMode}
         onTextModeBlockedByScan={handleTextModeBlockedByScan}
         onOpenSettings={() => navigate('/settings', { state: { from: `/reader/${pdfId}` } })}
+        onAddBookmark={numPages > 0 ? () => void handleAddBookmark() : undefined}
       />
 
       {pdfId && (
@@ -1790,14 +1815,28 @@ export default function ReaderPage() {
       )}
 
       <div className="flex-1 flex overflow-hidden relative">
-        <ThumbnailPanel
+        <SidebarPanel
           pdfDoc={pdfDoc}
           numPages={numPages}
           currentPage={currentPage}
-          onPageClick={goToPage}
           isLoading={isLoading}
           collapsed={thumbnailCollapsed}
           onToggleCollapsed={handleToggleThumbnail}
+          onPageClick={goToPage}
+          toc={toc.toc}
+          tocLoading={toc.loading}
+          tocError={toc.error}
+          onTocRecognize={toc.recognize}
+          onTocFetchEstimate={toc.fetchEstimate}
+          onTocRecognizeLlm={toc.recognizeLlm}
+          bookmarks={bookmarksApi.bookmarks}
+          bookmarksLoading={bookmarksApi.loading}
+          editingBookmarkId={editingBookmarkId}
+          onBookmarkEditingDone={() => setEditingBookmarkId(null)}
+          onBookmarkAdd={handleAddBookmark}
+          onBookmarkRename={bookmarksApi.rename}
+          onBookmarkRemove={bookmarksApi.remove}
+          onBookmarkJump={goToPosition}
         />
         <PDFViewer
           pdfDoc={pdfDoc}

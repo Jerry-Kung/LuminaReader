@@ -17,6 +17,8 @@ interface ToolbarProps {
   onSelectCursorMode: (mode: CursorMode) => void;
   onTextModeBlockedByScan?: () => void;
   onOpenSettings: () => void;
+  /** V1.2.2：在当前阅读位置添加书签（undefined 时不渲染按钮） */
+  onAddBookmark?: () => void;
 }
 
 export default function Toolbar({
@@ -35,6 +37,7 @@ export default function Toolbar({
   onSelectCursorMode,
   onTextModeBlockedByScan,
   onOpenSettings,
+  onAddBookmark,
 }: ToolbarProps) {
   const handlePageInput = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter') {
@@ -124,6 +127,18 @@ export default function Toolbar({
 
       {numPages > 0 && (
         <div className="flex items-center gap-4">
+          {onAddBookmark && (
+            <>
+              <button
+                onClick={onAddBookmark}
+                className="w-8 h-8 flex items-center justify-center rounded-md text-stone-600 hover:bg-stone-100 cursor-pointer transition-colors"
+                title="在当前位置添加书签"
+              >
+                <i className="ri-bookmark-line"></i>
+              </button>
+              <div className="w-px h-5 bg-stone-200" />
+            </>
+          )}
           <div className="flex items-center gap-1">
             <button
               onClick={onPrevPage}
