@@ -1,6 +1,6 @@
 import logging
 
-from fastapi import APIRouter, File, Form, Request, UploadFile
+from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, Response
 
 from lumina.config import get_settings
@@ -16,9 +16,19 @@ from lumina.projects.manager import (
 )
 from lumina.projects.paths import project_pdf_path
 from lumina.pdftext import read_status, schedule_extraction, wait_for_pdf
+from lumina.providers import get_provider
+from lumina.providers.base import Provider, ProviderError
 from lumina.request_id import generate_request_id
 from lumina.schemas.api import PdfUploadData, ReadingPositionUpdate, error_response, ok_response
 from lumina.sessions import get_session_store
+from lumina.toc import (
+    TocResult,
+    get_or_recognize,
+    llm_estimate,
+    run_free_recognition,
+    run_llm_recognition,
+)
+from lumina.toc.llm import TocLlmInvalidError
 
 router = APIRouter(prefix="/pdfs", tags=["pdfs"])
 logger = get_logger("lumina.pdfs")
@@ -461,3 +471,133 @@ async def list_pdf_conversations(pdf_id: str, include_cleared: bool = False):
         project_id=entry.id,
     )
     return ok_response({"items": items})
+
+
+# ---------------------------------------------------------------------------
+# V1.2.2: 目录（TOC）端点
+# ---------------------------------------------------------------------------
+
+
+def _toc_payload(pdf_id: str, result: TocResult) -> dict:
+    return {
+        "pdf_id": pdf_id,
+        "status": result.status,
+        "source": result.source,
+        "chapters": [
+            {
+                "id": c.id,
+                "title": c.title,
+                "page": c.start_page,
+                "depth": c.depth,
+                "parent_id": c.parent_id,
+                "order_index": c.order_index,
+            }
+            for c in result.chapters
+        ],
+        "llm_available": result.llm_available,
+        "text_status": result.text_status,
+        "error": result.error,
+    }
+
+
+@router.get("/{pdf_id}/toc")
+async def get_toc(pdf_id: str):
+    """惰性识别：首次访问自动跑第 1→2 层（本地秒级），已识别直接读库。"""
+    request_id = generate_request_id()
+    entry = find_by_pdf_id(pdf_id)
+    if entry is None:
+        return _pdf_not_found(request_id, pdf_id)
+    result = get_or_recognize(entry.id, pdf_id)
+    _log_pdf_call(request_id=request_id, http_status=200, pdf_id=pdf_id, project_id=entry.id)
+    return ok_response(_toc_payload(pdf_id, result))
+
+
+@router.post("/{pdf_id}/toc/recognize")
+async def recognize_toc(pdf_id: str):
+    """强制按第 1→2 层重跑（"重新识别"入口）；LLM 层永远只走 recognize-llm。"""
+    request_id = generate_request_id()
+    entry = find_by_pdf_id(pdf_id)
+    if entry is None:
+        return _pdf_not_found(request_id, pdf_id)
+    result = run_free_recognition(entry.id, pdf_id)
+    _log_pdf_call(request_id=request_id, http_status=200, pdf_id=pdf_id, project_id=entry.id)
+    return ok_response(_toc_payload(pdf_id, result))
+
+
+def _toc_llm_unavailable(request_id: str, pdf_id: str, project_id: str) -> JSONResponse:
+    _log_pdf_call(
+        request_id=request_id,
+        http_status=409,
+        error_code="TOC_LLM_UNAVAILABLE",
+        pdf_id=pdf_id,
+        project_id=project_id,
+    )
+    return JSONResponse(
+        status_code=409,
+        content=error_response(
+            code="TOC_LLM_UNAVAILABLE",
+            message="全书文本不可用（扫描版或尚未提取），无法进行 AI 目录识别。",
+            request_id=request_id,
+        ),
+    )
+
+
+@router.get("/{pdf_id}/toc/llm-estimate")
+async def get_toc_llm_estimate(pdf_id: str):
+    """LLM 识别前的花费预估（规格 D9：token 估算 + 单价表金额，未命中 cost=null）。"""
+    request_id = generate_request_id()
+    entry = find_by_pdf_id(pdf_id)
+    if entry is None:
+        return _pdf_not_found(request_id, pdf_id)
+    estimate = llm_estimate(entry.id, pdf_id)
+    if estimate is None:
+        return _toc_llm_unavailable(request_id, pdf_id, entry.id)
+    _log_pdf_call(request_id=request_id, http_status=200, pdf_id=pdf_id, project_id=entry.id)
+    return ok_response(estimate)
+
+
+@router.post("/{pdf_id}/toc/recognize-llm")
+async def recognize_toc_llm(pdf_id: str, provider: Provider = Depends(get_provider)):
+    """用户确认花费后的一次性 LLM 识别；失败旧目录保留（规格 D10 / F1）。"""
+    request_id = generate_request_id()
+    entry = find_by_pdf_id(pdf_id)
+    if entry is None:
+        return _pdf_not_found(request_id, pdf_id)
+    try:
+        result = await run_llm_recognition(entry.id, pdf_id, provider)
+    except LookupError:
+        return _toc_llm_unavailable(request_id, pdf_id, entry.id)
+    except TocLlmInvalidError as exc:
+        _log_pdf_call(
+            request_id=request_id,
+            http_status=422,
+            error_code="TOC_LLM_INVALID",
+            pdf_id=pdf_id,
+            project_id=entry.id,
+        )
+        return JSONResponse(
+            status_code=422,
+            content=error_response(
+                code="TOC_LLM_INVALID",
+                message=f"AI 返回的目录结构不合法，可重试。（{exc}）",
+                request_id=request_id,
+            ),
+        )
+    except ProviderError as exc:
+        _log_pdf_call(
+            request_id=request_id,
+            http_status=502,
+            error_code="TOC_LLM_FAILED",
+            pdf_id=pdf_id,
+            project_id=entry.id,
+        )
+        return JSONResponse(
+            status_code=502,
+            content=error_response(
+                code="TOC_LLM_FAILED",
+                message=f"AI 目录识别调用失败，可重试。（{exc.message}）",
+                request_id=request_id,
+            ),
+        )
+    _log_pdf_call(request_id=request_id, http_status=200, pdf_id=pdf_id, project_id=entry.id)
+    return ok_response(_toc_payload(pdf_id, result))
