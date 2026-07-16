@@ -73,3 +73,19 @@ def test_rename_and_delete(client, data_root):
     # 重复删除幂等 204
     assert client.delete(f"/api/v1/pdfs/{created.pdf_id}/bookmarks/{bid}").status_code == 204
     assert client.get(f"/api/v1/pdfs/{created.pdf_id}/bookmarks").json()["data"]["bookmarks"] == []
+
+
+def test_rename_rejects_whitespace_only_name(client, data_root):
+    created = _book(client)
+    bid = client.post(
+        f"/api/v1/pdfs/{created.pdf_id}/bookmarks", json={"name": "原名", "page": 3}
+    ).json()["data"]["id"]
+
+    patch = client.patch(
+        f"/api/v1/pdfs/{created.pdf_id}/bookmarks/{bid}", json={"name": "   "}
+    )
+    assert patch.status_code == 400
+    assert patch.json()["error"]["code"] == "INVALID_REQUEST"
+
+    got = client.get(f"/api/v1/pdfs/{created.pdf_id}/bookmarks").json()["data"]["bookmarks"]
+    assert got[0]["name"] == "原名"

@@ -1,6 +1,6 @@
 from typing import Any, Literal, TypeVar
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from lumina.schemas.selection import ImagePayload, Selection
 
@@ -145,6 +145,14 @@ class BookmarkCreate(BaseModel):
 
 class BookmarkRename(BaseModel):
     name: str = Field(..., min_length=1, max_length=200)
+
+    @field_validator("name")
+    @classmethod
+    def _strip_and_require_nonempty(cls, value: str) -> str:
+        stripped = value.strip()
+        if not stripped:
+            raise ValueError("name must not be blank")
+        return stripped
 
 
 class LibraryListData(BaseModel):

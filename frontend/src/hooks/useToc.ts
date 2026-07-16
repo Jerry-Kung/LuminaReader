@@ -21,7 +21,7 @@ export function useToc(pdfId: string | undefined, textStatus: TextExtractionUiSt
   const generationRef = useRef(0);
 
   const load = useCallback(
-    async (fetcher: (id: string) => Promise<TocInfo>) => {
+    async (fetcher: (id: string) => Promise<TocInfo>, options?: { rethrow?: boolean }) => {
       if (!pdfId) return;
       const generation = ++generationRef.current;
       setLoading(true);
@@ -32,6 +32,9 @@ export function useToc(pdfId: string | undefined, textStatus: TextExtractionUiSt
         setToc(data);
       } catch (err) {
         if (generationRef.current !== generation) return;
+        // LLM 识别路径由调用方（TocTab）用 llmError 局部承接，不污染 hook 级 error，
+        // 但仍需把原始错误抛回去，否则调用方的 try/catch 永远收不到拒绝（规格 fast-follow）。
+        if (options?.rethrow) throw err;
         setError(err instanceof Error ? err.message : '目录加载失败');
       } finally {
         if (generationRef.current === generation) setLoading(false);
@@ -63,7 +66,7 @@ export function useToc(pdfId: string | undefined, textStatus: TextExtractionUiSt
   }, [pdfId]);
 
   const recognize = useCallback(() => load(recognizeToc), [load]);
-  const recognizeLlm = useCallback(() => load(recognizeTocWithLlm), [load]);
+  const recognizeLlm = useCallback(() => load(recognizeTocWithLlm, { rethrow: true }), [load]);
   const fetchEstimate = useCallback((): Promise<TocLlmEstimate> => {
     if (!pdfId) return Promise.reject(new Error('no pdf'));
     return getTocLlmEstimate(pdfId);
