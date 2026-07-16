@@ -85,3 +85,18 @@ async def test_recognize_rejects_invalid_output(bad):
     provider = CannedProvider(bad)
     with pytest.raises(TocLlmInvalidError):
         await recognize_with_llm(provider, [(1, "第一章")], page_count=20)
+
+
+@pytest.mark.asyncio
+async def test_recognize_clamps_invalid_level_to_zero():
+    # level 越界 / 非 int / 缺省 → 钳位为 0，而非报错（规格约束）
+    payload = json.dumps([
+        {"title": "A", "page": 1, "level": 5},
+        {"title": "B", "page": 2, "level": -1},
+        {"title": "C", "page": 3, "level": "x"},
+        {"title": "D", "page": 4},
+        {"title": "E", "page": 5, "level": 2},
+    ])
+    provider = CannedProvider(payload)
+    items = await recognize_with_llm(provider, [(1, "第一章")], page_count=20)
+    assert [i.depth for i in items] == [0, 0, 0, 0, 2]
