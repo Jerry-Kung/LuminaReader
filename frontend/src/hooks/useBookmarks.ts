@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   createBookmark,
   deleteBookmark,
@@ -11,25 +11,24 @@ import {
 export function useBookmarks(pdfId: string | undefined) {
   const [bookmarks, setBookmarks] = useState<BookmarkItem[]>([]);
   const [loading, setLoading] = useState(false);
+  const generationRef = useRef(0);
 
   useEffect(() => {
+    generationRef.current += 1;
+    const generation = generationRef.current;
     setBookmarks([]);
     if (!pdfId) return;
-    let cancelled = false;
     setLoading(true);
     listBookmarks(pdfId)
       .then((items) => {
-        if (!cancelled) setBookmarks(items);
+        if (generationRef.current === generation) setBookmarks(items);
       })
       .catch(() => {
         /* MAY 档数据，加载失败静默为空列表 */
       })
       .finally(() => {
-        if (!cancelled) setLoading(false);
+        if (generationRef.current === generation) setLoading(false);
       });
-    return () => {
-      cancelled = true;
-    };
   }, [pdfId]);
 
   const sortInsert = (items: BookmarkItem[]) =>
@@ -38,10 +37,12 @@ export function useBookmarks(pdfId: string | undefined) {
   const add = useCallback(
     async (page: number, offsetRatio: number): Promise<BookmarkItem | null> => {
       if (!pdfId) return null;
+      const generation = generationRef.current;
       const created = await createBookmark(pdfId, {
         page,
         offset_ratio: Math.max(0, Math.min(1, offsetRatio)),
       });
+      if (generationRef.current !== generation) return created;
       setBookmarks((prev) => sortInsert([...prev, created]));
       return created;
     },
@@ -51,7 +52,9 @@ export function useBookmarks(pdfId: string | undefined) {
   const rename = useCallback(
     async (id: string, name: string) => {
       if (!pdfId) return;
+      const generation = generationRef.current;
       await renameBookmark(pdfId, id, name);
+      if (generationRef.current !== generation) return;
       setBookmarks((prev) => prev.map((b) => (b.id === id ? { ...b, name } : b)));
     },
     [pdfId],
@@ -60,7 +63,9 @@ export function useBookmarks(pdfId: string | undefined) {
   const remove = useCallback(
     async (id: string) => {
       if (!pdfId) return;
+      const generation = generationRef.current;
       await deleteBookmark(pdfId, id);
+      if (generationRef.current !== generation) return;
       setBookmarks((prev) => prev.filter((b) => b.id !== id));
     },
     [pdfId],

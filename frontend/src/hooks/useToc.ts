@@ -41,7 +41,9 @@ export function useToc(pdfId: string | undefined, textStatus: TextExtractionUiSt
   );
 
   useEffect(() => {
+    generationRef.current += 1;
     setToc(null);
+    setError(null);
     if (pdfId) void load(getToc);
   }, [pdfId, load]);
 
@@ -50,11 +52,11 @@ export function useToc(pdfId: string | undefined, textStatus: TextExtractionUiSt
   useEffect(() => {
     if (textStatus !== 'ok') return;
     if (retriedAfterExtractionRef.current) return;
-    if (toc && toc.status === 'none' && toc.text_status !== 'ok') {
+    if (toc && toc.pdf_id === pdfId && toc.status === 'none' && toc.text_status !== 'ok') {
       retriedAfterExtractionRef.current = true;
       void load(recognizeToc);
     }
-  }, [textStatus, toc, load]);
+  }, [textStatus, toc, load, pdfId]);
 
   useEffect(() => {
     retriedAfterExtractionRef.current = false;
