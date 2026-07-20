@@ -231,6 +231,7 @@ def _schedule(project_id: str, pdf_id: str, provider: Provider) -> None:
 
 
 def start_build(project_id: str, pdf_id: str, provider: Provider) -> tuple[MemoryState, bool]:
+    """启动/续跑记忆构建。必须在事件循环内调用（内部 `_schedule` 用 `get_running_loop()` 建任务）。"""
     existing = _INFLIGHT.get(pdf_id)
     if existing is not None and not existing.done():
         return read_state(project_id, pdf_id), False
@@ -257,6 +258,7 @@ def start_build(project_id: str, pdf_id: str, provider: Provider) -> tuple[Memor
 
 
 def start_rebuild(project_id: str, pdf_id: str, provider: Provider) -> tuple[MemoryState, bool]:
+    """重建记忆（清空快照重来）。必须在事件循环内调用（内部 `_schedule` 用 `get_running_loop()` 建任务）。"""
     existing = _INFLIGHT.get(pdf_id)
     if existing is not None and not existing.done():
         return read_state(project_id, pdf_id), False
@@ -341,7 +343,9 @@ async def _run_batch(project_id: str, pdf_id: str, provider: Provider) -> None:
             _persist_unit_ok(conn, pdf_id, unit, summary, concepts)
 
         remaining = [u for u in list_memory_units(conn, pdf_id) if u.status != "ok"]
-        if cancelled:
+        if cancelled or pdf_id in _CANCEL:
+            # 末尾复查：全部单元跑完后、进入总结分支前，若取消已到达也不再花钱调用
+            # summarize_book（并避免删除书籍时 wait_for_pdf(timeout=30) 卡等总结调用）。
             _finish(conn, pdf_id, status=STATUS_PARTIAL, error="用户取消")
         elif remaining:
             _finish(conn, pdf_id, status=STATUS_PARTIAL, error=f"{len(remaining)} 个章节加工失败")

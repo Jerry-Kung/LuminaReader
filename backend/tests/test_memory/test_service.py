@@ -80,6 +80,26 @@ async def test_build_happy_path_ready(data_root):
 
 
 @pytest.mark.asyncio
+async def test_book_summary_failure_partial_then_retry(data_root):
+    created = _make_book(data_root)
+    provider = ScriptedProvider([UNIT_JSON, "BOOM"])  # 单元成功、总结失败
+    service.start_build(created.project_id, created.pdf_id, provider)
+    final = await _wait_done(created.project_id, created.pdf_id)
+    assert final.meta.status == service.STATUS_PARTIAL
+    assert "总结" in (final.meta.error or "")
+    assert all(u.status == "ok" for u in final.units)
+
+    # 再次 build：pending 为空，直接重试总结（仅 1 次调用）
+    provider2 = ScriptedProvider(["# 总结"])
+    _, started = service.start_build(created.project_id, created.pdf_id, provider2)
+    assert started is True
+    final2 = await _wait_done(created.project_id, created.pdf_id)
+    assert final2.meta.status == service.STATUS_READY
+    assert final2.meta.book_summary == "# 总结"
+    assert len(provider2.calls) == 1
+
+
+@pytest.mark.asyncio
 async def test_unit_failure_partial_then_resume(data_root, monkeypatch):
     # 预算压小 → 8 页 / 每单元 ~2 页 → 多单元；首单元失败其余继续
     from lumina.config import get_settings
