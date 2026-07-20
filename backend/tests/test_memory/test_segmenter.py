@@ -69,3 +69,18 @@ def test_single_page_over_budget_still_one_page_unit():
 
 def test_empty_book():
     assert build_units([], 0, {}, max_chars=100) == []
+
+
+def test_exact_budget_fit_stays_in_segment():
+    # 累计恰好 == max_chars 不提前开新段（拆分条件是严格 >）
+    units = build_units([], 4, {1: 100, 2: 100, 3: 100, 4: 100}, max_chars=200)
+    assert [(u.start_page, u.end_page) for u in units] == [(1, 2), (3, 4)]
+
+
+def test_start_page_lower_bound_clamp():
+    # start_page 为 0 或负数时，应 clamp 到 1
+    chapters = [_chap(0, 0, "C1", 0), _chap(1, 0, "C2", 5)]
+    units = build_units(chapters, 10, _counts(10), max_chars=10_000)
+    # C1 的 start_page=0 被 clamp 到 1；C1 [1,4]，C2 [5,10]
+    assert units[0] == UnitSpec(title="C1", start_page=1, end_page=4)
+    assert units[1] == UnitSpec(title="C2", start_page=5, end_page=10)
