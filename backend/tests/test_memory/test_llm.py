@@ -85,6 +85,51 @@ def test_concepts_capped_at_50():
     assert len(concepts) == 50
 
 
+def test_bool_page_skipped():
+    """bool 是 int 子类，必须跳过（不能隐式转成 page=1）。"""
+    _, concepts = parse_unit_response(
+        _payload(concepts=[
+            {"term": "t", "definition": "d", "page": True},
+            {"term": "ok", "definition": "fine", "page": 2},
+        ]),
+        1, 5,
+    )
+    assert concepts == [ConceptDraft(term="ok", definition="fine", page=2)]
+
+
+def test_fence_without_json_tag():
+    """围栏不带 json 标签也能解析。"""
+    text = f"```\n{_payload()}\n```"
+    summary, _ = parse_unit_response(text, 1, 5)
+    assert summary.startswith("## 要点")
+
+
+def test_mixed_invalid_valid_over_50_cap():
+    """坏条目不计入容量上限；60 个有效概念 + 10 个坏的，结果 50 个有效的。"""
+    concepts_list = []
+    # 60 个有效的
+    for i in range(60):
+        concepts_list.append({"term": f"t{i}", "definition": "d", "page": 1})
+    # 穿插 10 个坏的（这些不应该计入上限）
+    for i in range(10):
+        concepts_list.insert(i * 7, {"term": "", "definition": "d", "page": 1})  # 空 term
+
+    _, concepts = parse_unit_response(_payload(concepts=concepts_list), 1, 5)
+    assert len(concepts) == 50
+    # 验证都是有效的（term 非空）
+    assert all(c.term for c in concepts)
+
+
+def test_empty_concepts_list_valid():
+    """显式的空概念列表是有效的。"""
+    summary, concepts = parse_unit_response(
+        _payload(concepts=[]),
+        1, 5,
+    )
+    assert summary.startswith("## 要点")
+    assert concepts == []
+
+
 def test_empty_summary_invalid():
     with pytest.raises(MemoryLlmInvalidError):
         parse_unit_response(_payload(summary="  "), 1, 5)
