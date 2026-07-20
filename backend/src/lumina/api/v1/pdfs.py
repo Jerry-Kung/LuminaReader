@@ -730,3 +730,153 @@ async def remove_bookmark(pdf_id: str, bookmark_id: str):
     _log_pdf_call(request_id=request_id, http_status=204, pdf_id=pdf_id, project_id=entry.id)
     return Response(status_code=204)
 
+
+# ---------------------------------------------------------------------------
+# V1.2.3: 记忆加工（memory）端点
+# ---------------------------------------------------------------------------
+
+from lumina.memory import (  # noqa: E402
+    MemoryAlreadyReadyError,
+    MemoryState,
+    MemoryUnavailableError,
+)
+from lumina.memory import (  # noqa: E402
+    estimate as memory_estimate,
+)
+from lumina.memory import (  # noqa: E402
+    read_state as memory_read_state,
+)
+from lumina.memory import (  # noqa: E402
+    request_cancel as memory_request_cancel,
+)
+from lumina.memory import (  # noqa: E402
+    start_build as memory_start_build,
+)
+from lumina.memory import (  # noqa: E402
+    start_rebuild as memory_start_rebuild,
+)
+
+
+def _memory_payload(pdf_id: str, state: MemoryState) -> dict:
+    meta = state.meta
+    return {
+        "pdf_id": pdf_id,
+        "status": meta.status if meta else "none",
+        "unit_total": meta.unit_total if meta else 0,
+        "unit_done": meta.unit_done if meta else 0,
+        "model": meta.model if meta else None,
+        "toc_changed": state.toc_changed,
+        "book_summary": meta.book_summary if meta else None,
+        "error": meta.error if meta else None,
+        "units": [
+            {
+                "id": u.id,
+                "seq": u.seq,
+                "title": u.title,
+                "start_page": u.start_page,
+                "end_page": u.end_page,
+                "status": u.status,
+                "summary": u.summary,
+                "error": u.error,
+            }
+            for u in state.units
+        ],
+    }
+
+
+def _memory_unavailable(request_id: str, pdf_id: str, project_id: str) -> JSONResponse:
+    _log_pdf_call(
+        request_id=request_id, http_status=409, error_code="MEMORY_UNAVAILABLE",
+        pdf_id=pdf_id, project_id=project_id,
+    )
+    return JSONResponse(
+        status_code=409,
+        content=error_response(
+            code="MEMORY_UNAVAILABLE",
+            message="全书文本不可用（扫描版或尚未提取），无法建立记忆。",
+            request_id=request_id,
+        ),
+    )
+
+
+@router.get("/{pdf_id}/memory")
+async def get_memory(pdf_id: str):
+    request_id = generate_request_id()
+    entry = find_by_pdf_id(pdf_id)
+    if entry is None:
+        return _pdf_not_found(request_id, pdf_id)
+    state = memory_read_state(entry.id, pdf_id)
+    _log_pdf_call(request_id=request_id, http_status=200, pdf_id=pdf_id, project_id=entry.id)
+    return ok_response(_memory_payload(pdf_id, state))
+
+
+@router.get("/{pdf_id}/memory/estimate")
+async def get_memory_estimate(pdf_id: str):
+    request_id = generate_request_id()
+    entry = find_by_pdf_id(pdf_id)
+    if entry is None:
+        return _pdf_not_found(request_id, pdf_id)
+    try:
+        data = memory_estimate(entry.id, pdf_id)
+    except MemoryUnavailableError:
+        return _memory_unavailable(request_id, pdf_id, entry.id)
+    _log_pdf_call(request_id=request_id, http_status=200, pdf_id=pdf_id, project_id=entry.id)
+    return ok_response(data)
+
+
+@router.post("/{pdf_id}/memory/build")
+async def build_memory(pdf_id: str, provider: Provider = Depends(get_provider)):
+    """首建或续跑（partial 只补缺失单元）；running 中幂等返回进度（规格 F2）。"""
+    request_id = generate_request_id()
+    entry = find_by_pdf_id(pdf_id)
+    if entry is None:
+        return _pdf_not_found(request_id, pdf_id)
+    try:
+        state, started = memory_start_build(entry.id, pdf_id, provider)
+    except MemoryUnavailableError:
+        return _memory_unavailable(request_id, pdf_id, entry.id)
+    except MemoryAlreadyReadyError:
+        _log_pdf_call(
+            request_id=request_id, http_status=409, error_code="MEMORY_ALREADY_READY",
+            pdf_id=pdf_id, project_id=entry.id,
+        )
+        return JSONResponse(
+            status_code=409,
+            content=error_response(
+                code="MEMORY_ALREADY_READY",
+                message="记忆已完整，如需重跑请使用重建。",
+                request_id=request_id,
+            ),
+        )
+    status_code = 202 if started else 200
+    _log_pdf_call(request_id=request_id, http_status=status_code, pdf_id=pdf_id, project_id=entry.id)
+    return JSONResponse(status_code=status_code, content=ok_response(_memory_payload(pdf_id, state)))
+
+
+@router.post("/{pdf_id}/memory/rebuild")
+async def rebuild_memory(pdf_id: str, provider: Provider = Depends(get_provider)):
+    """整体重建：清旧产物重新分段跑批；running 中幂等返回进度（规格 F2.8）。"""
+    request_id = generate_request_id()
+    entry = find_by_pdf_id(pdf_id)
+    if entry is None:
+        return _pdf_not_found(request_id, pdf_id)
+    try:
+        state, started = memory_start_rebuild(entry.id, pdf_id, provider)
+    except MemoryUnavailableError:
+        return _memory_unavailable(request_id, pdf_id, entry.id)
+    status_code = 202 if started else 200
+    _log_pdf_call(request_id=request_id, http_status=status_code, pdf_id=pdf_id, project_id=entry.id)
+    return JSONResponse(status_code=status_code, content=ok_response(_memory_payload(pdf_id, state)))
+
+
+@router.post("/{pdf_id}/memory/cancel")
+async def cancel_memory(pdf_id: str):
+    """协作式取消：当前单元调用完成后停止；非 running 幂等（规格 F2.5）。"""
+    request_id = generate_request_id()
+    entry = find_by_pdf_id(pdf_id)
+    if entry is None:
+        return _pdf_not_found(request_id, pdf_id)
+    state = memory_request_cancel(entry.id, pdf_id)
+    _log_pdf_call(request_id=request_id, http_status=200, pdf_id=pdf_id, project_id=entry.id)
+    return ok_response(_memory_payload(pdf_id, state))
+
