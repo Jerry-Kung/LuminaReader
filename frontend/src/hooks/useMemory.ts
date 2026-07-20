@@ -54,7 +54,9 @@ export function useMemory(pdfId: string | undefined) {
   const runAction = useCallback(
     async (action: (id: string) => Promise<MemoryInfo>) => {
       if (!pdfId) return;
+      const generation = generationRef.current;
       const data = await action(pdfId);
+      if (generationRef.current !== generation) return;
       setMemory(data);
     },
     [pdfId],
