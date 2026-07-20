@@ -5,6 +5,7 @@
  */
 import { useMemo, useState } from 'react';
 import type { TocChapter, TocInfo, TocLlmEstimate } from '@/services/api';
+import CostEstimateDialog from './CostEstimateDialog';
 
 interface TocTabProps {
   toc: TocInfo | null;
@@ -201,37 +202,15 @@ export default function TocTab({
 
       {/* 花费预估确认框（规格 §6.4：触发前展示花费预估） */}
       {estimate && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/30" onClick={() => setEstimate(null)}>
-          <div
-            className="w-72 bg-white rounded-lg shadow-xl p-4 space-y-3"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <h3 className="text-sm font-medium text-stone-700">AI 识别目录 — 花费预估</h3>
-            <div className="text-[11px] text-stone-500 space-y-1 leading-relaxed">
-              <p>模型：{estimate.model}</p>
-              <p>预计输入：约 {estimate.estimated_input_tokens.toLocaleString()} tokens</p>
-              <p>
-                {estimate.estimated_cost != null
-                  ? `预计费用：约 $${estimate.estimated_cost.toFixed(4)}（估算，以账单为准）`
-                  : '该模型未在内置单价表中，请按 token 量自行估算费用'}
-              </p>
-            </div>
-            <div className="flex justify-end gap-2">
-              <button
-                onClick={() => setEstimate(null)}
-                className="px-3 py-1.5 text-xs rounded-md text-stone-500 hover:bg-stone-100 cursor-pointer"
-              >
-                取消
-              </button>
-              <button
-                onClick={() => void confirmLlm()}
-                className="px-3 py-1.5 text-xs rounded-md bg-amber-500 text-white hover:bg-amber-600 cursor-pointer"
-              >
-                确认识别
-              </button>
-            </div>
-          </div>
-        </div>
+        <CostEstimateDialog
+          title="AI 识别目录 — 花费预估"
+          model={estimate.model}
+          inputTokens={estimate.estimated_input_tokens}
+          cost={estimate.estimated_cost}
+          confirmLabel="确认识别"
+          onConfirm={() => void confirmLlm()}
+          onCancel={() => setEstimate(null)}
+        />
       )}
     </div>
   );

@@ -1148,6 +1148,112 @@ export async function deleteBookmark(pdfId: string, bookmarkId: string): Promise
   );
 }
 
+// ---------------------------------------------------------------------------
+// V1.2.3: 记忆加工（memory）
+// ---------------------------------------------------------------------------
+
+export type MemoryStatus = 'none' | 'running' | 'partial' | 'ready' | 'failed';
+export type MemoryUnitStatus = 'pending' | 'ok' | 'failed';
+
+export interface MemoryUnit {
+  id: string;
+  seq: number;
+  title: string;
+  start_page: number;
+  end_page: number;
+  status: MemoryUnitStatus;
+  summary: string | null;
+  error: string | null;
+}
+
+export interface MemoryInfo {
+  pdf_id: string;
+  status: MemoryStatus;
+  unit_total: number;
+  unit_done: number;
+  model: string | null;
+  toc_changed: boolean;
+  book_summary: string | null;
+  error: string | null;
+  units: MemoryUnit[];
+}
+
+export interface MemoryEstimate {
+  model: string;
+  scope: 'full' | 'remaining';
+  unit_count: number;
+  estimated_input_tokens: number;
+  estimated_output_tokens: number;
+  estimated_cost: number | null;
+  currency: string;
+}
+
+const EMPTY_MEMORY = (pdfId: string): MemoryInfo => ({
+  pdf_id: pdfId,
+  status: 'none',
+  unit_total: 0,
+  unit_done: 0,
+  model: null,
+  toc_changed: false,
+  book_summary: null,
+  error: null,
+  units: [],
+});
+
+async function fetchMemory(url: string, method: 'GET' | 'POST'): Promise<MemoryInfo> {
+  let response: Response;
+  try {
+    response = await fetch(url, { method });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to reach backend.';
+    throw new TranslateApiError('NETWORK_ERROR', msg);
+  }
+  return parseEnvelope<MemoryInfo>(response);
+}
+
+export async function getMemory(pdfId: string): Promise<MemoryInfo> {
+  if (!API_BASE) return EMPTY_MEMORY(pdfId);
+  return fetchMemory(`${API_BASE}/api/v1/pdfs/${encodeURIComponent(pdfId)}/memory`, 'GET');
+}
+
+export async function getMemoryEstimate(pdfId: string): Promise<MemoryEstimate> {
+  if (!API_BASE) {
+    return {
+      model: 'mock',
+      scope: 'full',
+      unit_count: 0,
+      estimated_input_tokens: 0,
+      estimated_output_tokens: 0,
+      estimated_cost: null,
+      currency: 'USD',
+    };
+  }
+  const url = `${API_BASE}/api/v1/pdfs/${encodeURIComponent(pdfId)}/memory/estimate`;
+  let response: Response;
+  try {
+    response = await fetch(url);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to reach backend.';
+    throw new TranslateApiError('NETWORK_ERROR', msg);
+  }
+  return parseEnvelope<MemoryEstimate>(response);
+}
+
+export async function buildMemory(pdfId: string): Promise<MemoryInfo> {
+  if (!API_BASE) return EMPTY_MEMORY(pdfId);
+  return fetchMemory(`${API_BASE}/api/v1/pdfs/${encodeURIComponent(pdfId)}/memory/build`, 'POST');
+}
+
+export async function rebuildMemory(pdfId: string): Promise<MemoryInfo> {
+  if (!API_BASE) return EMPTY_MEMORY(pdfId);
+  return fetchMemory(`${API_BASE}/api/v1/pdfs/${encodeURIComponent(pdfId)}/memory/rebuild`, 'POST');
+}
+
+export async function cancelMemory(pdfId: string): Promise<MemoryInfo> {
+  if (!API_BASE) return EMPTY_MEMORY(pdfId);
+  return fetchMemory(`${API_BASE}/api/v1/pdfs/${encodeURIComponent(pdfId)}/memory/cancel`, 'POST');
+}
+
 export async function listConversations(pdfId: string): Promise<ConversationSummary[]> {
   if (!API_BASE) return [];
   const url = `${API_BASE}/api/v1/pdfs/${encodeURIComponent(pdfId)}/conversations`;
