@@ -87,6 +87,15 @@ def test_bootstrap_valid_file_uses_user_data(patched_env, tmp_path) -> None:
     assert resolved.task_models["translate"] == "gpt-mini"
 
 
+def test_bootstrap_file_missing_memory_key_backfills_none(patched_env, tmp_path) -> None:
+    # V1.2.3 向前兼容：_valid_disk_doc() 未含 task_models.memory 键，模拟旧版 settings.json
+    path = tmp_path / "settings.json"
+    path.write_text(json.dumps(_valid_disk_doc()), encoding="utf-8")
+    resolved = settings_store.bootstrap()
+    assert resolved.source == "user_data"
+    assert resolved.task_models["memory"] is None
+
+
 def test_bootstrap_damaged_json_falls_back(patched_env, tmp_path) -> None:
     path = tmp_path / "settings.json"
     path.write_text("{not json", encoding="utf-8")

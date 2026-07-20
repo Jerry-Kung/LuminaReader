@@ -62,7 +62,7 @@ class ContextExpansionSettingsOut(BaseModel):
 
 class SettingsResponse(BaseModel):
     provider: SettingsProviderOut
-    task_models: dict[Literal["extract", "translate", "explain"], str | None]
+    task_models: dict[str, str | None]
     thinking: ThinkingSettingsOut = Field(default_factory=ThinkingSettingsOut)
     context_expansion: ContextExpansionSettingsOut = Field(
         default_factory=ContextExpansionSettingsOut

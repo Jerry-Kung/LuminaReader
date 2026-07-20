@@ -258,3 +258,35 @@ def test_put_context_expansion_non_bool(settings_client: TestClient) -> None:
     payload = _settings_payload(context_expansion={"enabled": "yes"})
     response = settings_client.put("/api/v1/settings", json=payload)
     assert response.status_code == 422
+
+
+# ---------------------------------------------------------------------------
+# V1.2.3: task_models.memory
+# ---------------------------------------------------------------------------
+
+
+def test_task_models_memory_roundtrip(settings_client: TestClient) -> None:
+    resp = settings_client.get("/api/v1/settings")
+    assert "memory" in resp.json()["data"]["task_models"]
+
+    put = settings_client.put(
+        "/api/v1/settings",
+        json=_settings_payload(task_models={"memory": "qwen-turbo"}),
+    )
+    assert put.status_code == 200
+    assert put.json()["data"]["task_models"]["memory"] == "qwen-turbo"
+
+    # 清回 null → 回落 default_model
+    put2 = settings_client.put(
+        "/api/v1/settings",
+        json=_settings_payload(task_models={"memory": None}),
+    )
+    assert put2.status_code == 200
+    assert put2.json()["data"]["task_models"]["memory"] is None
+
+
+def test_task_models_unknown_key_rejected_still(settings_client: TestClient) -> None:
+    payload = _settings_payload()
+    payload["task_models"] = {"bogus": "m"}
+    response = settings_client.put("/api/v1/settings", json=payload)
+    assert response.status_code == 422

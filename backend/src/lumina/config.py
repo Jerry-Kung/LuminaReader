@@ -36,6 +36,8 @@ class Settings(BaseSettings):
     lumina_context_max_chars: int = Field(default=16000, ge=1000, le=100_000)
     # V1.2.2：LLM 目录识别的输入样本字符上限（控成本，不喂全书全文）
     lumina_toc_sample_max_chars: int = Field(default=60000, ge=5000, le=300_000)
+    # V1.2.3：记忆加工单元的字符预算（超预算章节按页贪心拆分）
+    lumina_memory_unit_max_chars: int = Field(default=30000, ge=5000, le=200_000)
     selection_text_max_chars: int = Field(
         default=32000,
         ge=1000,

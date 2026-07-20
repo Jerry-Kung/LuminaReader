@@ -15,7 +15,7 @@ from lumina.projects.paths import settings_json_path
 
 logger = logging.getLogger("lumina.settings")
 
-TASK_TYPES = frozenset({"extract", "translate", "explain"})
+TASK_TYPES = frozenset({"extract", "translate", "explain", "memory"})
 ALLOWED_TOP_LEVEL_KEYS = frozenset(
     {"provider", "task_models", "thinking", "context_expansion"}
 )
@@ -53,7 +53,7 @@ class ResolvedSettings:
     api_key: str | None
     default_model: str
     timeout_seconds: int
-    task_models: dict[Literal["extract", "translate", "explain"], str | None]
+    task_models: dict[str, str | None]
     thinking: ThinkingSettings
     context_expansion: ContextExpansionSettings
     source: Literal["user_data", "env_fallback"]
@@ -107,7 +107,7 @@ def _validate_base_url(url: str) -> bool:
 
 
 def _default_task_models() -> dict[str, str | None]:
-    return {"extract": None, "translate": None, "explain": None}
+    return {"extract": None, "translate": None, "explain": None, "memory": None}
 
 
 def _validate_thinking(
@@ -263,7 +263,7 @@ def _validate_payload(
             errors.append(
                 {
                     "path": "task_models",
-                    "reason": "task_models keys must be exactly extract, translate, explain",
+                    "reason": "task_models keys must be exactly extract, translate, explain, memory",
                 }
             )
         for task in sorted(TASK_TYPES):
@@ -337,6 +337,7 @@ def _resolved_from_validated(
             "extract": task_models["extract"],
             "translate": task_models["translate"],
             "explain": task_models["explain"],
+            "memory": task_models["memory"],
         },
         thinking=validated["thinking"],
         context_expansion=validated["context_expansion"],
@@ -419,6 +420,11 @@ def bootstrap() -> ResolvedSettings:
     if sj_path.exists():
         try:
             raw = json.loads(sj_path.read_text(encoding="utf-8"))
+            # V1.2.3 向前兼容：旧版本写盘的 settings.json 无 task_models.memory 键，
+            # 读取时补默认 None，避免整体回退 .env
+            tm = raw.get("task_models")
+            if isinstance(tm, dict) and "memory" not in tm:
+                tm["memory"] = None
             validated = _validate_payload(
                 raw,
                 env_fallback_enabled=env_cfg.thinking_enabled,
