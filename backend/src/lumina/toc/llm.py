@@ -1,13 +1,12 @@
 """V1.2.2 第 3 层：LLM 兜底识别（手动触发，输入用候选行压缩样本控成本）。
 
-花费预估（规格 D9）：token 估算 + 内置常见模型单价表（未命中只报 token 量）。
+花费预估（规格 D9）：token 估算 + 单价表委托至 lumina/pricing（未命中只报 token 量）。
 单价表数值为编写时点参考价，标注"估算"呈现；表更新随版本走（R-V122-4）。
 """
 
 from __future__ import annotations
 
 import json
-import math
 import re
 
 from lumina.providers.base import LLMMessage, LLMRequest, Provider, TextPart
@@ -21,22 +20,6 @@ class TocLlmInvalidError(Exception):
 
 # 每页取开头 N 个非空行（章节标题多在页首）+ 全页候选模式命中行
 _HEAD_LINES_PER_PAGE = 3
-
-# USD / 1M input tokens；子串匹配，长 key 优先（gpt-4o-mini 先于 gpt-4o）
-_PRICE_TABLE_USD_PER_MTOK: dict[str, float] = {
-    "gpt-4o-mini": 0.15,
-    "gpt-4o": 2.5,
-    "gpt-4.1-mini": 0.4,
-    "gpt-4.1": 2.0,
-    "deepseek-chat": 0.27,
-    "deepseek-reasoner": 0.55,
-    "qwen-turbo": 0.05,
-    "qwen-plus": 0.11,
-    "qwen-max": 0.34,
-    "glm-4-flash": 0.0,
-    "claude-haiku": 1.0,
-    "claude-sonnet": 3.0,
-}
 
 _SYSTEM_PROMPT = (
     "You are a table-of-contents extraction assistant. The user gives you "
@@ -78,16 +61,20 @@ def build_sample(pages: list[tuple[int, str]], max_chars: int) -> str:
 
 
 def estimate_tokens(sample_chars: int) -> int:
-    """粗估：中英混排按 2 字符 ≈ 1 token（偏保守）。"""
-    return max(1, math.ceil(sample_chars / 2))
+    """粗估：中英混排按 2 字符 ≈ 1 token（偏保守）。
+
+    V1.2.3 起委托共享单价表。
+    """
+    from lumina.pricing import estimate_tokens as _shared
+
+    return _shared(sample_chars)
 
 
 def estimate_cost_usd(model: str, input_tokens: int) -> float | None:
-    lowered = model.lower()
-    for key in sorted(_PRICE_TABLE_USD_PER_MTOK, key=len, reverse=True):
-        if key in lowered:
-            return input_tokens / 1_000_000 * _PRICE_TABLE_USD_PER_MTOK[key]
-    return None
+    """V1.2.2 既有调用面（仅输入价口径）；V1.2.3 起委托 lumina.pricing。"""
+    from lumina.pricing import estimate_cost_usd as _shared
+
+    return _shared(model, input_tokens, 0)
 
 
 def _strip_code_fence(text: str) -> str:
