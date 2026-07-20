@@ -104,6 +104,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         data_root.mkdir(parents=True, exist_ok=True)
         load_catalog()
         apply_pending_for_all_projects()
+        # V1.2.3：进程崩溃 / 强杀残留的记忆跑批 running 一律降 partial
+        from lumina.memory import recover_orphan_running
+
+        recover_orphan_running()
         resolved = settings_store.bootstrap()
         app.state.provider = init_provider_from_resolved(
             api_key=resolved.api_key,
@@ -155,6 +159,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             # V1.2.1：等待进行中的全书文本提取收尾，再关数据库连接
             try:
                 await wait_for_inflight()
+            except Exception:
+                pass
+            # V1.2.3：置取消标志并等待进行中的记忆跑批收尾
+            try:
+                from lumina.memory import shutdown_inflight as memory_shutdown_inflight
+
+                await memory_shutdown_inflight()
             except Exception:
                 pass
             close_all()

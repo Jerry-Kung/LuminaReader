@@ -294,6 +294,11 @@ async def delete_pdf(pdf_id: str):
     # V1.2.1：等待该书进行中的文本提取收尾，避免 Windows 下句柄占用导致目录删除失败
     await wait_for_pdf(pdf_id)
 
+    # V1.2.3：取消并等待该书进行中的记忆跑批收尾（同 Windows 句柄考量）
+    from lumina.memory import wait_for_pdf as memory_wait_for_pdf
+
+    await memory_wait_for_pdf(pdf_id)
+
     delete_project(entry.id)
     _log_pdf_call(
         request_id=request_id,
