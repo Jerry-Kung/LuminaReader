@@ -641,3 +641,186 @@ def delete_bookmark(conn, pdf_id: str, bookmark_id: str) -> int:
         (bookmark_id, pdf_id),
     )
     return cursor.rowcount
+
+
+# ---------------------------------------------------------------------------
+# V1.2.3: 记忆加工（memory_meta / memory_units / memory_concepts，MAY 演化档）
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class MemoryMetaRow:
+    pdf_id: str
+    status: str  # "running" | "partial" | "ready" | "failed"
+    toc_source: str | None = None  # "outline" | "heuristic" | "llm" | "pages"
+    toc_updated_at: int | None = None
+    unit_total: int = 0
+    unit_done: int = 0
+    model: str | None = None
+    book_summary: str | None = None
+    created_at: int | None = None
+    updated_at: int | None = None
+    error: str | None = None
+
+
+@dataclass
+class MemoryUnitRow:
+    id: str
+    pdf_id: str
+    seq: int
+    title: str
+    start_page: int
+    end_page: int
+    status: str  # "pending" | "ok" | "failed"
+    summary: str | None = None
+    error: str | None = None
+    updated_at: int | None = None
+
+
+@dataclass
+class MemoryConceptRow:
+    id: str
+    pdf_id: str
+    unit_id: str
+    term: str
+    definition: str
+    page: int
+    created_at: int
+
+
+def get_memory_meta(conn, pdf_id: str) -> MemoryMetaRow | None:
+    try:
+        row = conn.execute(
+            """
+            SELECT pdf_id, status, toc_source, toc_updated_at, unit_total, unit_done,
+                   model, book_summary, created_at, updated_at, error
+            FROM memory_meta WHERE pdf_id = ?
+            """,
+            (pdf_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if row is None:
+        return None
+    return MemoryMetaRow(*row)
+
+
+def upsert_memory_meta(conn, row: MemoryMetaRow) -> None:
+    conn.execute(
+        """
+        INSERT INTO memory_meta (
+            pdf_id, status, toc_source, toc_updated_at, unit_total, unit_done,
+            model, book_summary, created_at, updated_at, error
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(pdf_id) DO UPDATE SET
+            status = excluded.status,
+            toc_source = excluded.toc_source,
+            toc_updated_at = excluded.toc_updated_at,
+            unit_total = excluded.unit_total,
+            unit_done = excluded.unit_done,
+            model = excluded.model,
+            book_summary = excluded.book_summary,
+            created_at = excluded.created_at,
+            updated_at = excluded.updated_at,
+            error = excluded.error
+        """,
+        (
+            row.pdf_id, row.status, row.toc_source, row.toc_updated_at,
+            row.unit_total, row.unit_done, row.model, row.book_summary,
+            row.created_at, row.updated_at, row.error,
+        ),
+    )
+
+
+def list_memory_units(conn, pdf_id: str) -> list[MemoryUnitRow]:
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, pdf_id, seq, title, start_page, end_page, status,
+                   summary, error, updated_at
+            FROM memory_units WHERE pdf_id = ? ORDER BY seq ASC
+            """,
+            (pdf_id,),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    return [MemoryUnitRow(*row) for row in rows]
+
+
+def replace_memory_units(conn, pdf_id: str, rows: list[MemoryUnitRow]) -> None:
+    """整体替换某 PDF 的加工单元快照（调用方负责事务包裹）。"""
+    conn.execute("DELETE FROM memory_units WHERE pdf_id = ?", (pdf_id,))
+    conn.executemany(
+        """
+        INSERT INTO memory_units (
+            id, pdf_id, seq, title, start_page, end_page, status, summary, error, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        [
+            (r.id, r.pdf_id, r.seq, r.title, r.start_page, r.end_page,
+             r.status, r.summary, r.error, r.updated_at)
+            for r in rows
+        ],
+    )
+
+
+def set_memory_unit_result(
+    conn, unit_id: str, *, status: str, summary: str | None,
+    error: str | None, updated_at: int,
+) -> None:
+    conn.execute(
+        "UPDATE memory_units SET status = ?, summary = ?, error = ?, updated_at = ? WHERE id = ?",
+        (status, summary, error, updated_at, unit_id),
+    )
+
+
+def replace_unit_concepts(conn, unit_id: str, rows: list[MemoryConceptRow]) -> None:
+    """按单元整体替换概念（单元重试时旧概念不残留；调用方负责事务包裹）。"""
+    conn.execute("DELETE FROM memory_concepts WHERE unit_id = ?", (unit_id,))
+    conn.executemany(
+        """
+        INSERT INTO memory_concepts (id, pdf_id, unit_id, term, definition, page, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        """,
+        [(r.id, r.pdf_id, r.unit_id, r.term, r.definition, r.page, r.created_at) for r in rows],
+    )
+
+
+def count_ok_memory_units(conn, pdf_id: str) -> int:
+    try:
+        row = conn.execute(
+            "SELECT COUNT(*) FROM memory_units WHERE pdf_id = ? AND status = 'ok'",
+            (pdf_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return 0
+    return int(row[0])
+
+
+def delete_memory_all(conn, pdf_id: str) -> None:
+    """整体重建前清空该 PDF 的全部记忆产物（调用方负责事务包裹）。"""
+    conn.execute("DELETE FROM memory_concepts WHERE pdf_id = ?", (pdf_id,))
+    conn.execute("DELETE FROM memory_units WHERE pdf_id = ?", (pdf_id,))
+    conn.execute("DELETE FROM memory_meta WHERE pdf_id = ?", (pdf_id,))
+
+
+def list_running_memory_pdf_ids(conn) -> list[str]:
+    try:
+        rows = conn.execute(
+            "SELECT pdf_id FROM memory_meta WHERE status = 'running'"
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    return [row[0] for row in rows]
+
+
+def get_pdf_text_char_counts(conn, pdf_id: str) -> dict[int, int]:
+    """切分器与花费预估的数据基础：页码 → 该页字符数。"""
+    try:
+        rows = conn.execute(
+            "SELECT page, char_count FROM pdf_text_pages WHERE pdf_id = ?",
+            (pdf_id,),
+        ).fetchall()
+    except sqlite3.Error:
+        return {}
+    return {int(row[0]): int(row[1]) for row in rows}
