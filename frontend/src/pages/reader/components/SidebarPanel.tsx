@@ -5,12 +5,14 @@
  */
 import { useState } from 'react';
 import type * as pdfjsLib from 'pdfjs-dist';
-import type { BookmarkItem, TocInfo, TocLlmEstimate } from '@/services/api';
+import type { BookmarkItem, MemoryEstimate, MemoryInfo, TocInfo, TocLlmEstimate } from '@/services/api';
+import type { TextExtractionUiStatus } from '@/hooks/useTextExtraction';
 import ThumbnailList from './ThumbnailPanel';
 import TocTab from './TocTab';
 import BookmarksTab from './BookmarksTab';
+import MemoryTab from './MemoryTab';
 
-export type SidebarTab = 'thumbnails' | 'toc' | 'bookmarks';
+export type SidebarTab = 'thumbnails' | 'toc' | 'bookmarks' | 'memory';
 
 interface SidebarPanelProps {
   pdfDoc: pdfjsLib.PDFDocumentProxy | null;
@@ -36,12 +38,22 @@ interface SidebarPanelProps {
   onBookmarkRename: (id: string, name: string) => Promise<void>;
   onBookmarkRemove: (id: string) => Promise<void>;
   onBookmarkJump: (page: number, offsetRatio: number) => void;
+  // 要点（V1.2.3）
+  memory: MemoryInfo | null;
+  memoryLoading: boolean;
+  memoryError: string | null;
+  textStatus: TextExtractionUiStatus;
+  onMemoryFetchEstimate: () => Promise<MemoryEstimate>;
+  onMemoryBuild: () => Promise<void>;
+  onMemoryRebuild: () => Promise<void>;
+  onMemoryCancel: () => Promise<void>;
 }
 
 const TABS: { key: SidebarTab; icon: string; label: string }[] = [
   { key: 'thumbnails', icon: 'ri-image-2-line', label: '页面' },
   { key: 'toc', icon: 'ri-list-unordered', label: '目录' },
   { key: 'bookmarks', icon: 'ri-bookmark-line', label: '书签' },
+  { key: 'memory', icon: 'ri-sparkling-line', label: '要点' },
 ];
 
 export default function SidebarPanel(props: SidebarPanelProps) {
@@ -133,6 +145,22 @@ export default function SidebarPanel(props: SidebarPanelProps) {
                 onRename={props.onBookmarkRename}
                 onRemove={props.onBookmarkRemove}
                 onJump={props.onBookmarkJump}
+              />
+            </div>
+          )}
+          {tab === 'memory' && (
+            <div className="h-full overflow-y-auto scrollbar-thin">
+              <MemoryTab
+                memory={props.memory}
+                loading={props.memoryLoading}
+                error={props.memoryError}
+                textStatus={props.textStatus}
+                currentPage={props.currentPage}
+                onJump={props.onPageClick}
+                onFetchEstimate={props.onMemoryFetchEstimate}
+                onBuild={props.onMemoryBuild}
+                onRebuild={props.onMemoryRebuild}
+                onCancel={props.onMemoryCancel}
               />
             </div>
           )}

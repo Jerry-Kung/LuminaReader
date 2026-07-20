@@ -1300,6 +1300,7 @@ export interface SettingsTaskModels {
   extract: string | null;
   translate: string | null;
   explain: string | null;
+  memory: string | null;
 }
 
 export interface SettingsThinking {
@@ -1358,7 +1359,7 @@ export async function getSettings(): Promise<SettingsSource> {
         default_model: 'gpt-4o',
         timeout_seconds: 60,
       },
-      task_models: { extract: null, translate: null, explain: null },
+      task_models: { extract: null, translate: null, explain: null, memory: null },
       thinking: { enabled: false },
       context_expansion: { enabled: true },
       source: 'env_fallback',
@@ -1396,6 +1397,7 @@ export async function saveSettings(input: SettingsUpdateInput): Promise<SaveSett
       extract: input.task_models.extract,
       translate: input.task_models.translate,
       explain: input.task_models.explain,
+      memory: input.task_models.memory,
     },
     thinking: {
       enabled: input.thinking.enabled,

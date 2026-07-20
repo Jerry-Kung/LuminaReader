@@ -30,6 +30,7 @@ import { useTextSelection } from './hooks/useTextSelection';
 import { useTextExtraction } from '@/hooks/useTextExtraction';
 import { useToc } from '@/hooks/useToc';
 import { useBookmarks } from '@/hooks/useBookmarks';
+import { useMemory } from '@/hooks/useMemory';
 
 type RetryPayload =
   | {
@@ -344,6 +345,9 @@ export default function ReaderPage() {
   const toc = useToc(pdfId, textExtraction.status);
   const bookmarksApi = useBookmarks(pdfId);
   const [editingBookmarkId, setEditingBookmarkId] = useState<string | null>(null);
+
+  // V1.2.3：记忆（要点）
+  const memoryApi = useMemory(pdfId);
 
   // 添加书签：记录当前视口（页码 + 页内偏移，复用 reportPosition 维护的 currentPage/currentOffset）
   const handleAddBookmark = useCallback(async () => {
@@ -1837,6 +1841,14 @@ export default function ReaderPage() {
           onBookmarkRename={bookmarksApi.rename}
           onBookmarkRemove={bookmarksApi.remove}
           onBookmarkJump={goToPosition}
+          memory={memoryApi.memory}
+          memoryLoading={memoryApi.loading}
+          memoryError={memoryApi.error}
+          textStatus={textExtraction.status}
+          onMemoryFetchEstimate={memoryApi.fetchEstimate}
+          onMemoryBuild={memoryApi.build}
+          onMemoryRebuild={memoryApi.rebuild}
+          onMemoryCancel={memoryApi.cancel}
         />
         <PDFViewer
           pdfDoc={pdfDoc}

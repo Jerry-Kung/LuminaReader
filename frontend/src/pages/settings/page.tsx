@@ -25,6 +25,7 @@ interface FormState {
   extract_model: string;
   translate_model: string;
   explain_model: string;
+  memory_model: string;
   thinking_enabled: boolean;
   context_expansion_enabled: boolean;
 }
@@ -78,6 +79,7 @@ export default function SettingsPage() {
     extract_model: '',
     translate_model: '',
     explain_model: '',
+    memory_model: '',
     thinking_enabled: false,
     context_expansion_enabled: true,
   });
@@ -111,6 +113,7 @@ export default function SettingsPage() {
         extract_model: data.task_models.extract ?? '',
         translate_model: data.task_models.translate ?? '',
         explain_model: data.task_models.explain ?? '',
+        memory_model: data.task_models.memory ?? '',
         thinking_enabled: data.thinking?.enabled ?? false,
         context_expansion_enabled: data.context_expansion?.enabled ?? true,
       });
@@ -142,6 +145,7 @@ export default function SettingsPage() {
       form.extract_model !== (originalSettings.task_models.extract ?? '') ||
       form.translate_model !== (originalSettings.task_models.translate ?? '') ||
       form.explain_model !== (originalSettings.task_models.explain ?? '') ||
+      form.memory_model !== (originalSettings.task_models.memory ?? '') ||
       form.thinking_enabled !== (originalSettings.thinking?.enabled ?? false) ||
       form.context_expansion_enabled !==
         (originalSettings.context_expansion?.enabled ?? true);
@@ -222,6 +226,7 @@ export default function SettingsPage() {
         extract: form.extract_model.trim() || null,
         translate: form.translate_model.trim() || null,
         explain: form.explain_model.trim() || null,
+        memory: form.memory_model.trim() || null,
       },
       thinking: {
         enabled: form.thinking_enabled,
@@ -435,6 +440,14 @@ export default function SettingsPage() {
                   label="解释"
                   value={form.explain_model}
                   onChange={(v) => updateField('explain_model', v)}
+                  placeholder={form.default_model}
+                />
+                <TextInput
+                  id="memory_model"
+                  label="记忆加工"
+                  hint="建议配置低价模型（按章节跑批全书，费用可控）"
+                  value={form.memory_model}
+                  onChange={(v) => updateField('memory_model', v)}
                   placeholder={form.default_model}
                 />
               </div>
