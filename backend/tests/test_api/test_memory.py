@@ -79,6 +79,23 @@ def test_estimate_ok(client, data_root):
     assert data["currency"] == "USD" and data["estimated_input_tokens"] > 0
 
 
+def test_estimate_scope_full_query_param(client, data_root):
+    """scope=full 查询参数透传（花费预估与重建实际行为对齐的回归项）；plain 请求不受影响。"""
+    created = _make_book()
+    plain = client.get(f"/api/v1/pdfs/{created.pdf_id}/memory/estimate").json()["data"]
+    assert plain["scope"] == "full"
+    scoped = client.get(f"/api/v1/pdfs/{created.pdf_id}/memory/estimate?scope=full").json()["data"]
+    assert scoped["scope"] == "full"
+    assert scoped["unit_count"] == plain["unit_count"]
+
+
+def test_estimate_invalid_scope_400(client, data_root):
+    created = _make_book()
+    resp = client.get(f"/api/v1/pdfs/{created.pdf_id}/memory/estimate?scope=bogus")
+    assert resp.status_code == 400
+    assert resp.json()["error"]["code"] == "INVALID_REQUEST"
+
+
 def test_build_flow_to_ready(client, data_root):
     created = _make_book()
     client.app.dependency_overrides[get_provider] = lambda: CannedProvider()

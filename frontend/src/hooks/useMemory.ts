@@ -65,9 +65,9 @@ export function useMemory(pdfId: string | undefined) {
   const build = useCallback(() => runAction(buildMemory), [runAction]);
   const rebuild = useCallback(() => runAction(rebuildMemory), [runAction]);
   const cancel = useCallback(() => runAction(cancelMemory), [runAction]);
-  const fetchEstimate = useCallback((): Promise<MemoryEstimate> => {
+  const fetchEstimate = useCallback((scope?: 'full'): Promise<MemoryEstimate> => {
     if (!pdfId) return Promise.reject(new Error('no pdf'));
-    return getMemoryEstimate(pdfId);
+    return getMemoryEstimate(pdfId, scope);
   }, [pdfId]);
 
   return { memory, loading, error, fetchEstimate, build, rebuild, cancel };

@@ -15,7 +15,7 @@ interface MemoryTabProps {
   textStatus: TextExtractionUiStatus;
   currentPage: number;
   onJump: (page: number) => void;
-  onFetchEstimate: () => Promise<MemoryEstimate>;
+  onFetchEstimate: (scope?: 'full') => Promise<MemoryEstimate>;
   onBuild: () => Promise<void>;
   onRebuild: () => Promise<void>;
   onCancel: () => Promise<void>;
@@ -55,7 +55,8 @@ export default function MemoryTab({
     setEstimateLoading(true);
     setActionError(null);
     try {
-      setEstimate(await onFetchEstimate());
+      // rebuild 清空重来，花费预估须强制走全书 scope，与实际行为对齐（build/继续加工保持自动 scope）。
+      setEstimate(await onFetchEstimate(action === 'rebuild' ? 'full' : undefined));
       setPendingAction(action);
     } catch (err) {
       setActionError(err instanceof Error ? err.message : '花费预估获取失败');

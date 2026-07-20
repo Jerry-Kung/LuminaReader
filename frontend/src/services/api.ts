@@ -1216,7 +1216,7 @@ export async function getMemory(pdfId: string): Promise<MemoryInfo> {
   return fetchMemory(`${API_BASE}/api/v1/pdfs/${encodeURIComponent(pdfId)}/memory`, 'GET');
 }
 
-export async function getMemoryEstimate(pdfId: string): Promise<MemoryEstimate> {
+export async function getMemoryEstimate(pdfId: string, scope?: 'full'): Promise<MemoryEstimate> {
   if (!API_BASE) {
     return {
       model: 'mock',
@@ -1228,7 +1228,7 @@ export async function getMemoryEstimate(pdfId: string): Promise<MemoryEstimate> 
       currency: 'USD',
     };
   }
-  const url = `${API_BASE}/api/v1/pdfs/${encodeURIComponent(pdfId)}/memory/estimate`;
+  const url = `${API_BASE}/api/v1/pdfs/${encodeURIComponent(pdfId)}/memory/estimate${scope ? `?scope=${scope}` : ''}`;
   let response: Response;
   try {
     response = await fetch(url);

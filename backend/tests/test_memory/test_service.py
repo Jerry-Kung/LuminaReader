@@ -211,6 +211,26 @@ async def test_estimate_remaining_after_partial(data_root, monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_estimate_scope_full_after_partial(data_root, monkeypatch):
+    """scope="full" 强制走全书分支：即便 partial 也不能只报剩余单元的花费——
+    重建按钮实际会清空重来，预估须与之对齐（回归 fee-transparency 审查项）。"""
+    from lumina.config import get_settings
+    monkeypatch.setattr(get_settings(), "lumina_memory_unit_max_chars", 500, raising=False)
+    created = _make_book(data_root)
+    service.start_build(created.project_id, created.pdf_id, ScriptedProvider(["BOOM"]))
+    await _wait_done(created.project_id, created.pdf_id)
+
+    remaining_est = service.estimate(created.project_id, created.pdf_id)
+    assert remaining_est["scope"] == "remaining" and remaining_est["unit_count"] == 1
+
+    full_est = service.estimate(created.project_id, created.pdf_id, scope="full")
+    assert full_est["scope"] == "full"
+    assert full_est["unit_count"] > remaining_est["unit_count"]
+    full_units = len(list_memory_units(get_connection(created.project_id), created.pdf_id))
+    assert full_est["unit_count"] == full_units
+
+
+@pytest.mark.asyncio
 async def test_orphan_running_recovered(data_root):
     created = _make_book(data_root)
     service.start_build(created.project_id, created.pdf_id, ScriptedProvider([UNIT_JSON, "# 总结"]))

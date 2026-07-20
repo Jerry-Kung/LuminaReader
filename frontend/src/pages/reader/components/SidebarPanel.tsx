@@ -1,7 +1,7 @@
 /**
- * V1.2.2 左侧栏三 Tab 容器：缩略图 / 目录 / 书签（规格 D2）。
+ * V1.2.2 左侧栏四 Tab 容器：缩略图 / 目录 / 书签 / 要点（规格 D2，要点见 V1.2.3）。
  * 外壳（宽度 180px / 折叠 w-8 / 过渡动画）沿用原 ThumbnailPanel 行为不变；
- * V1.2.5 笔记可在此追加第四个 Tab。
+ * 笔记功能上线时可在此追加第五个 Tab。
  */
 import { useState } from 'react';
 import type * as pdfjsLib from 'pdfjs-dist';
@@ -43,7 +43,7 @@ interface SidebarPanelProps {
   memoryLoading: boolean;
   memoryError: string | null;
   textStatus: TextExtractionUiStatus;
-  onMemoryFetchEstimate: () => Promise<MemoryEstimate>;
+  onMemoryFetchEstimate: (scope?: 'full') => Promise<MemoryEstimate>;
   onMemoryBuild: () => Promise<void>;
   onMemoryRebuild: () => Promise<void>;
   onMemoryCancel: () => Promise<void>;

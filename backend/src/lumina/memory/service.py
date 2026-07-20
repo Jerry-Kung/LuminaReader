@@ -140,15 +140,19 @@ def _fresh_specs(conn, pdf_id: str, page_count: int):
     return specs, char_counts
 
 
-def estimate(project_id: str, pdf_id: str) -> dict:
-    """花费预估（规格 F4）：首建/重建按全书，partial 续跑按剩余单元。"""
+def estimate(project_id: str, pdf_id: str, *, scope: str | None = None) -> dict:
+    """花费预估（规格 F4）：首建/重建按全书，partial 续跑按剩余单元。
+
+    `scope="full"` 强制走全书分支（重建入口按钮语义：无论当前是否 partial，
+    重建都会清空重来，花费预估须与实际行为一致），None 保持原自动判断。
+    """
     conn = get_connection(project_id)
     text_meta = _require_text_ok(conn, pdf_id)
     meta = get_memory_meta(conn, pdf_id)
     units = list_memory_units(conn, pdf_id)
     char_counts = get_pdf_text_char_counts(conn, pdf_id)
 
-    if meta is not None and meta.status in (STATUS_PARTIAL, STATUS_RUNNING) and units:
+    if scope != "full" and meta is not None and meta.status in (STATUS_PARTIAL, STATUS_RUNNING) and units:
         remaining = [u for u in units if u.status != "ok"]
         scope = "remaining"
         unit_count = len(remaining)

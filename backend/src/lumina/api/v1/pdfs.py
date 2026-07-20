@@ -811,13 +811,30 @@ async def get_memory(pdf_id: str):
 
 
 @router.get("/{pdf_id}/memory/estimate")
-async def get_memory_estimate(pdf_id: str):
+async def get_memory_estimate(pdf_id: str, scope: str | None = None):
+    """scope=full：强制按全书估算（重建入口用；与 rebuild 的实际行为对齐）。"""
     request_id = generate_request_id()
     entry = find_by_pdf_id(pdf_id)
     if entry is None:
         return _pdf_not_found(request_id, pdf_id)
+    if scope is not None and scope != "full":
+        _log_pdf_call(
+            request_id=request_id,
+            http_status=400,
+            error_code="INVALID_REQUEST",
+            pdf_id=pdf_id,
+            project_id=entry.id,
+        )
+        return JSONResponse(
+            status_code=400,
+            content=error_response(
+                code="INVALID_REQUEST",
+                message="Invalid scope parameter.",
+                request_id=request_id,
+            ),
+        )
     try:
-        data = memory_estimate(entry.id, pdf_id)
+        data = memory_estimate(entry.id, pdf_id, scope=scope)
     except MemoryUnavailableError:
         return _memory_unavailable(request_id, pdf_id, entry.id)
     _log_pdf_call(request_id=request_id, http_status=200, pdf_id=pdf_id, project_id=entry.id)
