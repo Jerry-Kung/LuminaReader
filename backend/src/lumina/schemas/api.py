@@ -100,6 +100,7 @@ class TranslateData(BaseModel):
     session_id: str | None = None
     conversation_id: str | None = None
     meta: TranslateMeta
+    sources: list[dict] | None = None  # V1.2.4：concept-recall 结构化出处；非 recall 请求恒为 None
 
 
 class PdfUploadData(BaseModel):

@@ -1232,3 +1232,109 @@ def test_session_miss_load_recovers_selection_type_text(run_client: TestClient) 
     session = asyncio.run(store.get(session_id))
     assert session is not None
     assert session.selection_type == "text"
+
+
+# V1.2.4：concept-recall 非流式链路（409 校验 / 检索注入 / 双落空短路 / data.sources）
+
+
+def _seed_memory_ready(conn, pdf_id):
+    """播种 ready 记忆 + 一条概念，供 concept-recall 命中。"""
+    from lumina.db.models import (
+        MemoryConceptRow, MemoryMetaRow, MemoryUnitRow,
+        replace_memory_units, replace_unit_concepts, upsert_memory_meta,
+    )
+    upsert_memory_meta(conn, MemoryMetaRow(pdf_id=pdf_id, status="ready", unit_total=1, unit_done=1))
+    replace_memory_units(conn, pdf_id, [
+        MemoryUnitRow(id="mu_a", pdf_id=pdf_id, seq=0, title="第1章", start_page=1, end_page=5, status="ok"),
+    ])
+    replace_unit_concepts(conn, "mu_a", [
+        MemoryConceptRow(id="mc_1", pdf_id=pdf_id, unit_id="mu_a", term="梯度下降", definition="优化算法", page=3, created_at=1),
+    ])
+
+
+def _conn_for(client):
+    from lumina.db.engine import get_connection
+    from lumina.projects.manager import lookup_project_by_pdf_id
+    entry = lookup_project_by_pdf_id(client.default_pdf_id)
+    return get_connection(entry.id), entry.id
+
+
+def test_concept_recall_concept_hit_non_stream(run_client: TestClient) -> None:
+    provider = MockRunProvider(response_text="综述文本")
+    run_client.app.dependency_overrides[get_provider] = lambda: provider
+    conn, _ = _conn_for(run_client)
+    _seed_memory_ready(conn, run_client.default_pdf_id)
+    payload = text_selection_payload(
+        run_client.default_pdf_id, text="梯度下降", plugins=["concept-recall"]
+    )
+    resp = run_client.post("/api/v1/run", json=payload)
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert data["text"] == "综述文本"
+    assert data["sources"] and data["sources"][0]["kind"] == "concept"
+    assert data["sources"][0]["term"] == "梯度下降"
+    assert data["sources"][0]["page"] == 3
+    # 参考块随 user 消息注入 → provider 收到的 user 文本含定义
+    last_user = provider.last_request.messages[-1].content[0].text
+    assert "优化算法" in last_user
+
+
+def test_concept_recall_double_empty_skips_llm(run_client: TestClient) -> None:
+    provider = MockRunProvider()
+    run_client.app.dependency_overrides[get_provider] = lambda: provider
+    conn, _ = _conn_for(run_client)
+    _seed_memory_ready(conn, run_client.default_pdf_id)  # 有记忆但选区不命中且全文无
+    payload = text_selection_payload(
+        run_client.default_pdf_id, text="完全不存在XYZ", plugins=["concept-recall"]
+    )
+    resp = run_client.post("/api/v1/run", json=payload)
+    assert resp.status_code == 200
+    data = resp.json()["data"]
+    assert "完全不存在XYZ" in data["text"]  # 固定话术含术语
+    assert data["sources"] == []
+    assert provider.invoke_count == 0  # 未调用 LLM
+    # 消息落库 model 为 NULL
+    from lumina.db.models import get_first_assistant_message
+    row = get_first_assistant_message(conn, data["conversation_id"])
+    assert row.model is None
+
+
+def test_concept_recall_409_when_memory_not_ready(run_client: TestClient) -> None:
+    payload = text_selection_payload(
+        run_client.default_pdf_id, text="梯度下降", plugins=["concept-recall"]
+    )  # 未播种记忆 → status none
+    resp = run_client.post("/api/v1/run", json=payload)
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "MEMORY_UNAVAILABLE"
+
+
+def test_concept_recall_followup_does_not_rerun_retrieval(run_client: TestClient) -> None:
+    """追问轮不应重新触发检索：data.sources 应为空/缺省，且参考块经历史消息持久化可见。"""
+    provider = MockRunProvider(response_text="综述文本")
+    run_client.app.dependency_overrides[get_provider] = lambda: provider
+    conn, _ = _conn_for(run_client)
+    _seed_memory_ready(conn, run_client.default_pdf_id)
+    payload = text_selection_payload(
+        run_client.default_pdf_id, text="梯度下降", plugins=["concept-recall"]
+    )
+    first = run_client.post("/api/v1/run", json=payload)
+    assert first.status_code == 200
+    session_id = first.json()["data"]["session_id"]
+
+    provider2 = MockRunProvider(response_text="追问回答")
+    run_client.app.dependency_overrides[get_provider] = lambda: provider2
+    second = run_client.post(
+        "/api/v1/run",
+        json=follow_up_payload(session_id, plugins=["explain"]),
+    )
+    assert second.status_code == 200
+    data = second.json()["data"]
+    assert not data.get("sources")  # 追问轮未重新检索
+    # provider 收到的历史消息中应含首轮注入的参考块定义文本
+    history_texts = [
+        part.text
+        for msg in provider2.last_request.messages
+        for part in msg.content
+        if hasattr(part, "text")
+    ]
+    assert any("优化算法" in t for t in history_texts)

@@ -15,8 +15,11 @@ from ulid import ULID
 
 from lumina.api._thumbnail import render_thumbnail
 from lumina.config import Settings
+from lumina.db.engine import get_connection
 from lumina.db.models import SelectionRow
 from lumina.logging import get_logger, log_with_fields
+from lumina import memory
+from lumina.memory.recall import build_recall
 from lumina.pdftext.context import build_context_block
 from lumina.projects.manager import PdfNotFoundError, lookup_project_by_pdf_id
 from lumina.request_id import generate_request_id
@@ -57,10 +60,39 @@ from lumina.tasks.base import TaskResult, UnsupportedTaskError
 
 MAX_BODY_BYTES = 8 * 1024 * 1024
 SCREENSHOT_QA_PLUGIN_ID = "screenshot-qa"
+CONCEPT_RECALL_PLUGIN_ID = "concept-recall"
 ALLOWED_IMAGE_MIME = "image/png"
 API_VERSION = "v1"
 
 logger = get_logger("lumina.run")
+
+# V1.2.4：概念索引与全文检索均落空时的固定话术（不调用 LLM，见 R-V12-6）
+DOUBLE_EMPTY_TEMPLATE = (
+    "本书的概念索引与全文中均未找到“{term}”。"
+    "可尝试换一种表述，或改用“解释”功能基于当前选区提问。"
+)
+
+
+def _is_concept_recall(body: TranslateRequest) -> bool:
+    return CONCEPT_RECALL_PLUGIN_ID in (body.plugins or [])
+
+
+def _memory_ready_for_recall(project_id: str, pdf_id: str) -> bool:
+    """记忆状态需为 ready/partial 才允许概念回查（未就绪时 409 兜底）。"""
+    try:
+        state = memory.read_state(project_id, pdf_id)
+    except Exception:
+        return False
+    return state.meta is not None and state.meta.status in ("ready", "partial")
+
+
+def _recall_kwargs(settings: Settings) -> dict:
+    return dict(
+        max_concepts=settings.lumina_recall_max_concepts,
+        max_text_pages=settings.lumina_recall_max_text_pages,
+        snippet_chars=settings.lumina_recall_snippet_chars,
+        max_ref_chars=settings.lumina_recall_max_ref_chars,
+    )
 
 
 class RunInvalidRequestError(Exception):
@@ -624,6 +656,7 @@ def _build_success_response(
     pdf_id: str | None = None,
     conversation_id: str | None = None,
     plugins: list[str] | None = None,
+    sources: list[dict] | None = None,
 ):
     latency_ms = int((time.perf_counter() - start) * 1000)
     usage = None
@@ -652,6 +685,7 @@ def _build_success_response(
         session_id=session_id,
         conversation_id=session_id if session_id is not None else None,
         meta=TranslateMeta(**meta_kwargs),
+        sources=sources,
     )
 
     prompt_tokens = llm_resp.usage.prompt_tokens if llm_resp.usage else None
@@ -951,9 +985,34 @@ async def _execute_first_turn_v1(
     user_input = _first_turn_user_input(body)
     selection_text = body.selection.text or ""
     selection_word_count = estimate_word_count(selection_text)
-    context_block = _build_run_context(
-        settings, project_id, pdf_id, body.selection.page, body.selection.page_end
-    )
+
+    recall_sources: list[dict] | None = None
+    recall_is_empty = False
+    if _is_concept_recall(body):
+        # D9：记忆非就绪 → 409 防御兜底（前端已按状态隐藏按钮）
+        if not _memory_ready_for_recall(project_id, pdf_id):
+            return _error_json(
+                status_code=409,
+                code="MEMORY_UNAVAILABLE",
+                message="本书尚未建立记忆，无法进行概念回查。",
+                request_id=request_id,
+                api_version="v1",
+                task_type=CONCEPT_RECALL_PLUGIN_ID,
+                page=page,
+                image_bytes=0,
+                project_id=project_id,
+                pdf_id=pdf_id,
+            )
+        conn = get_connection(project_id)
+        recall = build_recall(conn, pdf_id, selection_text, **_recall_kwargs(settings))
+        recall_sources = [s.to_dict() for s in recall.sources]
+        recall_is_empty = recall.is_empty
+        # D7：concept-recall 豁免 V1.2.1 跨页上下文；改注入检索参考块（双落空为 None）
+        context_block = recall.ref_block
+    else:
+        context_block = _build_run_context(
+            settings, project_id, pdf_id, body.selection.page, body.selection.page_end
+        )
     plugin_ctx = PluginContext(
         selection_text=selection_text,
         selection_type="text",
@@ -979,6 +1038,74 @@ async def _execute_first_turn_v1(
 
     plugin_ctx = plugin_ctx.model_copy(update={"user_input": user_input})
     conversation_task_type = _conversation_task_type(plugin_ids)
+
+    if recall_is_empty:
+        # 双落空：不调用 LLM，直接落固定话术 assistant 消息（R-V12-6 兜底）
+        answer_text = DOUBLE_EMPTY_TEMPLATE.format(term=selection_text)
+        conversation_id = f"conv_{ULID()}"
+        selection_id = f"sel_{ULID()}"
+        user_history_text = _compose_user_history_text(selection_text, user_input, None)
+        store = get_session_store()
+        selection_row = SelectionRow(
+            id=selection_id, pdf_id=pdf_id, page=body.selection.page,
+            x=None, y=None, w=None, h=None, dpi=None, thumbnail_png=None,
+            created_at=int(time.time()), type="text", text=selection_text,
+            page_end=body.selection.page_end,
+            segments_json=json.dumps(
+                [s.model_dump() for s in body.selection.segments or []],
+                ensure_ascii=False,
+            ),
+        )
+        try:
+            session = await store.create(
+                conversation_id=conversation_id,
+                project_id=project_id,
+                pdf_id=pdf_id,
+                selection_id=selection_id,
+                task_type=conversation_task_type,
+                extracted_text=selection_text,
+                selection_row=selection_row,
+                first_user_question=user_input,
+                first_user_content=user_history_text,
+                first_assistant_text=answer_text,
+                first_assistant_meta={"model": None},  # 免 LLM：model/token 为 NULL
+                meta={"page": body.selection.page, "page_end": body.selection.page_end},
+                selection_type="text",
+                first_assistant_sources_json="[]",  # 双落空 sources 为空数组
+            )
+        except Exception:
+            return _error_json(
+                status_code=500, code="INTERNAL_ERROR",
+                message="An internal server error occurred.",
+                request_id=request_id, api_version="v1",
+                task_type=conversation_task_type, page=page, image_bytes=0,
+                project_id=project_id, pdf_id=pdf_id,
+            )
+        # 手工组装成功响应（无 llm_resp）：latency 用 start，usage/model 为空
+        latency_ms = int((time.perf_counter() - start) * 1000)
+        _log_run_call(
+            request_id=request_id, api_version="v1",
+            task_type=conversation_task_type, page=page, image_bytes=0,
+            model=None, latency_ms=latency_ms, prompt_tokens=None,
+            completion_tokens=None, http_status=200,
+            session_id=session.session_id, turn_index=0,
+            project_id=project_id, pdf_id=pdf_id, conversation_id=conversation_id,
+            thinking_enabled=False, plugins=_plugins_log_value(plugin_ids),
+        )
+        return ok_response(
+            TranslateData(
+                text=answer_text,
+                extracted_text=selection_text,
+                session_id=session.session_id,
+                conversation_id=conversation_id,
+                meta=TranslateMeta(
+                    request_id=request_id, model="", latency_ms=latency_ms,
+                    usage=None, task_type=conversation_task_type,
+                    turn_index=0, thinking_enabled=False, plugins=plugin_ids,
+                ),
+                sources=[],
+            )
+        )
 
     result, llm_resp, invoke_error = await _invoke_pipeline(
         pipeline=pipeline,
@@ -1056,6 +1183,10 @@ async def _execute_first_turn_v1(
             first_assistant_meta=assistant_meta,
             meta=meta,
             selection_type="text",
+            first_assistant_sources_json=(
+                json.dumps(recall_sources, ensure_ascii=False)
+                if recall_sources is not None else None
+            ),
         )
     except Exception:
         return _error_json(
@@ -1099,6 +1230,7 @@ async def _execute_first_turn_v1(
         pdf_id=pdf_id,
         conversation_id=conversation_id,
         plugins=plugin_ids,
+        sources=recall_sources,
     )
 
 
