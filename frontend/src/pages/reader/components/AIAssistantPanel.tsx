@@ -70,6 +70,13 @@ const taskLabelConfig: Record<TaskType, { label: string; icon: string; bgClass: 
     bgClass: 'bg-sky-50',
     textClass: 'text-sky-700',
   },
+  // V1.2.4：concept-recall（回查）非 chip 插件，此处仅为满足 Record<TaskType, ...> 穷尽性；不出现在 chip 交互中
+  'concept-recall': {
+    label: '回查',
+    icon: 'ri-history-line',
+    bgClass: 'bg-indigo-50',
+    textClass: 'text-indigo-700',
+  },
 };
 
 interface ChipColorClasses {

@@ -1,6 +1,7 @@
 const API_BASE = import.meta.env.VITE_API_BASE_URL || '';
 
-export type TaskType = 'translate' | 'explain' | 'dictionary' | 'chat' | 'screenshot-qa';
+// V1.2.4：新增 'concept-recall'（概念/术语回查插件 id，与后端 recall 插件对齐）
+export type TaskType = 'translate' | 'explain' | 'dictionary' | 'chat' | 'screenshot-qa' | 'concept-recall';
 
 // V1.1.2: SSE text_delta.section 字段（screenshot-qa 路径流式分段）
 export type StreamSection = 'ocr' | 'answer';
@@ -121,12 +122,23 @@ export interface StreamUsage {
   total_tokens?: number;
 }
 
+// V1.2.4：concept-recall 结构化出处（后端 recall.SourceRef.to_dict 的镜像）
+export interface SourceRef {
+  kind: 'concept' | 'text';
+  page: number;
+  term?: string;
+  unit_title?: string;
+  snippet?: string;
+}
+
 export interface RunStreamCallbacks {
   onMeta: (meta: StreamMeta) => void;
   // V1.1.2：text_delta.section 用于区分 OCR 折叠区 / 正文区流式累积；其他插件路径恒为 null
   onTextDelta: (delta: string, section: StreamSection | null) => void;
   // V1.1.2：仅 screenshot-qa 路径下发；text 是 OCR 段全部收完后的"权威值"，前端折叠区据此覆盖
   onExtractedText?: (text: string) => void;
+  // V1.2.4：concept-recall 出处帧（meta 之后、首个 text_delta 之前；空数组不发帧）
+  onSources?: (sources: SourceRef[]) => void;
   onUsage: (usage: StreamUsage) => void;
   onDone: (final: { latency_ms: number }) => void;
   // partialTextKept: 后端已把累积文本落库（含 [interrupted] 标记）；前端 partial 气泡可保留
@@ -148,6 +160,9 @@ const MOCK_TEXTS: Record<TaskType, string> = {
     '这是模拟的自由对话回答。\n\n不选任何能力 chip 直接输入问题时,AI 会作为你的阅读助手回答提问,并参考所框选的上下文。',
   'screenshot-qa':
     '这是模拟的截图问答回答。\n\n当后端启用且选区含图像时,AI 会先 OCR 识别文本再据此回答你的提问。',
+  // V1.2.4：概念/术语回查 mock 文案
+  'concept-recall':
+    '这是模拟的概念回查结果。\n\n当后端启用时，AI 会结合已构建的全书记忆，定位相关术语/段落出处并给出回答。',
 };
 
 const mockTurnCounter: Record<string, number> = {};
@@ -189,6 +204,14 @@ function mockRunStream(
     };
     callbacks.onMeta(meta);
   }, 200));
+
+  // V1.2.4：concept-recall 路径在 meta 之后、首个 text_delta 之前发一条示例 sources，保证 mock 模式可视
+  if (primary === 'concept-recall') {
+    timers.push(setTimeout(() => {
+      if (aborted) return;
+      callbacks.onSources?.([{ kind: 'concept', page: 3, term: '示例术语', unit_title: '第1章' }]);
+    }, 280));
+  }
 
   chunks.forEach((c, i) => {
     timers.push(setTimeout(() => {
@@ -269,6 +292,14 @@ function parseSSEFrame(rawFrame: string, callbacks: RunStreamCallbacks, state: S
       // V1.1.2：screenshot-qa 路径独有；text 为 OCR 段完整权威值
       const text = typeof obj.text === 'string' ? obj.text : '';
       callbacks.onExtractedText?.(text);
+      break;
+    }
+    case 'sources': {
+      // V1.2.4：后端编码为 {"sources": [...]}；取数组，非数组静默忽略
+      const raw = (obj as { sources?: unknown }).sources;
+      if (Array.isArray(raw)) {
+        callbacks.onSources?.(raw as SourceRef[]);
+      }
       break;
     }
     case 'usage':
@@ -354,6 +385,7 @@ function startSSEFetch(
     onMeta: (m) => { if (!finished) callbacks.onMeta(m); },
     onTextDelta: (d, s) => { if (!finished) callbacks.onTextDelta(d, s); },
     onExtractedText: (t) => { if (!finished) callbacks.onExtractedText?.(t); },
+    onSources: (s) => { if (!finished) callbacks.onSources?.(s); },
     onUsage: (u) => { if (!finished) callbacks.onUsage(u); },
     onDone: (f) => { if (finished) return; finished = true; callbacks.onDone(f); },
     onError: (e, o) => { if (finished) return; finished = true; callbacks.onError(e, o); },
@@ -681,6 +713,8 @@ export interface MessageItem {
   prompt_tokens?: number;
   completion_tokens?: number;
   latency_ms?: number;
+  // V1.2.4：concept-recall 消息的结构化出处；普通消息缺省，双空回查消息可为 []
+  sources?: SourceRef[];
 }
 
 export interface ConversationDetail {

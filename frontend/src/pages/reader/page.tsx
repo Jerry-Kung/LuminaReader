@@ -172,8 +172,10 @@ function nextMsgId(): number {
 // V1.1.2：'screenshot-qa' 是后端按 image 自动激活的内部插件，追问轮（无 image）
 // 显式带它会让 LLM 仍被强制要求输出 <ocr>/<answer> 双标签 → 标签泄漏到 UI。
 // 追问轮统一退化为 chat 模式，后端会用 session.extracted_text 作为上下文。
+// V1.2.4：'concept-recall' 同 'screenshot-qa'，是后端内部路由的插件而非用户可选 chip，
+// 追问轮同样退化为 chat 模式（此处不引入新 chip 交互，交互侧改动属 Task 11 范围）。
 function taskTypeToPlugins(t: TaskType): ChipPluginType[] {
-  if (t === 'chat' || t === 'screenshot-qa') return [];
+  if (t === 'chat' || t === 'screenshot-qa' || t === 'concept-recall') return [];
   return [t];
 }
 
