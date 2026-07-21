@@ -144,6 +144,7 @@ def test_builtin_plugins_load() -> None:
         "explain",
         "dictionary",
         "screenshot-qa",
+        "concept-recall",
     }
 
 

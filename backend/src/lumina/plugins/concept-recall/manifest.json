@@ -1,0 +1,14 @@
+{
+  "id": "concept-recall",
+  "label": "回查",
+  "icon": "ri-history-line",
+  "applicable_to": ["text"],
+  "applicable_when": {
+    "selection_word_count": { "max": 6 }
+  },
+  "thinking_default": false,
+  "prompt_files": {
+    "system": "prompts/system.md",
+    "user": "prompts/user.md"
+  }
+}
