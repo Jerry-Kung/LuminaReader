@@ -187,6 +187,7 @@ class MessageItem(BaseModel):
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     latency_ms: int | None = None
+    sources: list[dict] | None = None  # V1.2.4：concept-recall 出处；普通消息为 None
 
 
 class ConversationMessagesData(BaseModel):

@@ -1,3 +1,4 @@
+import json
 import logging
 
 from fastapi import APIRouter
@@ -24,12 +25,21 @@ def _to_message_item(row) -> MessageItem:
     )
     if row.role == "user":
         return base.model_copy(update={"user_question": row.user_question})
+    sources = None
+    if row.sources_json:
+        try:
+            parsed = json.loads(row.sources_json)
+            if isinstance(parsed, list):
+                sources = parsed
+        except (ValueError, TypeError):
+            sources = None  # 解析失败静默：前端不渲染 chips，正文不受影响
     return base.model_copy(
         update={
             "model": row.model,
             "prompt_tokens": row.prompt_tokens,
             "completion_tokens": row.completion_tokens,
             "latency_ms": row.latency_ms,
+            "sources": sources,
         }
     )
 
