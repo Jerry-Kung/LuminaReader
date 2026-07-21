@@ -453,6 +453,113 @@ async def test_sse_generator_marks_stream_aborted_on_cancel(
     assert stream_logs[-1].get("stream_aborted") is True
 
 
+# V1.2.4：concept-recall 流式链路（sources 帧顺序 + 双落空假流）
+
+
+def _seed_memory_ready_for_stream(client: TestClient) -> None:
+    """播种 ready 记忆 + 一条概念，供 concept-recall 命中（同 test_run.py 的 _seed_memory_ready）。"""
+    from lumina.db.engine import get_connection
+    from lumina.db.models import (
+        MemoryConceptRow, MemoryMetaRow, MemoryUnitRow,
+        replace_memory_units, replace_unit_concepts, upsert_memory_meta,
+    )
+    from lumina.projects.manager import lookup_project_by_pdf_id
+
+    entry = lookup_project_by_pdf_id(client.stream_pdf_id)
+    conn = get_connection(entry.id)
+    upsert_memory_meta(
+        conn, MemoryMetaRow(pdf_id=client.stream_pdf_id, status="ready", unit_total=1, unit_done=1)
+    )
+    replace_memory_units(conn, client.stream_pdf_id, [
+        MemoryUnitRow(
+            id="mu_a", pdf_id=client.stream_pdf_id, seq=0, title="第1章",
+            start_page=1, end_page=5, status="ok",
+        ),
+    ])
+    replace_unit_concepts(conn, "mu_a", [
+        MemoryConceptRow(
+            id="mc_1", pdf_id=client.stream_pdf_id, unit_id="mu_a",
+            term="梯度下降", definition="优化算法", page=3, created_at=1,
+        ),
+    ])
+
+
+def _text_selection_stream_payload(
+    client: TestClient, *, text: str, plugins: list[str], page: int = 5
+) -> dict:
+    return {
+        "task_type": "translate",
+        "pdf_id": client.stream_pdf_id,
+        "selection": {
+            "type": "text",
+            "pdf_id": None,
+            "page": page,
+            "page_end": page,
+            "text": text,
+            "segments": [
+                {"page": page, "text": text, "offset_start": 0, "offset_end": len(text)}
+            ],
+        },
+        "image": None,
+        "plugins": plugins,
+        "options": {"target_lang": "zh-CN", "stream": True},
+    }
+
+
+def test_concept_recall_stream_sources_frame(stream_client: TestClient) -> None:
+    _seed_memory_ready_for_stream(stream_client)
+    provider = MockStreamRunProvider(
+        [
+            LLMStreamEvent(type="text_delta", delta="综述文本"),
+            LLMStreamEvent(type="done", model="gpt-4o"),
+        ]
+    )
+    stream_client.app.dependency_overrides[get_provider] = lambda: provider
+    payload = _text_selection_stream_payload(
+        stream_client, text="梯度下降", plugins=["concept-recall"]
+    )
+    with stream_client.stream("POST", "/api/v1/run", json=payload) as resp:
+        body = "".join(resp.iter_text())
+    frames = _parse_sse(body)
+    names = [f[0] for f in frames]
+    assert names[0] == "meta"
+    assert names[1] == "sources"  # sources 紧跟 meta，位于首个 text_delta 前
+    assert "text_delta" in names
+    sources_data = frames[1][1]
+    assert "sources" in sources_data
+    assert sources_data["sources"][0]["kind"] == "concept"
+    assert sources_data["sources"][0]["term"] == "梯度下降"
+
+
+def test_concept_recall_stream_double_empty(stream_client: TestClient) -> None:
+    _seed_memory_ready_for_stream(stream_client)
+    provider = MockStreamRunProvider()  # 双落空不应调用 Provider
+    stream_client.app.dependency_overrides[get_provider] = lambda: provider
+    payload = _text_selection_stream_payload(
+        stream_client, text="完全不存在XYZ", plugins=["concept-recall"]
+    )
+    with stream_client.stream("POST", "/api/v1/run", json=payload) as resp:
+        body = "".join(resp.iter_text())
+    frames = _parse_sse(body)
+    names = [f[0] for f in frames]
+    # 双落空不发 sources 帧；固定话术走单帧 text_delta + done
+    assert "sources" not in names
+    assert names[0] == "meta"
+    assert names[-1] == "done"
+    text = "".join(f[1].get("delta", "") for f in frames if f[0] == "text_delta")
+    assert "完全不存在XYZ" in text
+    assert provider.invoke_count == 0
+
+
+def test_concept_recall_stream_409_when_memory_not_ready(stream_client: TestClient) -> None:
+    payload = _text_selection_stream_payload(
+        stream_client, text="梯度下降", plugins=["concept-recall"]
+    )  # 未播种记忆 → status none
+    resp = stream_client.post("/api/v1/run", json=payload)
+    assert resp.status_code == 409
+    assert resp.json()["error"]["code"] == "MEMORY_UNAVAILABLE"
+
+
 def test_text_first_turn_stream_no_extracted_event(stream_client: TestClient) -> None:
     provider = MockStreamRunProvider(
         events=[

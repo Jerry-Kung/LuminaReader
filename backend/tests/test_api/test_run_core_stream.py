@@ -338,6 +338,70 @@ async def test_first_turn_single_screenshot_qa_stream(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_stream_double_empty_skips_provider_and_persists(data_root) -> None:
+    """V1.2.4：双落空短路不得触碰 Provider，且落库文本/model/sources_json 需符合固定话术契约。"""
+    created = auto_create_project(PDF_BYTES, "recall_stream.pdf")
+    store = SessionStore()
+    session = await store.create(
+        conversation_id="conv_recall_empty",
+        project_id=created.project_id,
+        pdf_id=created.pdf_id,
+        selection_id="sel_empty",
+        task_type="concept-recall",
+        extracted_text="完全不存在XYZ",
+        selection_row=__import__("lumina.db.models", fromlist=["SelectionRow"]).SelectionRow(
+            id="sel_empty",
+            pdf_id=created.pdf_id,
+            page=1,
+            x=None,
+            y=None,
+            w=None,
+            h=None,
+            dpi=None,
+            thumbnail_png=None,
+            created_at=1,
+            type="text",
+            text="完全不存在XYZ",
+        ),
+        first_user_question=None,
+        first_user_content="完全不存在XYZ",
+        first_assistant_text="",
+        first_assistant_meta={"model": None},
+        selection_type="text",
+    )
+    provider = MockStreamProvider([])  # 不应被调用
+    plugin_ctx = PluginContext(selection_text="完全不存在XYZ", selection_type="text", target_lang="zh-CN")
+    prepared = _stream_prepared(
+        provider=provider,
+        conversation_id=session.session_id,
+        project_id=created.project_id,
+        pdf_id=created.pdf_id,
+        request_id="req_recall_empty",
+        plugin_ids=["concept-recall"],
+        task_type="concept-recall",
+        recall_sources=[],
+        recall_is_empty=True,
+    )
+    prepared.plugin_ctx = plugin_ctx
+    collected = await _collect_events(
+        _stream_driver_events(prepared=prepared, provider=provider)
+    )
+    assert [e.type for e in collected] == ["text_delta", "done"]
+    assert provider.invoke_count == 0
+    assert provider.stream_invoke_count == 0
+
+    from lumina.db.engine import get_connection
+    from lumina.db.models import list_messages
+
+    conn = get_connection(created.project_id)
+    rows = list_messages(conn, session.session_id)
+    assistant = [r for r in rows if r.role == "assistant" and r.turn_index == 0][0]
+    assert "完全不存在XYZ" in assistant.content
+    assert assistant.model is None
+    assert assistant.sources_json == "[]"
+
+
+@pytest.mark.asyncio
 async def test_stream_injects_thinking_when_enabled(data_root, monkeypatch) -> None:
     store = SessionStore()
     created = auto_create_project(PDF_BYTES, "think.pdf")

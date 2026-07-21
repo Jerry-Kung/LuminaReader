@@ -82,6 +82,8 @@ def _memory_ready_for_recall(project_id: str, pdf_id: str) -> bool:
     try:
         state = memory.read_state(project_id, pdf_id)
     except Exception:
+        # 读状态失败不应拖垮主链路，但需留痕便于排查（同 _build_run_context 的容错风格）
+        logger.warning("memory read_state failed for recall gate", exc_info=True)
         return False
     return state.meta is not None and state.meta.status in ("ready", "partial")
 
@@ -252,6 +254,8 @@ class PreparedStreamRun:
     meta_payload: dict
     parse_failure_reason: str | None = None
     meta_ready: asyncio.Event = field(default_factory=asyncio.Event)
+    recall_sources: list[dict] | None = None
+    recall_is_empty: bool = False
 
 
 def is_payload_too_large(content_length: int | None, image_data_b64: str) -> bool:
@@ -1428,6 +1432,16 @@ async def _stream_driver_events(
     thinking_enabled = False
 
     try:
+        if prepared.recall_is_empty:
+            # 双落空：不调用 Provider，伪造单帧 text_delta + done（前端处理路径与正常流一致）
+            term = prepared.plugin_ctx.selection_text or ""
+            accumulated_answer = DOUBLE_EMPTY_TEMPLATE.format(term=term)
+            yield StructuredStreamEvent(type="text_delta", delta=accumulated_answer, section=None)
+            model = None
+            thinking_enabled = False
+            yield StructuredStreamEvent(type="done", model=None, thinking_enabled=False)
+            return  # 触发 finally 块落库，accumulated_answer 已赋值
+
         llm_req = prepared.pipeline.build_request(
             prepared.plugin_ids,
             prepared.plugin_ctx,
@@ -1505,6 +1519,10 @@ async def _stream_driver_events(
                 assistant_meta=assistant_meta,
                 extracted_text_override=(
                     accumulated_ocr if prepared.is_screenshot_qa else None
+                ),
+                sources_json=(
+                    json.dumps(prepared.recall_sources, ensure_ascii=False)
+                    if prepared.recall_sources is not None else None
                 ),
             )
             if prepared.is_screenshot_qa:
@@ -1630,6 +1648,10 @@ async def prepare_stream_run(
         selection_id = f"sel_{ULID()}"
         store = get_session_store()
 
+        # concept-recall 仅在文本选区分支中赋值；图片分支（screenshot-qa）始终为空值默认
+        recall_sources: list[dict] | None = None
+        recall_is_empty = False
+
         if selection_type == "image":
             image_bytes, image_error = _validate_image_payload(
                 request=request,
@@ -1703,13 +1725,36 @@ async def prepare_stream_run(
             image_bytes = 0
             selection_text = body.selection.text or ""
             selection_word_count = estimate_word_count(selection_text)
-            context_block = _build_run_context(
-                settings,
-                project_id,
-                pdf_id,
-                body.selection.page,
-                body.selection.page_end,
-            )
+
+            if _is_concept_recall(body):
+                # D9：记忆非就绪 → 409 防御兜底（与非流式首轮同型，见 Task 7）
+                if not _memory_ready_for_recall(project_id, pdf_id):
+                    return _error_json(
+                        status_code=409,
+                        code="MEMORY_UNAVAILABLE",
+                        message="本书尚未建立记忆，无法进行概念回查。",
+                        request_id=request_id,
+                        api_version=API_VERSION,
+                        task_type=CONCEPT_RECALL_PLUGIN_ID,
+                        page=page,
+                        image_bytes=0,
+                        project_id=project_id,
+                        pdf_id=pdf_id,
+                    )
+                conn = get_connection(project_id)
+                recall = build_recall(conn, pdf_id, selection_text, **_recall_kwargs(settings))
+                recall_sources = [s.to_dict() for s in recall.sources]
+                recall_is_empty = recall.is_empty
+                # D7：concept-recall 豁免 V1.2.1 跨页上下文；改注入检索参考块（双落空为 None）
+                context_block = recall.ref_block
+            else:
+                context_block = _build_run_context(
+                    settings,
+                    project_id,
+                    pdf_id,
+                    body.selection.page,
+                    body.selection.page_end,
+                )
             plugin_ctx = PluginContext(
                 selection_text=selection_text,
                 selection_type="text",
@@ -1828,6 +1873,8 @@ async def prepare_stream_run(
             registry=registry,
             follow_up_user_input=None,
             meta_payload=meta_payload,
+            recall_sources=recall_sources,
+            recall_is_empty=recall_is_empty,
         )
         prepared.meta_ready.set()
         return prepared
@@ -1999,6 +2046,10 @@ async def iter_run_sse_bytes(
     try:
         await prepared.meta_ready.wait()
         yield _encode_sse("meta", prepared.meta_payload)
+
+        # V1.2.4：concept-recall 结构化出处紧跟 meta、位于首个 text_delta 前；空数组不发帧（双落空场景）
+        if prepared.recall_sources:
+            yield _encode_sse("sources", {"sources": prepared.recall_sources})
 
         events_iter = _stream_driver_events(
             prepared=prepared, provider=provider
