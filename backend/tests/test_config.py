@@ -36,3 +36,29 @@ def test_get_settings_is_singleton() -> None:
     second = get_settings()
     assert first is second
     get_settings.cache_clear()
+
+
+def test_recall_defaults():
+    from lumina.config import Settings
+    s = Settings()
+    assert s.lumina_recall_max_concepts == 20
+    assert s.lumina_recall_max_text_pages == 5
+    assert s.lumina_recall_snippet_chars == 600
+    assert s.lumina_recall_max_ref_chars == 12000
+
+
+def test_recall_clamp_rejects_out_of_range():
+    import pytest
+    from pydantic import ValidationError
+    from lumina.config import Settings
+    with pytest.raises(ValidationError):
+        Settings(lumina_recall_max_concepts=0)
+    with pytest.raises(ValidationError):
+        Settings(lumina_recall_snippet_chars=50)
+
+
+def test_recall_env_override(monkeypatch):
+    from lumina.config import Settings
+    monkeypatch.setenv("LUMINA_RECALL_MAX_CONCEPTS", "42")
+    s = Settings()
+    assert s.lumina_recall_max_concepts == 42

@@ -38,6 +38,11 @@ class Settings(BaseSettings):
     lumina_toc_sample_max_chars: int = Field(default=60000, ge=5000, le=300_000)
     # V1.2.3：记忆加工单元的字符预算（超预算章节按页贪心拆分）
     lumina_memory_unit_max_chars: int = Field(default=30000, ge=5000, le=200_000)
+    # V1.2.4：概念回查检索参数
+    lumina_recall_max_concepts: int = Field(default=20, ge=1, le=100)
+    lumina_recall_max_text_pages: int = Field(default=5, ge=1, le=20)
+    lumina_recall_snippet_chars: int = Field(default=600, ge=100, le=4000)
+    lumina_recall_max_ref_chars: int = Field(default=12000, ge=2000, le=100_000)
     selection_text_max_chars: int = Field(
         default=32000,
         ge=1000,
