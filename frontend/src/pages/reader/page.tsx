@@ -618,6 +618,17 @@ export default function ReaderPage() {
     'concept-recall': recallChip,
   };
 
+  // 回查 chip 隐藏时同步剔除其选中态：hidden 与 disabled 不同，DOM 节点整个消失，
+  // 用户无法手动取消选中；若不剔除，发送会携带过期的 concept-recall 触发后端 400
+  const recallChipHidden = recallChip.state === 'hidden';
+  useEffect(() => {
+    if (recallChipHidden) {
+      setActiveTaskTypes((prev) =>
+        prev.includes('concept-recall') ? prev.filter((t) => t !== 'concept-recall') : prev,
+      );
+    }
+  }, [recallChipHidden]);
+
   const captureImage = useCallback(async (): Promise<ImageCaptureResult | null> => {
     if (!selectedArea || !pdfDoc) return null;
     // V1.1.3 D-V113-6：以 selectedArea.page（起点页）为基准截图，与 currentPage 解耦
