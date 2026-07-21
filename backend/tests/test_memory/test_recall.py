@@ -123,3 +123,30 @@ def test_orphaned_concept_matches_without_unit_prefix(conn):
     assert res.ref_block is not None
     assert "[p.42] 孤儿概念：无所属单元" in res.ref_block
     assert "· p.42" not in res.ref_block
+
+
+def test_duplicate_term_different_definitions_per_unit(conn):
+    # 回归测试：两个单元分别定义同一术语但定义不同。
+    # 原问题：dict 压缩导致只保留最后一个定义，其他单元的条目显示错误定义。
+    # 修复后：每个命中条目应携带其自身的定义，不论是否重名。
+    replace_unit_concepts(conn, "mu_a", [
+        MemoryConceptRow(id="mc_dup_a", pdf_id="pdf_1", unit_id="mu_a",
+                         term="熵", definition="热力学定义", page=2, created_at=1),
+    ])
+    replace_unit_concepts(conn, "mu_b", [
+        MemoryConceptRow(id="mc_dup_b", pdf_id="pdf_1", unit_id="mu_b",
+                         term="熵", definition="信息论定义", page=8, created_at=2),
+    ])
+    res = build_recall(conn, "pdf_1", "熵", **RECALL_KW)
+    assert res.is_empty is False
+    assert res.ref_block is not None
+    # 两个定义都应出现
+    assert "热力学定义" in res.ref_block
+    assert "信息论定义" in res.ref_block
+    # 第1章 p.2 应携带热力学定义
+    assert "[第1章 · p.2] 熵：热力学定义" in res.ref_block
+    # 第2章 p.8 应携带信息论定义
+    assert "[第2章 · p.8] 熵：信息论定义" in res.ref_block
+    # 验证来源结构
+    assert len(res.sources) == 2
+    assert all(s.kind == "concept" and s.term == "熵" for s in res.sources)

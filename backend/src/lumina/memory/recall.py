@@ -90,7 +90,7 @@ def _fallback_text(conn, pdf_id: str, selection_text: str, max_text_pages: int, 
         idx = norm_text.find(norm_sel)
         if idx == -1:
             continue
-        # 命中位置前后共 snippet_chars 字符的窗口（同页多次命中合并为一个窗口）
+        # 以该页首个命中位置为锚，截取前后共 snippet_chars 字符的窗口（每页一个片段）
         half = snippet_chars // 2
         lo = max(0, idx - half)
         hi = min(len(text), idx + len(selection_text) + half)
@@ -111,12 +111,12 @@ _TEXT_HEADER = (
 )
 
 
-def _build_concept_block(sources: list[SourceRef], max_ref_chars: int, defs: dict[str, str]) -> str:
+def _build_concept_block(sources: list[SourceRef], max_ref_chars: int, definitions: list[str]) -> str:
     parts = [_CONCEPT_HEADER]
     total = len(_CONCEPT_HEADER)
-    for s in sources:
+    for s, definition in zip(sources, definitions):
         unit = f"{s.unit_title} · " if s.unit_title else ""
-        entry = f"\n\n[{unit}p.{s.page}] {s.term}：{defs.get(s.term, '')}"
+        entry = f"\n\n[{unit}p.{s.page}] {s.term}：{definition}"
         if total + len(entry) > max_ref_chars:
             break
         parts.append(entry)
@@ -153,10 +153,10 @@ def build_recall(
             SourceRef(kind="concept", term=h.term, page=h.page, unit_title=h.unit_title)
             for h in concept_hits
         ]
-        # definition 随命中行携带，组装参考块正文（term → definition）
-        defs = {h.term: h.definition for h in concept_hits}
+        # definition 随命中行携带，按序传递到参考块组装（防止同名术语定义串写）
+        definitions = [h.definition for h in concept_hits]
         return RecallResult(
-            ref_block=_build_concept_block(sources, max_ref_chars, defs),
+            ref_block=_build_concept_block(sources, max_ref_chars, definitions),
             sources=sources,
         )
 
