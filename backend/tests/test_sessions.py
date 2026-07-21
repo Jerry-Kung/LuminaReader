@@ -492,3 +492,116 @@ async def test_session_create_image_path_writes_selection_type() -> None:
     store = SessionStore()
     session = await _create_session(store)
     assert session.selection_type == "image"
+
+
+@pytest.mark.asyncio
+async def test_create_persists_first_assistant_sources_json() -> None:
+    from lumina.db.engine import get_connection
+    from lumina.db.models import get_first_assistant_message
+
+    store = SessionStore()
+    created = auto_create_project(PDF_BYTES, f"book-{ULID()}.pdf")
+    sel_id = f"sel_{ULID()}"
+    sources = '[{"kind":"concept","term":"t","page":5}]'
+    session = await store.create(
+        conversation_id=f"conv_{ULID()}",
+        project_id=created.project_id,
+        pdf_id=created.pdf_id,
+        selection_id=sel_id,
+        task_type="translate",
+        extracted_text="hello",
+        selection_row=SelectionRow(
+            id=sel_id,
+            pdf_id=created.pdf_id,
+            page=1,
+            x=0.0,
+            y=0.0,
+            w=10.0,
+            h=10.0,
+            dpi=144.0,
+            thumbnail_png=None,
+            created_at=int(time.time()),
+        ),
+        first_user_question=None,
+        first_user_content="hello",
+        first_assistant_text="answer",
+        first_assistant_meta={"model": "gpt-4o"},
+        meta={"page": 1},
+        selection_type="image",
+        first_assistant_sources_json=sources,
+    )
+
+    conn = get_connection(session.project_id)
+    row = get_first_assistant_message(conn, session.session_id)
+    assert row is not None
+    assert row.sources_json == sources
+
+
+@pytest.mark.asyncio
+async def test_create_without_sources_json_leaves_it_none() -> None:
+    from lumina.db.engine import get_connection
+    from lumina.db.models import get_first_assistant_message
+
+    store = SessionStore()
+    session = await _create_session(store)
+
+    conn = get_connection(session.project_id)
+    row = get_first_assistant_message(conn, session.session_id)
+    assert row is not None
+    assert row.sources_json is None
+
+
+@pytest.mark.asyncio
+async def test_finalize_streaming_assistant_persists_sources_json() -> None:
+    from lumina.db.engine import get_connection
+    from lumina.db.models import get_first_assistant_message
+
+    store = SessionStore()
+    session = await _create_session(store)
+    sources = '[{"kind":"concept","term":"t","page":5}]'
+
+    await store.finalize_streaming_assistant(
+        session.session_id,
+        turn_index=0,
+        assistant_text="final answer",
+        assistant_meta={"model": "gpt-4o"},
+        sources_json=sources,
+    )
+
+    conn = get_connection(session.project_id)
+    row = get_first_assistant_message(conn, session.session_id)
+    assert row is not None
+    assert row.content == "final answer"
+    assert row.sources_json == sources
+
+
+@pytest.mark.asyncio
+async def test_finalize_streaming_assistant_without_sources_json_overwrites_to_none() -> None:
+    # Task 1 的 SET 语义：update_assistant_message_at_turn 每次都会写 sources_json 参数，
+    # 不传即默认 None，因此会把之前落库的值覆盖掉——此处断言的是实际行为，而非期望行为。
+    from lumina.db.engine import get_connection
+    from lumina.db.models import get_first_assistant_message
+
+    store = SessionStore()
+    session = await _create_session(store)
+    sources = '[{"kind":"concept","term":"t","page":5}]'
+
+    await store.finalize_streaming_assistant(
+        session.session_id,
+        turn_index=0,
+        assistant_text="first pass",
+        assistant_meta={"model": "gpt-4o"},
+        sources_json=sources,
+    )
+    await store.finalize_streaming_assistant(
+        session.session_id,
+        turn_index=0,
+        assistant_text="second pass",
+        assistant_meta={"model": "gpt-4o"},
+    )
+
+    conn = get_connection(session.project_id)
+    row = get_first_assistant_message(conn, session.session_id)
+    assert row is not None
+    assert row.content == "second pass"
+    assert row.sources_json is None

@@ -95,6 +95,8 @@ class SessionStore:
         first_assistant_meta: dict,
         meta: dict | None = None,
         selection_type: Literal["text", "image"] = "image",
+        # V1.2.4：首轮 assistant 消息可能携带 concept-recall 结构化出处，随首轮落库一并写入
+        first_assistant_sources_json: str | None = None,
     ) -> Session:
         now = time.time()
         ts = int(now)
@@ -148,6 +150,7 @@ class SessionStore:
                     completion_tokens=first_assistant_meta.get("completion_tokens"),
                     latency_ms=first_assistant_meta.get("latency_ms"),
                     created_at=ts,
+                    sources_json=first_assistant_sources_json,
                 ),
             )
             conn.execute("COMMIT")
@@ -324,6 +327,8 @@ class SessionStore:
         interrupted: bool = False,
         assistant_meta: dict | None = None,
         extracted_text_override: str | None = None,
+        # V1.2.4：流式首轮 finalize 时随文回填结构化出处，语义与 create 的同名字段一致
+        sources_json: str | None = None,
     ) -> Session | None:
         session = await self.get(session_id)
         if session is None:
@@ -358,6 +363,7 @@ class SessionStore:
                 prompt_tokens=meta.get("prompt_tokens"),
                 completion_tokens=meta.get("completion_tokens"),
                 latency_ms=meta.get("latency_ms"),
+                sources_json=sources_json,
             )
             update_conversation_last_used(conn, session_id, ts)
             if extracted_text_override is not None:
