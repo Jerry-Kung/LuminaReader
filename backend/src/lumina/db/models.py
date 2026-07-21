@@ -832,3 +832,46 @@ def get_pdf_text_char_counts(conn, pdf_id: str) -> dict[int, int]:
     except sqlite3.Error:
         return {}
     return {int(row[0]): int(row[1]) for row in rows}
+
+
+@dataclass
+class ConceptHitRow:
+    """V1.2.4 概念回查检索行：概念条目 + 其所属单元的标题/序号（LEFT JOIN units）。"""
+    term: str
+    definition: str
+    page: int
+    unit_id: str
+    unit_title: str | None
+    unit_seq: int
+
+
+def list_concept_hits(conn, pdf_id: str) -> list[ConceptHitRow]:
+    """回查检索基础数据：本书全部概念 + 所属单元标题/seq。
+
+    归一化匹配、排序、上限截断均在 Python 侧（recall.py）处理——DB 侧只做全量拉取，
+    条目量级为本书章节概念数（可控），不在 SQL 里做 LIKE 以保持检索逻辑可单测。
+    MAY 档兜底：表缺失 / 未加工时返回 []。
+    """
+    try:
+        rows = conn.execute(
+            """
+            SELECT c.term, c.definition, c.page, c.unit_id, u.title, u.seq
+            FROM memory_concepts c
+            LEFT JOIN memory_units u ON c.unit_id = u.id
+            WHERE c.pdf_id = ?
+            """,
+            (pdf_id,),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    return [
+        ConceptHitRow(
+            term=row[0],
+            definition=row[1],
+            page=int(row[2]),
+            unit_id=row[3],
+            unit_title=row[4],
+            unit_seq=int(row[5]) if row[5] is not None else 0,
+        )
+        for row in rows
+    ]
