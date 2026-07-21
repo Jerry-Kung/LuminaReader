@@ -3,10 +3,12 @@ import type { AIResult, Message, HistoryEntry } from '../page';
 import type { TaskType, ErrorCategory } from '@/services/api';
 import MarkdownRenderer from './MarkdownRenderer';
 
-export type ChipPluginType = Extract<TaskType, 'translate' | 'explain' | 'dictionary'>;
+// V1.2.4：concept-recall（回查）加入 chip 插件集合，与 translate/explain/dictionary 同走 chip 交互
+export type ChipPluginType = Extract<TaskType, 'translate' | 'explain' | 'dictionary' | 'concept-recall'>;
 
 export interface ChipStateItem {
-  state: 'available' | 'disabled';
+  // V1.2.4：'hidden' 用于回查 chip 未满足显示条件时整体不渲染（D9：不做置灰引导，区别于 disabled 的可见但不可点）
+  state: 'available' | 'disabled' | 'hidden';
   reason?: string;
 }
 
@@ -37,6 +39,8 @@ interface AIAssistantPanelProps {
   onRetry?: (message: Message) => void;
   onDismissError?: (message: Message) => void;
   onToggleOcr?: (message: Message) => void;
+  // V1.2.4：出处 chip 点击跳页（page 级定位，复用目录/要点 Tab 同链路）
+  onJumpToSource?: (page: number) => void;
 }
 
 const taskLabelConfig: Record<TaskType, { label: string; icon: string; bgClass: string; textClass: string }> = {
@@ -70,7 +74,7 @@ const taskLabelConfig: Record<TaskType, { label: string; icon: string; bgClass: 
     bgClass: 'bg-sky-50',
     textClass: 'text-sky-700',
   },
-  // V1.2.4：concept-recall（回查）非 chip 插件，此处仅为满足 Record<TaskType, ...> 穷尽性；不出现在 chip 交互中
+  // V1.2.4：concept-recall（回查）卡片头部徽章
   'concept-recall': {
     label: '回查',
     icon: 'ri-history-line',
@@ -100,6 +104,11 @@ const chipColorMap: Record<ChipPluginType, ChipColorClasses> = {
     selectedBg: 'bg-violet-50',
     selectedText: 'text-violet-700',
     selectedBorder: 'border-violet-300',
+  },
+  'concept-recall': {
+    selectedBg: 'bg-indigo-50',
+    selectedText: 'text-indigo-700',
+    selectedBorder: 'border-indigo-300',
   },
 };
 
@@ -175,11 +184,13 @@ function MessageBubble({
   onRetry,
   onDismiss,
   onToggleOcr,
+  onJumpToSource,
 }: {
   message: Message;
   onRetry?: (m: Message) => void;
   onDismiss?: (m: Message) => void;
   onToggleOcr?: (m: Message) => void;
+  onJumpToSource?: (page: number) => void;
 }) {
   if (message.role === 'user') {
     return (
@@ -261,6 +272,23 @@ function MessageBubble({
           />
         )}
         <MarkdownRenderer content={message.text} />
+        {message.sources && message.sources.length > 0 && (
+          <div className="flex flex-wrap gap-1.5 mt-2 pt-2 border-t border-stone-100">
+            {message.sources.map((s, i) => (
+              <button
+                key={i}
+                onClick={() => onJumpToSource?.(s.page)}
+                title={s.snippet || undefined}
+                className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] text-indigo-600 bg-indigo-50 border border-indigo-100 rounded-full hover:bg-indigo-100 cursor-pointer transition-colors"
+              >
+                <i className="ri-map-pin-line text-[10px]"></i>
+                {s.kind === 'concept' && s.unit_title
+                  ? `${s.unit_title} · p.${s.page}`
+                  : `p.${s.page}`}
+              </button>
+            ))}
+          </div>
+        )}
       </div>
     </div>
   );
@@ -321,6 +349,7 @@ function HistoryItem({
   onRetry,
   onDismissError,
   onToggleOcr,
+  onJumpToSource,
 }: {
   entry: HistoryEntry;
   isExpanded: boolean;
@@ -331,6 +360,7 @@ function HistoryItem({
   onRetry?: (m: Message) => void;
   onDismissError?: (m: Message) => void;
   onToggleOcr?: (m: Message) => void;
+  onJumpToSource?: (page: number) => void;
 }) {
   const config = taskLabelConfig[entry.taskType];
   const placeholder = (entry.summary || '历史对话').slice(0, 60);
@@ -394,6 +424,7 @@ function HistoryItem({
                   onRetry={onRetry}
                   onDismiss={onDismissError}
                   onToggleOcr={onToggleOcr}
+                  onJumpToSource={onJumpToSource}
                 />
               ))}
               {!hasLoading && (
@@ -411,6 +442,7 @@ const CHIP_DEFS: { type: ChipPluginType; icon: string; label: string }[] = [
   { type: 'translate', icon: 'ri-translate-2', label: '翻译' },
   { type: 'explain', icon: 'ri-lightbulb-line', label: '解释' },
   { type: 'dictionary', icon: 'ri-book-open-line', label: '词典' },
+  { type: 'concept-recall', icon: 'ri-history-line', label: '回查' },
 ];
 
 function CapabilityChip({
@@ -532,6 +564,7 @@ function LaunchInputArea({
           <div className="flex items-center gap-1.5 flex-wrap">
             {CHIP_DEFS.map((chip) => {
               const cs = chipsState[chip.type];
+              if (cs?.state === 'hidden') return null; // V1.2.4：回查 chip 记忆未就绪/选区不满足时整体不显示，隐藏优先于 faded
               const chipUnavailable = cs?.state === 'disabled';
               const isSelected = activeTaskTypes.includes(chip.type);
               const colors = chipColorMap[chip.type];
@@ -629,6 +662,7 @@ export default function AIAssistantPanel({
   onRetry,
   onDismissError,
   onToggleOcr,
+  onJumpToSource,
 }: AIAssistantPanelProps) {
   const handleCopy = async (text: string) => {
     try {
@@ -724,6 +758,7 @@ export default function AIAssistantPanel({
                     onRetry={onRetry}
                     onDismissError={onDismissError}
                     onToggleOcr={onToggleOcr}
+                    onJumpToSource={onJumpToSource}
                   />
                 ))}
               </div>
@@ -837,6 +872,7 @@ export default function AIAssistantPanel({
                               onRetry={onRetry}
                               onDismiss={onDismissError}
                               onToggleOcr={onToggleOcr}
+                              onJumpToSource={onJumpToSource}
                             />
                           ))}
                         </div>

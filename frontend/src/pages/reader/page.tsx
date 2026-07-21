@@ -20,10 +20,11 @@ import {
   type RunStreamCallbacks,
   type StreamMeta,
   type FirstTurnSelection,
+  type SourceRef,
 } from '@/services/api';
 import Toolbar, { type CursorMode } from './components/Toolbar';
 import PDFViewer, { type SelectedArea } from './components/PDFViewer';
-import AIAssistantPanel, { type ChipPluginType, type ChipsState } from './components/AIAssistantPanel';
+import AIAssistantPanel, { type ChipPluginType, type ChipsState, type ChipStateItem } from './components/AIAssistantPanel';
 import SidebarPanel from './components/SidebarPanel';
 import TextExtractionBanner from './components/TextExtractionBanner';
 import { useTextSelection } from './hooks/useTextSelection';
@@ -74,6 +75,8 @@ export interface Message {
   // OCR 段已被 SSE extracted_text 事件以权威值覆盖（后续 delta 不应再追加）
   ocrAuthoritative?: boolean;
   ocrCollapsed?: boolean;
+  // V1.2.4：concept-recall 出处 chips 数据（非 recall 消息 undefined）
+  sources?: SourceRef[];
 }
 
 export interface AIResult {
@@ -166,16 +169,17 @@ function nextMsgId(): number {
   return Date.now() * 1000 + (msgSeq++ % 1000);
 }
 
+// V1.2.4：回查 chip 可用的选区词数上限，与后端 recall manifest 的触发阈值对齐（F4/D9）
+const RECALL_MAX_WORDS = 6;
+
 // 把卡片/历史保存的单一 TaskType 还原为 plugins 数组：
 // 'chat' → []（自由 Chat 模式）；其它三类 → [type]。
 // 追问轮后端允许跨插件，但前端默认沿用本卡的 type，无 UI 让用户改。
 // V1.1.2：'screenshot-qa' 是后端按 image 自动激活的内部插件，追问轮（无 image）
 // 显式带它会让 LLM 仍被强制要求输出 <ocr>/<answer> 双标签 → 标签泄漏到 UI。
 // 追问轮统一退化为 chat 模式，后端会用 session.extracted_text 作为上下文。
-// V1.2.4：'concept-recall' 同 'screenshot-qa'，是后端内部路由的插件而非用户可选 chip，
-// 追问轮同样退化为 chat 模式（此处不引入新 chip 交互，交互侧改动属 Task 11 范围）。
 function taskTypeToPlugins(t: TaskType): ChipPluginType[] {
-  if (t === 'chat' || t === 'screenshot-qa' || t === 'concept-recall') return [];
+  if (t === 'chat' || t === 'screenshot-qa') return [];
   return [t];
 }
 
@@ -600,10 +604,18 @@ export default function ReaderPage() {
       ? { state: 'available' }
       : { state: 'disabled', reason: '仅支持 3 个词以内的文字选区' }
     : { state: 'disabled', reason: '仅支持 3 个词以内的文字选区' };
+  // 回查：文本选区 + 词数≤RECALL_MAX_WORDS + 记忆 ready/partial；否则整个 chip 隐藏（D9：不做置灰引导）
+  const memoryStatus = memoryApi.memory?.status;
+  const memoryReadyForRecall = memoryStatus === 'ready' || memoryStatus === 'partial';
+  const recallChip: ChipStateItem =
+    textSelection && textSelection.wordCount <= RECALL_MAX_WORDS && memoryReadyForRecall
+      ? { state: 'available' }
+      : { state: 'hidden' };
   const chipsState: ChipsState = {
     translate: { state: hasSelection ? 'available' : 'disabled' },
     explain: { state: hasSelection ? 'available' : 'disabled' },
     dictionary: dictionaryChip,
+    'concept-recall': recallChip,
   };
 
   const captureImage = useCallback(async (): Promise<ImageCaptureResult | null> => {
@@ -837,6 +849,21 @@ export default function ReaderPage() {
               ...updated[idx],
               messages: updated[idx].messages.map((m) =>
                 m.id === loadingId ? { ...m, ocrText: text, ocrAuthoritative: true } : m,
+              ),
+            };
+            return updated;
+          });
+        },
+        // V1.2.4：concept-recall 出处帧，落到本轮 loading 消息上，供出处 chips 渲染
+        onSources: (sources) => {
+          setAiResults((prev) => {
+            const idx = prev.findIndex((r) => r.id === cardId);
+            if (idx === -1) return prev;
+            const updated = [...prev];
+            updated[idx] = {
+              ...updated[idx],
+              messages: updated[idx].messages.map((m) =>
+                m.id === loadingId ? { ...m, sources } : m,
               ),
             };
             return updated;
@@ -1114,6 +1141,7 @@ export default function ReaderPage() {
           role: m.role === 'user' ? 'user' : 'ai',
           text: m.content,
           timestamp: (m.created_at || 0) * 1000,
+          sources: m.sources, // V1.2.4：历史 concept-recall 消息带出处 chips
         }));
         setHistory((prev) =>
           prev.map((h) =>
@@ -1423,6 +1451,21 @@ export default function ReaderPage() {
                 ...updated[idx],
                 messages: updated[idx].messages.map((m) =>
                   m.id === loadingId ? { ...m, ocrText: text, ocrAuthoritative: true } : m,
+                ),
+              };
+              return updated;
+            });
+          },
+          // V1.2.4：重试首轮（concept-recall）同样需要透传出处帧
+          onSources: (sources) => {
+            setAiResults((prev) => {
+              const idx = prev.findIndex((c) => c.id === r.cardId);
+              if (idx === -1) return prev;
+              const updated = [...prev];
+              updated[idx] = {
+                ...updated[idx],
+                messages: updated[idx].messages.map((m) =>
+                  m.id === loadingId ? { ...m, sources } : m,
                 ),
               };
               return updated;
@@ -1897,6 +1940,7 @@ export default function ReaderPage() {
           onRetry={handleRetry}
           onDismissError={handleDismissError}
           onToggleOcr={handleToggleOcr}
+          onJumpToSource={goToPage}
         />
       </div>
 
