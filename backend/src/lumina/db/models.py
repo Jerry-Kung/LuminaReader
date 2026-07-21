@@ -66,6 +66,7 @@ class MessageRow:
     completion_tokens: int | None
     latency_ms: int | None
     created_at: int
+    sources_json: str | None = None  # V1.2.4：concept-recall 结构化出处（JSON 数组序列化），MAY 档可空
 
 
 def insert_project_meta(conn, row: ProjectMetaRow) -> None:
@@ -150,8 +151,9 @@ def insert_message(conn, row: MessageRow) -> None:
         """
         INSERT INTO messages (
             id, conversation_id, turn_index, role, content, user_question,
-            model, prompt_tokens, completion_tokens, latency_ms, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            model, prompt_tokens, completion_tokens, latency_ms, created_at,
+            sources_json
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             row.id,
@@ -165,6 +167,7 @@ def insert_message(conn, row: MessageRow) -> None:
             row.completion_tokens,
             row.latency_ms,
             row.created_at,
+            row.sources_json,
         ),
     )
 
@@ -187,7 +190,8 @@ def list_messages(conn, conversation_id: str) -> list[MessageRow]:
     rows = conn.execute(
         """
         SELECT id, conversation_id, turn_index, role, content, user_question,
-               model, prompt_tokens, completion_tokens, latency_ms, created_at
+               model, prompt_tokens, completion_tokens, latency_ms, created_at,
+               sources_json
         FROM messages
         WHERE conversation_id = ?
         ORDER BY turn_index ASC, CASE role WHEN 'user' THEN 0 ELSE 1 END ASC
@@ -221,11 +225,13 @@ def update_assistant_message_at_turn(
     prompt_tokens: int | None,
     completion_tokens: int | None,
     latency_ms: int | None,
+    sources_json: str | None = None,
 ) -> None:
     conn.execute(
         """
         UPDATE messages
-        SET content = ?, model = ?, prompt_tokens = ?, completion_tokens = ?, latency_ms = ?
+        SET content = ?, model = ?, prompt_tokens = ?, completion_tokens = ?,
+            latency_ms = ?, sources_json = ?
         WHERE conversation_id = ? AND turn_index = ? AND role = 'assistant'
         """,
         (
@@ -234,6 +240,7 @@ def update_assistant_message_at_turn(
             prompt_tokens,
             completion_tokens,
             latency_ms,
+            sources_json,
             conversation_id,
             turn_index,
         ),
@@ -328,7 +335,8 @@ def get_first_assistant_message(conn, conversation_id: str) -> MessageRow | None
     row = conn.execute(
         """
         SELECT id, conversation_id, turn_index, role, content, user_question,
-               model, prompt_tokens, completion_tokens, latency_ms, created_at
+               model, prompt_tokens, completion_tokens, latency_ms, created_at,
+               sources_json
         FROM messages
         WHERE conversation_id = ? AND role = 'assistant'
         ORDER BY turn_index ASC

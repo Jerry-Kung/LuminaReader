@@ -42,15 +42,15 @@ def _seed_v1_project_meta(conn) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_schema_version_constant_is_7():
-    assert SCHEMA_VERSION == 7
+def test_schema_version_constant_is_8():
+    assert SCHEMA_VERSION == 8
 
 
-def test_registry_contains_001_through_007_in_order():
+def test_registry_contains_001_through_008_in_order():
     migrations = registered_migrations()
     versions = [m.target_version for m in migrations]
     filenames = [m.filename for m in migrations]
-    assert versions == [1, 2, 3, 4, 5, 6, 7]
+    assert versions == [1, 2, 3, 4, 5, 6, 7, 8]
     assert filenames[0] == "001_initial.py"
     assert filenames[1] == "002_add_pdf_last_read_page.py"
     assert filenames[2] == "003_add_pdf_last_read_offset.py"
@@ -58,6 +58,7 @@ def test_registry_contains_001_through_007_in_order():
     assert filenames[4] == "005_pdf_text_tables.py"
     assert filenames[5] == "006_toc_bookmark_tables.py"
     assert filenames[6] == "007_memory_tables.py"
+    assert filenames[7] == "008_add_message_sources.py"
 
 
 # ---------------------------------------------------------------------------
@@ -111,6 +112,7 @@ def test_messages_table_columns(conn):
         "prompt_tokens",
         "completion_tokens",
         "latency_ms",
+        "sources_json",
     } <= columns
 
 
@@ -172,8 +174,8 @@ def test_apply_pending_upgrades_v103_db_to_current(conn):
 
     new_version = apply_pending(conn)
 
-    assert new_version == SCHEMA_VERSION == 7
-    assert read_schema_version(conn) == 7
+    assert new_version == SCHEMA_VERSION
+    assert read_schema_version(conn) == SCHEMA_VERSION
     cols_after = {row[1] for row in conn.execute("PRAGMA table_info(pdfs)").fetchall()}
     assert "last_read_page" in cols_after
     assert "last_read_offset" in cols_after
@@ -231,6 +233,17 @@ def test_apply_pending_002_idempotent_when_column_pre_exists(conn):
     new_version = apply_pending(conn)
     assert new_version == SCHEMA_VERSION
     assert read_schema_version(conn) == SCHEMA_VERSION
+
+
+def test_apply_pending_008_idempotent_when_column_pre_exists(conn):
+    """messages.sources_json 已被手工 ALTER 加入时，008 迁移应静默跳过而非报重复列。"""
+    _seed_v3_db(conn)  # 复用既有 v3 种子库（含 messages 表，schema_version 落后于 008）
+    conn.execute("ALTER TABLE messages ADD COLUMN sources_json TEXT")
+    # 不应抛 "duplicate column name: sources_json"
+    new_version = apply_pending(conn)
+    assert new_version == SCHEMA_VERSION
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(messages)").fetchall()}
+    assert "sources_json" in cols
 
 
 def test_apply_pending_003_idempotent_when_column_pre_exists(conn):
@@ -465,7 +478,7 @@ def test_migration_004_from_v3_preserves_image_rows(conn):
     ]
     _seed_v3_db(conn, rows)
     apply_pending(conn)
-    assert read_schema_version(conn) == 7
+    assert read_schema_version(conn) == SCHEMA_VERSION
     upgraded = conn.execute(
         """
         SELECT id, pdf_id, page, x, y, w, h, dpi, thumbnail_png, created_at,
@@ -540,12 +553,12 @@ def test_migration_004_preserves_conversation_fk(conn):
 def test_migration_004_empty_selections_table(conn):
     _seed_v3_db(conn)
     apply_pending(conn)
-    assert read_schema_version(conn) == 7
+    assert read_schema_version(conn) == SCHEMA_VERSION
     assert conn.execute("SELECT COUNT(*) FROM selections").fetchone()[0] == 0
     assert len(conn.execute("PRAGMA table_info(selections)").fetchall()) == 14
 
 
-def test_apply_pending_runs_004_005_006_and_007_when_at_v3(monkeypatch, conn):
+def test_apply_pending_runs_004_005_006_007_and_008_when_at_v3(monkeypatch, conn):
     _seed_v3_db(conn)
     from lumina.db import migrations as mig
 
@@ -573,7 +586,7 @@ def test_apply_pending_runs_004_005_006_and_007_when_at_v3(monkeypatch, conn):
     monkeypatch.setattr(mig, "_REGISTRY", patched)
     try:
         apply_pending(conn)
-        assert calls == [4, 5, 6, 7]
+        assert calls == [4, 5, 6, 7, 8]
     finally:
         monkeypatch.setattr(mig, "_REGISTRY", original)
 
