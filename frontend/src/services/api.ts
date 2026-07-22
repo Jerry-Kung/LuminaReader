@@ -1183,6 +1183,124 @@ export async function deleteBookmark(pdfId: string, bookmarkId: string): Promise
 }
 
 // ---------------------------------------------------------------------------
+// V1.2.5: 轻量侧边栏笔记
+// ---------------------------------------------------------------------------
+
+export type NoteSource = 'manual' | 'selection' | 'ai';
+
+export interface NoteItem {
+  id: string;
+  content: string;
+  page: number;
+  offset_ratio: number | null;
+  anchor_text: string | null;
+  anchor_rects_json: string | null;
+  source: NoteSource;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface NoteCreateInput {
+  content: string;
+  page: number;
+  offset_ratio?: number;
+  anchor_text?: string;
+  anchor_rects_json?: string;
+  source: NoteSource;
+}
+
+export async function listNotes(pdfId: string): Promise<NoteItem[]> {
+  if (!API_BASE) return [];
+  const url = `${API_BASE}/api/v1/pdfs/${encodeURIComponent(pdfId)}/notes`;
+  let response: Response;
+  try {
+    response = await fetch(url);
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to reach backend.';
+    throw new TranslateApiError('NETWORK_ERROR', msg);
+  }
+  const data = await parseEnvelope<{ notes: NoteItem[] }>(response);
+  return data.notes;
+}
+
+export async function createNote(pdfId: string, input: NoteCreateInput): Promise<NoteItem> {
+  if (!API_BASE) {
+    const now = Math.floor(Date.now() / 1000);
+    return {
+      id: `nt_mock_${Date.now()}`,
+      content: input.content,
+      page: input.page,
+      offset_ratio: input.offset_ratio ?? null,
+      anchor_text: input.anchor_text ?? null,
+      anchor_rects_json: input.anchor_rects_json ?? null,
+      source: input.source,
+      created_at: now,
+      updated_at: now,
+    };
+  }
+  const url = `${API_BASE}/api/v1/pdfs/${encodeURIComponent(pdfId)}/notes`;
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(input),
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to reach backend.';
+    throw new TranslateApiError('NETWORK_ERROR', msg);
+  }
+  return parseEnvelope<NoteItem>(response);
+}
+
+export async function updateNote(
+  pdfId: string,
+  noteId: string,
+  content: string,
+): Promise<{ updated_at: number }> {
+  if (!API_BASE) return { updated_at: Math.floor(Date.now() / 1000) };
+  const url = `${API_BASE}/api/v1/pdfs/${encodeURIComponent(pdfId)}/notes/${encodeURIComponent(noteId)}`;
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ content }),
+    });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to reach backend.';
+    throw new TranslateApiError('NETWORK_ERROR', msg);
+  }
+  const data = await parseEnvelope<{ id: string; content: string; updated_at: number }>(response);
+  return { updated_at: data.updated_at };
+}
+
+export async function deleteNote(pdfId: string, noteId: string): Promise<void> {
+  if (!API_BASE) return;
+  const url = `${API_BASE}/api/v1/pdfs/${encodeURIComponent(pdfId)}/notes/${encodeURIComponent(noteId)}`;
+  let response: Response;
+  try {
+    response = await fetch(url, { method: 'DELETE' });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Failed to reach backend.';
+    throw new TranslateApiError('NETWORK_ERROR', msg);
+  }
+  if (response.status === 204) return;
+  let envelope: ErrorEnvelope | null = null;
+  try {
+    envelope = await response.json();
+  } catch {
+    envelope = null;
+  }
+  throw new TranslateApiError(
+    envelope?.error?.code || 'INTERNAL_ERROR',
+    envelope?.error?.message || `Failed to delete note (HTTP ${response.status}).`,
+    envelope?.error?.request_id,
+    response.status,
+  );
+}
+
+// ---------------------------------------------------------------------------
 // V1.2.3: 记忆加工（memory）
 // ---------------------------------------------------------------------------
 
