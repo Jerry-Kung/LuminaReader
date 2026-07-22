@@ -81,6 +81,15 @@ export interface Message {
   ocrCollapsed?: boolean;
   // V1.2.4：concept-recall 出处 chips 数据（非 recall 消息 undefined）
   sources?: SourceRef[];
+  // V1.2.5：该条 AI 回答已存为笔记（会话内防重复）
+  noteSaved?: boolean;
+}
+
+export interface NoteAnchor {
+  page: number;
+  offset_ratio?: number;
+  anchor_text?: string;
+  anchor_rects_json?: string;
 }
 
 export interface AIResult {
@@ -91,6 +100,8 @@ export interface AIResult {
   messages: Message[];
   timestamp: number;
   collapsed: boolean;
+  // V1.2.5：本卡发起时的选区锚点（AI 回答存为笔记用；历史恢复的卡无此字段）
+  noteAnchor?: NoteAnchor;
 }
 
 export interface HistoryEntry {
@@ -427,6 +438,37 @@ export default function ReaderPage() {
     [notesApi],
   );
 
+  // V1.2.5 入口三：AI 回答一键直存。锚点 = 卡片发起选区（活动卡），历史消息回退当前页。
+  const handleSaveMessageAsNote = useCallback(
+    async (msg: Message) => {
+      if (msg.noteSaved || !msg.text.trim()) return;
+      const card = aiResults.find((r) => r.messages.some((m) => m.id === msg.id));
+      const anchor: NoteAnchor = card?.noteAnchor ?? { page: currentPage };
+      try {
+        const created = await notesApi.add({
+          content: msg.text,
+          page: anchor.page,
+          offset_ratio: anchor.offset_ratio,
+          anchor_text: anchor.anchor_text,
+          anchor_rects_json: anchor.anchor_rects_json,
+          source: 'ai',
+        });
+        if (!created) return;
+        const mark = (m: Message): Message => (m.id === msg.id ? { ...m, noteSaved: true } : m);
+        setAiResults((prev) => prev.map((c) => ({ ...c, messages: c.messages.map(mark) })));
+        setHistory((prev) => prev.map((h) => ({ ...h, messages: h.messages.map(mark) })));
+        setReaderToast('已存为笔记（可在左侧「笔记」中查看）');
+        if (readerToastTimerRef.current) clearTimeout(readerToastTimerRef.current);
+        readerToastTimerRef.current = setTimeout(() => setReaderToast(null), 5000);
+      } catch {
+        setReaderToast('存为笔记失败，请重试。');
+        if (readerToastTimerRef.current) clearTimeout(readerToastTimerRef.current);
+        readerToastTimerRef.current = setTimeout(() => setReaderToast(null), 5000);
+      }
+    },
+    [aiResults, currentPage, notesApi],
+  );
+
   // V1.2.5：通用浮动面板（要点 / 全书总结 / 笔记视图）；切书时关闭，
   // 同时清掉上一本书的瞬时闪烁高亮与孤儿定时器（矩形坐标不跨书复用）
   const [panelView, setPanelView] = useState<FloatPanelView | null>(null);
@@ -631,6 +673,22 @@ export default function ReaderPage() {
     containerRef: pdfContainerRef,
     enabled: cursorMode === 'text',
   });
+
+  // V1.2.5 入口一：选区直接记笔记（本地动作，不发 LLM 请求）
+  const handleCreateNoteFromSelection = useCallback(() => {
+    if (!textSelection) return;
+    setPanelView({
+      kind: 'note-new',
+      draft: {
+        page: textSelection.pageStart,
+        offset_ratio: textSelection.pageRects[0]?.rects[0]?.top,
+        anchor_text: textSelection.normalizedText.slice(0, NOTE_ANCHOR_TEXT_MAX),
+        anchor_rects_json:
+          textSelection.pageRects.length > 0 ? JSON.stringify(textSelection.pageRects) : undefined,
+        source: 'selection',
+      },
+    });
+  }, [textSelection]);
 
   // 无文本层页上报：PDFPage textLayer 渲染完毕若 textContent 为空 → 记入 scanPages。
   // 已在集合内则跳过 setState，避免重复渲染引发的状态风暴。
@@ -844,6 +902,23 @@ export default function ReaderPage() {
       // 卡片头部徽章用 plugins[0]；plugins 为空（自由 Chat）走 'chat' 徽章
       const cardTaskType: TaskType = taskTypes[0] ?? 'chat';
 
+      // V1.2.5：记录本卡发起选区锚点，供「AI 回答存为笔记」关联出处
+      const noteAnchor: NoteAnchor =
+        capture.kind === 'text'
+          ? {
+              page: capture.pageStart,
+              offset_ratio: textSelection?.pageRects[0]?.rects[0]?.top,
+              anchor_text: capture.text.slice(0, NOTE_ANCHOR_TEXT_MAX),
+              anchor_rects_json:
+                textSelection && textSelection.pageRects.length > 0
+                  ? JSON.stringify(textSelection.pageRects)
+                  : undefined,
+            }
+          : {
+              page: capture.selection.page,
+              offset_ratio: selectedArea?.y,
+            };
+
       setAiResults((prev) => [
         ...prev.map((r) => (r.collapsed ? r : { ...r, collapsed: true })),
         {
@@ -854,6 +929,7 @@ export default function ReaderPage() {
           messages: initialMessages,
           timestamp: Date.now(),
           collapsed: false,
+          noteAnchor,
         },
       ]);
 
@@ -2064,6 +2140,9 @@ export default function ReaderPage() {
           onDismissError={handleDismissError}
           onToggleOcr={handleToggleOcr}
           onJumpToSource={goToPage}
+          canCreateNoteFromSelection={!!textSelection}
+          onCreateNoteFromSelection={handleCreateNoteFromSelection}
+          onSaveMessageAsNote={(m) => void handleSaveMessageAsNote(m)}
         />
       </div>
 

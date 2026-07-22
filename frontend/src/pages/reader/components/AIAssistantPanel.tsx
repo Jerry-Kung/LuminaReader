@@ -41,6 +41,10 @@ interface AIAssistantPanelProps {
   onToggleOcr?: (message: Message) => void;
   // V1.2.4：出处 chip 点击跳页（page 级定位，复用目录/要点 Tab 同链路）
   onJumpToSource?: (page: number) => void;
+  // V1.2.5：选区直接记笔记（本地动作）+ AI 回答存为笔记
+  canCreateNoteFromSelection: boolean;
+  onCreateNoteFromSelection: () => void;
+  onSaveMessageAsNote: (m: Message) => void;
 }
 
 const taskLabelConfig: Record<TaskType, { label: string; icon: string; bgClass: string; textClass: string }> = {
@@ -185,12 +189,14 @@ function MessageBubble({
   onDismiss,
   onToggleOcr,
   onJumpToSource,
+  onSaveAsNote,
 }: {
   message: Message;
   onRetry?: (m: Message) => void;
   onDismiss?: (m: Message) => void;
   onToggleOcr?: (m: Message) => void;
   onJumpToSource?: (page: number) => void;
+  onSaveAsNote?: (m: Message) => void;
 }) {
   if (message.role === 'user') {
     return (
@@ -289,6 +295,22 @@ function MessageBubble({
             ))}
           </div>
         )}
+        {onSaveAsNote && !message.isStreaming && (message.text || '').trim().length > 0 && (
+          <div className="flex justify-end mt-2 pt-2 border-t border-stone-100">
+            <button
+              onClick={() => onSaveAsNote(message)}
+              disabled={message.noteSaved === true}
+              className={`inline-flex items-center gap-1 px-2 py-0.5 text-[11px] rounded-full border transition-colors ${
+                message.noteSaved
+                  ? 'text-stone-300 border-stone-100 cursor-default'
+                  : 'text-stone-400 border-stone-200 hover:text-amber-600 hover:border-amber-300 cursor-pointer'
+              }`}
+            >
+              <i className={`${message.noteSaved ? 'ri-check-line' : 'ri-sticky-note-add-line'} text-[10px]`}></i>
+              {message.noteSaved ? '已存为笔记' : '存为笔记'}
+            </button>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -350,6 +372,7 @@ function HistoryItem({
   onDismissError,
   onToggleOcr,
   onJumpToSource,
+  onSaveAsNote,
 }: {
   entry: HistoryEntry;
   isExpanded: boolean;
@@ -361,6 +384,7 @@ function HistoryItem({
   onDismissError?: (m: Message) => void;
   onToggleOcr?: (m: Message) => void;
   onJumpToSource?: (page: number) => void;
+  onSaveAsNote?: (m: Message) => void;
 }) {
   const config = taskLabelConfig[entry.taskType];
   const placeholder = (entry.summary || '历史对话').slice(0, 60);
@@ -425,6 +449,7 @@ function HistoryItem({
                   onDismiss={onDismissError}
                   onToggleOcr={onToggleOcr}
                   onJumpToSource={onJumpToSource}
+                  onSaveAsNote={onSaveAsNote}
                 />
               ))}
               {!hasLoading && (
@@ -515,6 +540,8 @@ function LaunchInputArea({
   onAIRequest,
   onTaskTypeToggle,
   onUserInputChange,
+  canCreateNoteFromSelection,
+  onCreateNoteFromSelection,
 }: {
   hasSelection: boolean;
   activeTaskTypes: ChipPluginType[];
@@ -524,6 +551,8 @@ function LaunchInputArea({
   onAIRequest: (taskTypes: ChipPluginType[], userInput?: string) => void;
   onTaskTypeToggle: (type: ChipPluginType) => void;
   onUserInputChange: (text: string) => void;
+  canCreateNoteFromSelection: boolean;
+  onCreateNoteFromSelection: () => void;
 }) {
   const trimmedInput = userInput.trim();
   const canSend = hasSelection && (activeTaskTypes.length > 0 || trimmedInput.length > 0);
@@ -600,6 +629,16 @@ function LaunchInputArea({
                 />
               );
             })}
+            {canCreateNoteFromSelection && (
+              <button
+                onClick={onCreateNoteFromSelection}
+                className="whitespace-nowrap inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-medium rounded-full border bg-white text-stone-500 border-stone-200 border-dashed hover:border-amber-300 hover:text-amber-600 transition-all duration-150 cursor-pointer"
+                title="把当前选区存为笔记（本地动作，不调用 AI）"
+              >
+                <i className="ri-sticky-note-add-line text-xs"></i>
+                笔记
+              </button>
+            )}
           </div>
           <button
             onClick={handleSend}
@@ -663,6 +702,9 @@ export default function AIAssistantPanel({
   onDismissError,
   onToggleOcr,
   onJumpToSource,
+  canCreateNoteFromSelection,
+  onCreateNoteFromSelection,
+  onSaveMessageAsNote,
 }: AIAssistantPanelProps) {
   const handleCopy = async (text: string) => {
     try {
@@ -759,6 +801,7 @@ export default function AIAssistantPanel({
                     onDismissError={onDismissError}
                     onToggleOcr={onToggleOcr}
                     onJumpToSource={onJumpToSource}
+                    onSaveAsNote={onSaveMessageAsNote}
                   />
                 ))}
               </div>
@@ -873,6 +916,7 @@ export default function AIAssistantPanel({
                               onDismiss={onDismissError}
                               onToggleOcr={onToggleOcr}
                               onJumpToSource={onJumpToSource}
+                              onSaveAsNote={onSaveMessageAsNote}
                             />
                           ))}
                         </div>
@@ -904,6 +948,8 @@ export default function AIAssistantPanel({
             onAIRequest={onAIRequest}
             onTaskTypeToggle={onTaskTypeToggle}
             onUserInputChange={onUserInputChange}
+            canCreateNoteFromSelection={canCreateNoteFromSelection}
+            onCreateNoteFromSelection={onCreateNoteFromSelection}
           />
         </div>
       </div>
