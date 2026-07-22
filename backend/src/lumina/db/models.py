@@ -875,3 +875,69 @@ def list_concept_hits(conn, pdf_id: str) -> list[ConceptHitRow]:
         )
         for row in rows
     ]
+
+
+# ---------------------------------------------------------------------------
+# V1.2.5: 轻量侧边栏笔记（notes，MAY 演化档）
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class NoteRow:
+    id: str
+    pdf_id: str
+    content: str
+    page: int
+    offset_ratio: float | None
+    anchor_text: str | None
+    anchor_rects_json: str | None
+    source: str
+    created_at: int
+    updated_at: int
+
+
+def list_notes(conn, pdf_id: str) -> list[NoteRow]:
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, pdf_id, content, page, offset_ratio, anchor_text,
+                   anchor_rects_json, source, created_at, updated_at
+            FROM notes WHERE pdf_id = ?
+            ORDER BY page ASC, offset_ratio ASC, created_at ASC
+            """,
+            (pdf_id,),
+        ).fetchall()
+    except sqlite3.Error:
+        return []
+    return [NoteRow(*row) for row in rows]
+
+
+def insert_note(conn, row: NoteRow) -> None:
+    conn.execute(
+        """
+        INSERT INTO notes (id, pdf_id, content, page, offset_ratio, anchor_text,
+                           anchor_rects_json, source, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            row.id, row.pdf_id, row.content, row.page, row.offset_ratio,
+            row.anchor_text, row.anchor_rects_json, row.source,
+            row.created_at, row.updated_at,
+        ),
+    )
+
+
+def update_note_content(conn, pdf_id: str, note_id: str, content: str, updated_at: int) -> int:
+    cursor = conn.execute(
+        "UPDATE notes SET content = ?, updated_at = ? WHERE id = ? AND pdf_id = ?",
+        (content, updated_at, note_id, pdf_id),
+    )
+    return cursor.rowcount
+
+
+def delete_note(conn, pdf_id: str, note_id: str) -> int:
+    cursor = conn.execute(
+        "DELETE FROM notes WHERE id = ? AND pdf_id = ?",
+        (note_id, pdf_id),
+    )
+    return cursor.rowcount

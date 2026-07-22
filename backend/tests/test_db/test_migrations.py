@@ -42,15 +42,15 @@ def _seed_v1_project_meta(conn) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_schema_version_constant_is_8():
-    assert SCHEMA_VERSION == 8
+def test_schema_version_constant_is_9():
+    assert SCHEMA_VERSION == 9
 
 
-def test_registry_contains_001_through_008_in_order():
+def test_registry_contains_001_through_009_in_order():
     migrations = registered_migrations()
     versions = [m.target_version for m in migrations]
     filenames = [m.filename for m in migrations]
-    assert versions == [1, 2, 3, 4, 5, 6, 7, 8]
+    assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9]
     assert filenames[0] == "001_initial.py"
     assert filenames[1] == "002_add_pdf_last_read_page.py"
     assert filenames[2] == "003_add_pdf_last_read_offset.py"
@@ -59,6 +59,7 @@ def test_registry_contains_001_through_008_in_order():
     assert filenames[5] == "006_toc_bookmark_tables.py"
     assert filenames[6] == "007_memory_tables.py"
     assert filenames[7] == "008_add_message_sources.py"
+    assert filenames[8] == "009_notes_table.py"
 
 
 # ---------------------------------------------------------------------------
@@ -244,6 +245,19 @@ def test_apply_pending_008_idempotent_when_column_pre_exists(conn):
     assert new_version == SCHEMA_VERSION
     cols = {row[1] for row in conn.execute("PRAGMA table_info(messages)").fetchall()}
     assert "sources_json" in cols
+
+
+def test_apply_pending_009_idempotent_when_table_pre_exists(conn):
+    """notes 表已存在时重跑 009 不报错（CREATE TABLE/INDEX IF NOT EXISTS 幂等）。"""
+    initialize_schema(conn)  # 建库时已含 notes 表（IF NOT EXISTS，幂等）
+    insert_project_meta(
+        conn,
+        ProjectMetaRow(id="proj_test", name="test", created_at=0, schema_version=8),
+    )
+    new_version = apply_pending(conn)
+    assert new_version == SCHEMA_VERSION
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(notes)").fetchall()}
+    assert "anchor_rects_json" in cols
 
 
 def test_apply_pending_003_idempotent_when_column_pre_exists(conn):
@@ -558,7 +572,7 @@ def test_migration_004_empty_selections_table(conn):
     assert len(conn.execute("PRAGMA table_info(selections)").fetchall()) == 14
 
 
-def test_apply_pending_runs_004_005_006_007_and_008_when_at_v3(monkeypatch, conn):
+def test_apply_pending_runs_004_005_006_007_008_and_009_when_at_v3(monkeypatch, conn):
     _seed_v3_db(conn)
     from lumina.db import migrations as mig
 
@@ -586,7 +600,7 @@ def test_apply_pending_runs_004_005_006_007_and_008_when_at_v3(monkeypatch, conn
     monkeypatch.setattr(mig, "_REGISTRY", patched)
     try:
         apply_pending(conn)
-        assert calls == [4, 5, 6, 7, 8]
+        assert calls == [4, 5, 6, 7, 8, 9]
     finally:
         monkeypatch.setattr(mig, "_REGISTRY", original)
 
