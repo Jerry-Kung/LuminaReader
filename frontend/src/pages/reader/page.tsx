@@ -191,6 +191,15 @@ const RECALL_MAX_WORDS = 6;
 const FLASH_DURATION_MS = 2000;
 const NOTE_ANCHOR_TEXT_MAX = 500;
 
+// 后端 anchor_rects_json max_length=20000；超限时丢弃矩形降级为页级锚点（MAY 档），避免整条笔记保存失败
+const NOTE_ANCHOR_RECTS_MAX = 20_000;
+
+function serializeAnchorRects(pageRects: TextSelectionPageRects[]): string | undefined {
+  if (pageRects.length === 0) return undefined;
+  const json = JSON.stringify(pageRects);
+  return json.length <= NOTE_ANCHOR_RECTS_MAX ? json : undefined;
+}
+
 // 把卡片/历史保存的单一 TaskType 还原为 plugins 数组：
 // 'chat' → []（自由 Chat 模式）；其它三类 → [type]。
 // 追问轮后端允许跨插件，但前端默认沿用本卡的 type，无 UI 让用户改。
@@ -683,8 +692,7 @@ export default function ReaderPage() {
         page: textSelection.pageStart,
         offset_ratio: textSelection.pageRects[0]?.rects[0]?.top,
         anchor_text: textSelection.normalizedText.slice(0, NOTE_ANCHOR_TEXT_MAX),
-        anchor_rects_json:
-          textSelection.pageRects.length > 0 ? JSON.stringify(textSelection.pageRects) : undefined,
+        anchor_rects_json: serializeAnchorRects(textSelection.pageRects),
         source: 'selection',
       },
     });
@@ -909,10 +917,7 @@ export default function ReaderPage() {
               page: capture.pageStart,
               offset_ratio: textSelection?.pageRects[0]?.rects[0]?.top,
               anchor_text: capture.text.slice(0, NOTE_ANCHOR_TEXT_MAX),
-              anchor_rects_json:
-                textSelection && textSelection.pageRects.length > 0
-                  ? JSON.stringify(textSelection.pageRects)
-                  : undefined,
+              anchor_rects_json: textSelection ? serializeAnchorRects(textSelection.pageRects) : undefined,
             }
           : {
               page: capture.selection.page,
