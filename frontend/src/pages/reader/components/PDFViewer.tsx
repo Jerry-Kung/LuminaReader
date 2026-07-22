@@ -70,6 +70,11 @@ interface PDFViewerProps {
    * 分数坐标随页面尺寸等比缩放，滚动 / 缩放 / 容器宽度变化均无需重算。
    */
   textHighlights?: TextSelectionPageRects[] | null;
+  /**
+   * V1.2.5：瞬时闪烁高亮（笔记跳转回原位）。与 textHighlights（实时选区）独立通道，
+   * 互不覆盖（R-V125-1）；渲染为琥珀色 + pulse 动画，由父组件定时清除。
+   */
+  flashHighlights?: TextSelectionPageRects[] | null;
 }
 
 export interface SelectedArea {
@@ -122,6 +127,7 @@ export default function PDFViewer({
   onScanPageDetected,
   onContainerRefReady,
   textHighlights = null,
+  flashHighlights = null,
 }: PDFViewerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const [containerWidth, setContainerWidth] = useState(0);
@@ -525,6 +531,13 @@ export default function PDFViewer({
     return map;
   }, [textHighlights]);
 
+  const flashByPage = useMemo(() => {
+    if (!flashHighlights || flashHighlights.length === 0) return null;
+    const map = new Map<number, TextSelectionRect[]>();
+    for (const ph of flashHighlights) map.set(ph.page, ph.rects);
+    return map;
+  }, [flashHighlights]);
+
   return (
     <div
       ref={containerRef}
@@ -590,6 +603,7 @@ export default function PDFViewer({
                 cursorMode={cursorMode}
                 onScanPageDetected={onScanPageDetected}
                 highlightRects={highlightsByPage?.get(meta.pageNum) ?? null}
+                flashRects={flashByPage?.get(meta.pageNum) ?? null}
               />
             </div>
           ))}
@@ -611,6 +625,8 @@ interface PDFPageProps {
   onScanPageDetected?: (pageNum: number) => void;
   /** V1.2.0 ISSUE-009：本页持久化文本选区高亮矩形（页内相对坐标 0~1 分数） */
   highlightRects: TextSelectionRect[] | null;
+  /** V1.2.5：本页笔记跳转瞬时高亮矩形（页内相对坐标 0~1 分数） */
+  flashRects: TextSelectionRect[] | null;
 }
 
 const PDFPage = memo(function PDFPage({
@@ -624,6 +640,7 @@ const PDFPage = memo(function PDFPage({
   cursorMode,
   onScanPageDetected,
   highlightRects,
+  flashRects,
 }: PDFPageProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const textLayerRef = useRef<HTMLDivElement>(null);
@@ -732,6 +749,20 @@ const PDFPage = memo(function PDFPage({
           <div
             key={i}
             className="absolute pointer-events-none bg-blue-300/40"
+            style={{
+              left: `${r.left * 100}%`,
+              top: `${r.top * 100}%`,
+              width: `${r.width * 100}%`,
+              height: `${r.height * 100}%`,
+            }}
+          />
+        ))}
+      {/* V1.2.5：笔记跳转瞬时高亮层（琥珀色 pulse，父组件约 2s 后清除） */}
+      {flashRects &&
+        flashRects.map((r, i) => (
+          <div
+            key={`flash-${i}`}
+            className="absolute pointer-events-none bg-amber-300/50 animate-pulse"
             style={{
               left: `${r.left * 100}%`,
               top: `${r.top * 100}%`,

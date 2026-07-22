@@ -2,6 +2,9 @@ import { useState, useRef, useCallback, useEffect } from 'react';
 import { useParams, useNavigate } from 'react-router-dom';
 import { usePDF } from '@/hooks/usePDF';
 import { usePdfReadingPosition } from '@/hooks/usePdfReadingPosition';
+import { useNotes } from '@/hooks/useNotes';
+import type { NoteItem } from '@/services/api';
+import type { TextSelectionPageRects } from './hooks/useTextSelection';
 import {
   runTaskStream,
   runFollowUpStream,
@@ -26,7 +29,7 @@ import Toolbar, { type CursorMode } from './components/Toolbar';
 import PDFViewer, { type SelectedArea } from './components/PDFViewer';
 import AIAssistantPanel, { type ChipPluginType, type ChipsState, type ChipStateItem } from './components/AIAssistantPanel';
 import SidebarPanel from './components/SidebarPanel';
-import ReaderFloatPanel, { type FloatPanelView } from './components/ReaderFloatPanel';
+import ReaderFloatPanel, { type FloatPanelView, type NoteDraft } from './components/ReaderFloatPanel';
 import TextExtractionBanner from './components/TextExtractionBanner';
 import { useTextSelection } from './hooks/useTextSelection';
 import { useTextExtraction } from '@/hooks/useTextExtraction';
@@ -172,6 +175,10 @@ function nextMsgId(): number {
 
 // V1.2.4：回查 chip 可用的选区词数上限，与后端 recall manifest 的触发阈值对齐（F4/D9）
 const RECALL_MAX_WORDS = 6;
+
+// V1.2.5：笔记跳转瞬时高亮时长与选区摘录截断长度
+const FLASH_DURATION_MS = 2000;
+const NOTE_ANCHOR_TEXT_MAX = 500;
 
 // 把卡片/历史保存的单一 TaskType 还原为 plugins 数组：
 // 'chat' → []（自由 Chat 模式）；其它三类 → [type]。
@@ -355,6 +362,70 @@ export default function ReaderPage() {
 
   // V1.2.3：记忆（要点）
   const memoryApi = useMemory(pdfId);
+
+  // V1.2.5：笔记 + 跳转瞬时闪烁高亮
+  const notesApi = useNotes(pdfId);
+  const [flashHighlights, setFlashHighlights] = useState<TextSelectionPageRects[] | null>(null);
+  const flashTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    return () => {
+      if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
+    };
+  }, []);
+
+  const triggerFlash = useCallback((pageRects: TextSelectionPageRects[]) => {
+    setFlashHighlights(pageRects);
+    if (flashTimerRef.current) clearTimeout(flashTimerRef.current);
+    flashTimerRef.current = setTimeout(() => setFlashHighlights(null), FLASH_DURATION_MS);
+  }, []);
+
+  // 笔记跳转：有 offset_ratio 走 goToPosition（书签同型），锚点矩形可解析则闪烁高亮；
+  // anchor_rects_json 损坏 → 静默降级（MAY 档：跳转正常、无高亮）
+  const handleJumpToNote = useCallback(
+    (note: NoteItem) => {
+      if (note.offset_ratio !== null && note.offset_ratio !== undefined) {
+        goToPosition(note.page, note.offset_ratio);
+      } else {
+        goToPage(note.page);
+      }
+      if (note.anchor_rects_json) {
+        try {
+          const parsed: unknown = JSON.parse(note.anchor_rects_json);
+          if (Array.isArray(parsed) && parsed.length > 0) {
+            triggerFlash(parsed as TextSelectionPageRects[]);
+          }
+        } catch {
+          /* 解析失败静默降级 */
+        }
+      }
+    },
+    [goToPage, goToPosition, triggerFlash],
+  );
+
+  // 面板新建视图提交：创建成功 → 切到该笔记的查看视图
+  const handleSubmitNewNote = useCallback(
+    async (draft: NoteDraft, content: string) => {
+      const created = await notesApi.add({
+        content,
+        page: draft.page,
+        offset_ratio: draft.offset_ratio,
+        anchor_text: draft.anchor_text,
+        anchor_rects_json: draft.anchor_rects_json,
+        source: draft.source,
+      });
+      if (created) setPanelView({ kind: 'note', noteId: created.id });
+    },
+    [notesApi],
+  );
+
+  // 删除笔记：若面板正开着这条，顺带关闭
+  const handleDeleteNote = useCallback(
+    async (id: string) => {
+      await notesApi.remove(id);
+      setPanelView((prev) => (prev?.kind === 'note' && prev.noteId === id ? null : prev));
+    },
+    [notesApi],
+  );
 
   // V1.2.5：通用浮动面板（要点 / 全书总结 / 笔记视图）；切书时关闭
   const [panelView, setPanelView] = useState<FloatPanelView | null>(null);
@@ -1917,12 +1988,28 @@ export default function ReaderPage() {
             const s = memoryApi.memory?.book_summary;
             if (s) setPanelView({ kind: 'book-summary', summary: s });
           }}
+          notes={notesApi.notes}
+          notesLoading={notesApi.loading}
+          onNoteCreate={() =>
+            setPanelView({
+              kind: 'note-new',
+              draft: { page: currentPage, offset_ratio: currentOffset, source: 'manual' },
+            })
+          }
+          onNoteOpen={(n) => setPanelView({ kind: 'note', noteId: n.id })}
+          onNoteRemove={handleDeleteNote}
+          onNoteJump={handleJumpToNote}
         />
         <ReaderFloatPanel
           view={panelView}
           sidebarCollapsed={thumbnailCollapsed}
+          notes={notesApi.notes}
           onClose={() => setPanelView(null)}
           onJumpToPage={goToPage}
+          onJumpToNote={handleJumpToNote}
+          onSubmitNewNote={handleSubmitNewNote}
+          onUpdateNote={notesApi.update}
+          onDeleteNote={handleDeleteNote}
         />
         <PDFViewer
           pdfDoc={pdfDoc}
@@ -1943,6 +2030,7 @@ export default function ReaderPage() {
           onScanPageDetected={handleScanPageDetected}
           onContainerRefReady={handleContainerRefReady}
           textHighlights={textSelection?.pageRects ?? null}
+          flashHighlights={flashHighlights}
         />
         <AIAssistantPanel
           results={aiResults}

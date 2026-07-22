@@ -1,18 +1,18 @@
 /**
- * V1.2.2 左侧栏四 Tab 容器：缩略图 / 目录 / 书签 / 要点（规格 D2，要点见 V1.2.3）。
- * 外壳（宽度 180px / 折叠 w-8 / 过渡动画）沿用原 ThumbnailPanel 行为不变；
- * 笔记功能上线时可在此追加第五个 Tab。
+ * V1.2.5 左侧栏五 Tab 容器：缩略图 / 目录 / 书签 / 要点（规格 D2，要点见 V1.2.3）/ 笔记（V1.2.5）。
+ * 外壳（宽度 180px / 折叠 w-8 / 过渡动画）沿用原 ThumbnailPanel 行为不变。
  */
 import { useState } from 'react';
 import type * as pdfjsLib from 'pdfjs-dist';
-import type { BookmarkItem, MemoryEstimate, MemoryInfo, MemoryUnit, TocInfo, TocLlmEstimate } from '@/services/api';
+import type { BookmarkItem, MemoryEstimate, MemoryInfo, MemoryUnit, NoteItem, TocInfo, TocLlmEstimate } from '@/services/api';
 import type { TextExtractionUiStatus } from '@/hooks/useTextExtraction';
 import ThumbnailList from './ThumbnailPanel';
 import TocTab from './TocTab';
 import BookmarksTab from './BookmarksTab';
 import MemoryTab from './MemoryTab';
+import NotesTab from './NotesTab';
 
-export type SidebarTab = 'thumbnails' | 'toc' | 'bookmarks' | 'memory';
+export type SidebarTab = 'thumbnails' | 'toc' | 'bookmarks' | 'memory' | 'notes';
 
 interface SidebarPanelProps {
   pdfDoc: pdfjsLib.PDFDocumentProxy | null;
@@ -49,6 +49,13 @@ interface SidebarPanelProps {
   onMemoryCancel: () => Promise<void>;
   onMemoryOpenUnit: (unit: MemoryUnit) => void;
   onMemoryOpenBookSummary: () => void;
+  // 笔记（V1.2.5）
+  notes: NoteItem[];
+  notesLoading: boolean;
+  onNoteCreate: () => void;
+  onNoteOpen: (note: NoteItem) => void;
+  onNoteRemove: (id: string) => Promise<void>;
+  onNoteJump: (note: NoteItem) => void;
 }
 
 const TABS: { key: SidebarTab; icon: string; label: string }[] = [
@@ -56,6 +63,7 @@ const TABS: { key: SidebarTab; icon: string; label: string }[] = [
   { key: 'toc', icon: 'ri-list-unordered', label: '目录' },
   { key: 'bookmarks', icon: 'ri-bookmark-line', label: '书签' },
   { key: 'memory', icon: 'ri-sparkling-line', label: '要点' },
+  { key: 'notes', icon: 'ri-sticky-note-line', label: '笔记' },
 ];
 
 export default function SidebarPanel(props: SidebarPanelProps) {
@@ -165,6 +173,18 @@ export default function SidebarPanel(props: SidebarPanelProps) {
                 onCancel={props.onMemoryCancel}
                 onOpenUnit={props.onMemoryOpenUnit}
                 onOpenBookSummary={props.onMemoryOpenBookSummary}
+              />
+            </div>
+          )}
+          {tab === 'notes' && (
+            <div className="h-full overflow-y-auto scrollbar-thin">
+              <NotesTab
+                notes={props.notes}
+                loading={props.notesLoading}
+                onCreate={props.onNoteCreate}
+                onOpen={props.onNoteOpen}
+                onRemove={props.onNoteRemove}
+                onJump={props.onNoteJump}
               />
             </div>
           )}
