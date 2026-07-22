@@ -427,10 +427,16 @@ export default function ReaderPage() {
     [notesApi],
   );
 
-  // V1.2.5：通用浮动面板（要点 / 全书总结 / 笔记视图）；切书时关闭
+  // V1.2.5：通用浮动面板（要点 / 全书总结 / 笔记视图）；切书时关闭，
+  // 同时清掉上一本书的瞬时闪烁高亮与孤儿定时器（矩形坐标不跨书复用）
   const [panelView, setPanelView] = useState<FloatPanelView | null>(null);
   useEffect(() => {
     setPanelView(null);
+    setFlashHighlights(null);
+    if (flashTimerRef.current) {
+      clearTimeout(flashTimerRef.current);
+      flashTimerRef.current = null;
+    }
   }, [pdfId]);
 
   // 添加书签：记录当前视口（页码 + 页内偏移，复用 reportPosition 维护的 currentPage/currentOffset）
