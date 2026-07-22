@@ -5,7 +5,7 @@
  */
 import { useState } from 'react';
 import type * as pdfjsLib from 'pdfjs-dist';
-import type { BookmarkItem, MemoryEstimate, MemoryInfo, TocInfo, TocLlmEstimate } from '@/services/api';
+import type { BookmarkItem, MemoryEstimate, MemoryInfo, MemoryUnit, TocInfo, TocLlmEstimate } from '@/services/api';
 import type { TextExtractionUiStatus } from '@/hooks/useTextExtraction';
 import ThumbnailList from './ThumbnailPanel';
 import TocTab from './TocTab';
@@ -47,6 +47,8 @@ interface SidebarPanelProps {
   onMemoryBuild: () => Promise<void>;
   onMemoryRebuild: () => Promise<void>;
   onMemoryCancel: () => Promise<void>;
+  onMemoryOpenUnit: (unit: MemoryUnit) => void;
+  onMemoryOpenBookSummary: () => void;
 }
 
 const TABS: { key: SidebarTab; icon: string; label: string }[] = [
@@ -161,6 +163,8 @@ export default function SidebarPanel(props: SidebarPanelProps) {
                 onBuild={props.onMemoryBuild}
                 onRebuild={props.onMemoryRebuild}
                 onCancel={props.onMemoryCancel}
+                onOpenUnit={props.onMemoryOpenUnit}
+                onOpenBookSummary={props.onMemoryOpenBookSummary}
               />
             </div>
           )}

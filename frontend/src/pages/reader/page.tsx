@@ -26,6 +26,7 @@ import Toolbar, { type CursorMode } from './components/Toolbar';
 import PDFViewer, { type SelectedArea } from './components/PDFViewer';
 import AIAssistantPanel, { type ChipPluginType, type ChipsState, type ChipStateItem } from './components/AIAssistantPanel';
 import SidebarPanel from './components/SidebarPanel';
+import ReaderFloatPanel, { type FloatPanelView } from './components/ReaderFloatPanel';
 import TextExtractionBanner from './components/TextExtractionBanner';
 import { useTextSelection } from './hooks/useTextSelection';
 import { useTextExtraction } from '@/hooks/useTextExtraction';
@@ -354,6 +355,12 @@ export default function ReaderPage() {
 
   // V1.2.3：记忆（要点）
   const memoryApi = useMemory(pdfId);
+
+  // V1.2.5：通用浮动面板（要点 / 全书总结 / 笔记视图）；切书时关闭
+  const [panelView, setPanelView] = useState<FloatPanelView | null>(null);
+  useEffect(() => {
+    setPanelView(null);
+  }, [pdfId]);
 
   // 添加书签：记录当前视口（页码 + 页内偏移，复用 reportPosition 维护的 currentPage/currentOffset）
   const handleAddBookmark = useCallback(async () => {
@@ -1905,6 +1912,17 @@ export default function ReaderPage() {
           onMemoryBuild={memoryApi.build}
           onMemoryRebuild={memoryApi.rebuild}
           onMemoryCancel={memoryApi.cancel}
+          onMemoryOpenUnit={(u) => setPanelView({ kind: 'memory-unit', unit: u })}
+          onMemoryOpenBookSummary={() => {
+            const s = memoryApi.memory?.book_summary;
+            if (s) setPanelView({ kind: 'book-summary', summary: s });
+          }}
+        />
+        <ReaderFloatPanel
+          view={panelView}
+          sidebarCollapsed={thumbnailCollapsed}
+          onClose={() => setPanelView(null)}
+          onJumpToPage={goToPage}
         />
         <PDFViewer
           pdfDoc={pdfDoc}
