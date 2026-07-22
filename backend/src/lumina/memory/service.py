@@ -88,6 +88,10 @@ def _unit_max_chars() -> int:
     return get_settings().lumina_memory_unit_max_chars
 
 
+def _unit_min_chars() -> int:
+    return get_settings().lumina_memory_unit_min_chars
+
+
 def _resolve_model() -> str:
     try:
         cur = settings_store.get_current()
@@ -134,7 +138,7 @@ def _require_text_ok(conn, pdf_id: str):
 def _fresh_specs(conn, pdf_id: str, page_count: int):
     chapters = list_chapters(conn, pdf_id)
     char_counts = get_pdf_text_char_counts(conn, pdf_id)
-    specs = build_units(chapters, page_count, char_counts, _unit_max_chars())
+    specs = build_units(chapters, page_count, char_counts, _unit_max_chars(), _unit_min_chars())
     if not specs:
         raise MemoryUnavailableError("no processable pages")
     return specs, char_counts
