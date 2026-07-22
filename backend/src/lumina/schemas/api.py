@@ -156,6 +156,33 @@ class BookmarkRename(BaseModel):
         return stripped
 
 
+class NoteCreate(BaseModel):
+    content: str = Field(..., min_length=1, max_length=100_000)
+    page: int = Field(..., ge=1)
+    offset_ratio: float | None = Field(None, ge=0.0, le=1.0)
+    anchor_text: str | None = Field(None, max_length=2000)
+    anchor_rects_json: str | None = Field(None, max_length=20_000)
+    source: Literal["manual", "selection", "ai"] = "manual"
+
+    @field_validator("content")
+    @classmethod
+    def _require_nonblank_content(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("content must not be blank")
+        return value
+
+
+class NoteUpdate(BaseModel):
+    content: str = Field(..., min_length=1, max_length=100_000)
+
+    @field_validator("content")
+    @classmethod
+    def _require_nonblank_content(cls, value: str) -> str:
+        if not value.strip():
+            raise ValueError("content must not be blank")
+        return value
+
+
 class LibraryListData(BaseModel):
     items: list[LibraryItem]
 

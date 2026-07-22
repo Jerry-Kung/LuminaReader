@@ -10,11 +10,16 @@ from lumina.config import get_settings
 from lumina.db.engine import get_connection
 from lumina.db.models import (
     BookmarkRow,
+    NoteRow,
     delete_bookmark,
+    delete_note,
     get_pdf_text_meta,
     insert_bookmark,
+    insert_note,
     list_bookmarks,
+    list_notes,
     rename_bookmark,
+    update_note_content,
     update_pdf_reading_position,
 )
 from lumina.logging import get_logger, log_with_fields
@@ -33,6 +38,8 @@ from lumina.request_id import generate_request_id
 from lumina.schemas.api import (
     BookmarkCreate,
     BookmarkRename,
+    NoteCreate,
+    NoteUpdate,
     PdfUploadData,
     ReadingPositionUpdate,
     error_response,
@@ -727,6 +734,121 @@ async def remove_bookmark(pdf_id: str, bookmark_id: str):
         return _pdf_not_found(request_id, pdf_id)
     conn = get_connection(entry.id)
     delete_bookmark(conn, pdf_id, bookmark_id)  # 重复删除幂等：rowcount=0 也返回 204
+    _log_pdf_call(request_id=request_id, http_status=204, pdf_id=pdf_id, project_id=entry.id)
+    return Response(status_code=204)
+
+
+# ---------------------------------------------------------------------------
+# V1.2.5: 笔记端点
+# ---------------------------------------------------------------------------
+
+
+def _note_payload(row: NoteRow) -> dict:
+    return {
+        "id": row.id,
+        "content": row.content,
+        "page": row.page,
+        "offset_ratio": row.offset_ratio,
+        "anchor_text": row.anchor_text,
+        "anchor_rects_json": row.anchor_rects_json,
+        "source": row.source,
+        "created_at": row.created_at,
+        "updated_at": row.updated_at,
+    }
+
+
+@router.get("/{pdf_id}/notes")
+async def get_notes(pdf_id: str):
+    request_id = generate_request_id()
+    entry = find_by_pdf_id(pdf_id)
+    if entry is None:
+        return _pdf_not_found(request_id, pdf_id)
+    conn = get_connection(entry.id)
+    rows = list_notes(conn, pdf_id)
+    _log_pdf_call(request_id=request_id, http_status=200, pdf_id=pdf_id, project_id=entry.id)
+    return ok_response({"notes": [_note_payload(r) for r in rows]})
+
+
+@router.post("/{pdf_id}/notes", status_code=201)
+async def create_note(pdf_id: str, payload: NoteCreate):
+    request_id = generate_request_id()
+    entry = find_by_pdf_id(pdf_id)
+    if entry is None:
+        return _pdf_not_found(request_id, pdf_id)
+    conn = get_connection(entry.id)
+    # 页码上界仅在全书文本已提取（page_count 可知）时校验；下界由 pydantic ge=1 保证（同书签先例）
+    text_meta = get_pdf_text_meta(conn, pdf_id)
+    if text_meta is not None and text_meta.page_count and payload.page > text_meta.page_count:
+        _log_pdf_call(
+            request_id=request_id,
+            http_status=422,
+            error_code="NOTE_PAGE_OUT_OF_RANGE",
+            pdf_id=pdf_id,
+            project_id=entry.id,
+        )
+        return JSONResponse(
+            status_code=422,
+            content=error_response(
+                code="NOTE_PAGE_OUT_OF_RANGE",
+                message=f"页码超出范围（全书共 {text_meta.page_count} 页）。",
+                request_id=request_id,
+            ),
+        )
+    now = int(_time.time())
+    row = NoteRow(
+        id=f"nt_{ULID()}",
+        pdf_id=pdf_id,
+        content=payload.content,
+        page=payload.page,
+        offset_ratio=payload.offset_ratio,
+        anchor_text=payload.anchor_text,
+        anchor_rects_json=payload.anchor_rects_json,
+        source=payload.source,
+        created_at=now,
+        updated_at=now,
+    )
+    insert_note(conn, row)
+    _log_pdf_call(request_id=request_id, http_status=201, pdf_id=pdf_id, project_id=entry.id)
+    return JSONResponse(status_code=201, content=ok_response(_note_payload(row)))
+
+
+@router.patch("/{pdf_id}/notes/{note_id}")
+async def patch_note(pdf_id: str, note_id: str, payload: NoteUpdate):
+    request_id = generate_request_id()
+    entry = find_by_pdf_id(pdf_id)
+    if entry is None:
+        return _pdf_not_found(request_id, pdf_id)
+    conn = get_connection(entry.id)
+    now = int(_time.time())
+    updated = update_note_content(conn, pdf_id, note_id, payload.content, now)
+    if updated == 0:
+        _log_pdf_call(
+            request_id=request_id,
+            http_status=404,
+            error_code="NOTE_NOT_FOUND",
+            pdf_id=pdf_id,
+            project_id=entry.id,
+        )
+        return JSONResponse(
+            status_code=404,
+            content=error_response(
+                code="NOTE_NOT_FOUND",
+                message="Note not found.",
+                request_id=request_id,
+            ),
+        )
+    _log_pdf_call(request_id=request_id, http_status=200, pdf_id=pdf_id, project_id=entry.id)
+    return ok_response({"id": note_id, "content": payload.content, "updated_at": now})
+
+
+@router.delete("/{pdf_id}/notes/{note_id}", status_code=204)
+async def remove_note(pdf_id: str, note_id: str):
+    request_id = generate_request_id()
+    entry = find_by_pdf_id(pdf_id)
+    if entry is None:
+        return _pdf_not_found(request_id, pdf_id)
+    conn = get_connection(entry.id)
+    delete_note(conn, pdf_id, note_id)  # 重复删除幂等：rowcount=0 也返回 204
     _log_pdf_call(request_id=request_id, http_status=204, pdf_id=pdf_id, project_id=entry.id)
     return Response(status_code=204)
 
