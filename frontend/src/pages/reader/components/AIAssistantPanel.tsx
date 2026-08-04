@@ -1,4 +1,4 @@
-import { useState, useRef, useCallback, useEffect } from 'react';
+import { memo, useState, useRef, useCallback, useEffect } from 'react';
 import type { AIResult, Message, HistoryEntry } from '../page';
 import type { TaskType, ErrorCategory } from '@/services/api';
 import MarkdownRenderer from './MarkdownRenderer';
@@ -183,7 +183,7 @@ function OcrFoldable({
   );
 }
 
-function MessageBubble({
+const MessageBubble = memo(function MessageBubble({
   message,
   onRetry,
   onDismiss,
@@ -201,7 +201,7 @@ function MessageBubble({
   if (message.role === 'user') {
     return (
       <div className="flex justify-end mb-2">
-        <div className="max-w-[85%] max-w-[560px] bg-stone-200 rounded-2xl rounded-br-md px-3 py-2">
+        <div className="max-w-[560px] bg-stone-200 rounded-2xl rounded-br-md px-3 py-2">
           <p className="text-sm text-stone-700 leading-relaxed whitespace-pre-wrap">{message.text}</p>
         </div>
       </div>
@@ -211,7 +211,7 @@ function MessageBubble({
   if (message.isLoading) {
     return (
       <div className="flex justify-start mb-2">
-        <div className="max-w-[85%] max-w-[560px] bg-white border border-stone-200 rounded-2xl rounded-bl-md px-3 py-2.5">
+        <div className="max-w-[560px] bg-white border border-stone-200 rounded-2xl rounded-bl-md px-3 py-2.5">
           <div className="flex items-center gap-2 text-stone-400">
             <div className="w-5 h-5 flex items-center justify-center rounded-full bg-amber-100">
               <i className="ri-robot-2-line text-amber-600 text-xs"></i>
@@ -230,7 +230,7 @@ function MessageBubble({
   if (message.isError) {
     return (
       <div className="flex justify-start mb-2">
-        <div className="max-w-[85%] max-w-[560px] bg-red-50 border border-red-200 rounded-2xl rounded-bl-md px-3 py-2.5">
+        <div className="max-w-[560px] bg-red-50 border border-red-200 rounded-2xl rounded-bl-md px-3 py-2.5">
           <div className="flex items-start gap-2">
             <i className={`${categoryIcon(message.errorCategory)} text-red-400 text-sm mt-0.5`}></i>
             <div className="flex-1 min-w-0">
@@ -263,7 +263,7 @@ function MessageBubble({
 
   return (
     <div className="flex justify-start mb-2">
-      <div className="max-w-[85%] max-w-[560px] bg-white border border-stone-200 rounded-2xl rounded-bl-md px-3 py-2.5 overflow-hidden">
+      <div className="max-w-[560px] bg-white border border-stone-200 rounded-2xl rounded-bl-md px-3 py-2.5 overflow-hidden">
         <div className="flex items-center gap-1.5 mb-1">
           <div className="w-4 h-4 flex items-center justify-center rounded-full bg-amber-100">
             <i className="ri-robot-2-line text-amber-600 text-[10px]"></i>
@@ -314,7 +314,7 @@ function MessageBubble({
       </div>
     </div>
   );
-}
+});
 
 function FollowUpInput({ onSend, disabled }: { onSend: (text: string) => void; disabled: boolean }) {
   const [text, setText] = useState('');
