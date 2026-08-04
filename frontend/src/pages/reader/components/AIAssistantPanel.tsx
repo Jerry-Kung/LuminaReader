@@ -27,7 +27,7 @@ interface AIAssistantPanelProps {
   hasSelection: boolean;
   activeTaskTypes: ChipPluginType[];
   userInput: string;
-  panelMode: 'narrow' | 'wide' | 'overlay';
+  panelMode: 'narrow' | 'wide';
   chipsState: ChipsState;
   onFollowUp: (cardId: number, text: string) => void;
   onClearCard: (cardId: number) => void;
@@ -35,7 +35,7 @@ interface AIAssistantPanelProps {
   onAIRequest: (taskTypes: ChipPluginType[], userInput?: string) => void;
   onTaskTypeToggle: (type: ChipPluginType) => void;
   onUserInputChange: (text: string) => void;
-  onPanelModeChange: (mode: 'narrow' | 'wide' | 'overlay') => void;
+  onPanelModeChange: (mode: 'narrow' | 'wide') => void;
   onRetry?: (message: Message) => void;
   onDismissError?: (message: Message) => void;
   onToggleOcr?: (message: Message) => void;
@@ -660,20 +660,16 @@ function LaunchInputArea({
 
 const modeIcons: Record<string, string> = {
   narrow: 'ri-expand-right-line',
-  wide: 'ri-fullscreen-line',
-  overlay: 'ri-fullscreen-exit-line',
+  wide: 'ri-collapse-diagonal-line',
 };
 
 const modeTooltips: Record<string, string> = {
-  narrow: 'Switch to wide mode',
-  wide: 'Switch to overlay mode',
-  overlay: 'Back to narrow mode',
+  narrow: '切换到宽栏',
+  wide: '切换到窄栏',
 };
 
-function getNextMode(mode: 'narrow' | 'wide' | 'overlay'): 'narrow' | 'wide' | 'overlay' {
-  if (mode === 'narrow') return 'wide';
-  if (mode === 'wide') return 'overlay';
-  return 'narrow';
+function getNextMode(mode: 'narrow' | 'wide'): 'narrow' | 'wide' {
+  return mode === 'narrow' ? 'wide' : 'narrow';
 }
 
 export default function AIAssistantPanel({
@@ -718,12 +714,6 @@ export default function AIAssistantPanel({
     onPanelModeChange(getNextMode(panelMode));
   };
 
-  const handleOverlayBackdropClick = () => {
-    if (panelMode === 'overlay') {
-      onPanelModeChange('narrow');
-    }
-  };
-
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const latestCardId = results.length > 0 ? results[results.length - 1].id : null;
 
@@ -737,25 +727,17 @@ export default function AIAssistantPanel({
   const hasAnyCard = results.length > 0;
   const hasHistory = history.length > 0;
 
-  const isOverlay = panelMode === 'overlay';
   const isWide = panelMode === 'wide';
 
-  const widthClasses = isOverlay
-    ? 'absolute right-0 top-0 bottom-0 z-20 shadow-2xl w-[85%]'
-    : isWide
-      ? 'w-[520px] flex-shrink-0'
-      : 'w-[340px] flex-shrink-0';
+  // 宽档自适应：min(46vw, 760px)，停靠不遮挡 PDF；两档均离散跳变（无 width 动画，避免逐帧重排卡顿）
+  const widthClasses = isWide
+    ? 'w-[min(46vw,760px)] flex-shrink-0'
+    : 'w-[340px] flex-shrink-0';
 
   return (
     <>
-      {isOverlay && (
-        <div
-          className="fixed inset-0 bg-black/15 z-10 transition-opacity duration-300"
-          onClick={handleOverlayBackdropClick}
-        />
-      )}
       <div
-        className={`flex flex-col bg-white border-l border-stone-200 transition-all duration-300 ease-out ${widthClasses}`}
+        className={`flex flex-col bg-white border-l border-stone-200 ${widthClasses}`}
       >
         <div className="flex items-center justify-between px-5 py-4 border-b border-stone-100 flex-shrink-0">
           <div className="flex items-center gap-2">

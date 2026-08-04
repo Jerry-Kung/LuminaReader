@@ -324,7 +324,7 @@ export default function ReaderPage() {
   const [aiError, setAiError] = useState<string | null>(null);
   const [activeTaskTypes, setActiveTaskTypes] = useState<ChipPluginType[]>([]);
   const [userInput, setUserInput] = useState('');
-  const [panelMode, setPanelMode] = useState<'narrow' | 'wide' | 'overlay'>('narrow');
+  const [panelMode, setPanelMode] = useState<'narrow' | 'wide'>('narrow');
   const [history, setHistory] = useState<HistoryEntry[]>([]);
   const [historyLoading, setHistoryLoading] = useState(false);
   const [expandedHistoryId, setExpandedHistoryId] = useState<string | null>(null);
