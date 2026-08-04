@@ -141,15 +141,31 @@ export default function PDFViewer({
     currentY: number;
   } | null>(null);
 
-  // ---- 容器尺寸监听 ----
+  // ---- 容器尺寸监听（rAF 合并 + 宽度去重，避免宽度切换时逐帧重算全书页面尺寸）----
   useEffect(() => {
     const el = containerRef.current;
     if (!el) return;
-    const update = () => setContainerWidth(el.clientWidth);
-    update();
-    const ro = new ResizeObserver(update);
+    let rafId = 0;
+    let lastWidth = -1;
+    const update = () => {
+      rafId = 0;
+      const w = el.clientWidth;
+      if (w === lastWidth) return; // 宽度未变则不触发重算
+      lastWidth = w;
+      setContainerWidth(w);
+    };
+    // 首次立即测量
+    lastWidth = el.clientWidth;
+    setContainerWidth(lastWidth);
+    const ro = new ResizeObserver(() => {
+      if (rafId) return; // 一帧内多次回调合并为一次
+      rafId = requestAnimationFrame(update);
+    });
     ro.observe(el);
-    return () => ro.disconnect();
+    return () => {
+      if (rafId) cancelAnimationFrame(rafId);
+      ro.disconnect();
+    };
   }, []);
 
   // ---- 把 containerRef 暴露给父组件（用于 useTextSelection 在同一容器上挂 mouseup）----
