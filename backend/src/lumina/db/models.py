@@ -894,6 +894,7 @@ class NoteRow:
     source: str
     created_at: int
     updated_at: int
+    title: str | None = None  # V1.2.7 加列（末尾，避免 NoteRow(*row) 位置错位）
 
 
 def list_notes(conn, pdf_id: str) -> list[NoteRow]:
@@ -901,7 +902,7 @@ def list_notes(conn, pdf_id: str) -> list[NoteRow]:
         rows = conn.execute(
             """
             SELECT id, pdf_id, content, page, offset_ratio, anchor_text,
-                   anchor_rects_json, source, created_at, updated_at
+                   anchor_rects_json, source, created_at, updated_at, title
             FROM notes WHERE pdf_id = ?
             ORDER BY page ASC, offset_ratio ASC, created_at ASC
             """,
@@ -916,23 +917,40 @@ def insert_note(conn, row: NoteRow) -> None:
     conn.execute(
         """
         INSERT INTO notes (id, pdf_id, content, page, offset_ratio, anchor_text,
-                           anchor_rects_json, source, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                           anchor_rects_json, source, created_at, updated_at, title)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             row.id, row.pdf_id, row.content, row.page, row.offset_ratio,
             row.anchor_text, row.anchor_rects_json, row.source,
-            row.created_at, row.updated_at,
+            row.created_at, row.updated_at, row.title,
         ),
     )
 
 
-def update_note_content(conn, pdf_id: str, note_id: str, content: str, updated_at: int) -> int:
+def update_note(
+    conn, pdf_id: str, note_id: str, *, content: str | None, title: str | None, updated_at: int
+) -> int:
+    # 仅更新传入的非 None 字段；updated_at 恒刷新。至少一项由调用方（Pydantic）保证
+    sets = ["updated_at = ?"]
+    params: list = [updated_at]
+    if content is not None:
+        sets.append("content = ?")
+        params.append(content)
+    if title is not None:
+        sets.append("title = ?")
+        params.append(title)
+    params.extend([note_id, pdf_id])
     cursor = conn.execute(
-        "UPDATE notes SET content = ?, updated_at = ? WHERE id = ? AND pdf_id = ?",
-        (content, updated_at, note_id, pdf_id),
+        f"UPDATE notes SET {', '.join(sets)} WHERE id = ? AND pdf_id = ?",
+        params,
     )
     return cursor.rowcount
+
+
+def update_note_content(conn, pdf_id: str, note_id: str, content: str, updated_at: int) -> int:
+    """Deprecated: Task 4 will replace with update_note. Kept for pdfs.py compatibility."""
+    return update_note(conn, pdf_id, note_id, content=content, title=None, updated_at=updated_at)
 
 
 def delete_note(conn, pdf_id: str, note_id: str) -> int:

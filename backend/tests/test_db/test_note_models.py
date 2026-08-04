@@ -5,7 +5,7 @@ import sqlite3
 import pytest
 
 from lumina.db.migrations import initialize_schema
-from lumina.db.models import NoteRow, delete_note, insert_note, list_notes, update_note_content
+from lumina.db.models import NoteRow, delete_note, insert_note, list_notes, update_note, update_note_content
 
 
 @pytest.fixture
@@ -16,11 +16,11 @@ def conn():
     conn.close()
 
 
-def _row(note_id: str, page: int, offset: float | None, created: int) -> NoteRow:
+def _row(note_id: str, page: int, offset: float | None, created: int, title: str | None = None, pdf_id: str = "pdf_1", content: str | None = None) -> NoteRow:
     return NoteRow(
         id=note_id,
-        pdf_id="pdf_1",
-        content=f"note {note_id}",
+        pdf_id=pdf_id,
+        content=content if content is not None else f"note {note_id}",
         page=page,
         offset_ratio=offset,
         anchor_text=None,
@@ -28,6 +28,7 @@ def _row(note_id: str, page: int, offset: float | None, created: int) -> NoteRow
         source="manual",
         created_at=created,
         updated_at=created,
+        title=title,
     )
 
 
@@ -70,3 +71,27 @@ def test_list_may_tier_fallback(conn):
     # MAY 档兜底：表缺失时返回空列表而非抛异常
     conn.execute("DROP TABLE notes")
     assert list_notes(conn, "pdf_1") == []
+
+
+def test_insert_and_list_roundtrips_title(conn):
+    insert_note(conn, _row(note_id="nt_1", page=1, offset=None, created=100, pdf_id="pdf_x", title="我的标题"))
+    got = list_notes(conn, "pdf_x")
+    assert got[0].title == "我的标题"
+
+
+def test_update_note_title_only(conn):
+    insert_note(conn, _row(note_id="nt_1", page=1, offset=None, created=100, pdf_id="pdf_x", content="原文", title=None))
+    n = update_note(conn, "pdf_x", "nt_1", content=None, title="新标题", updated_at=123)
+    assert n == 1
+    got = list_notes(conn, "pdf_x")
+    assert got[0].title == "新标题"
+    assert got[0].content == "原文"  # 未传 content 不改
+    assert got[0].updated_at == 123
+
+
+def test_update_note_content_only(conn):
+    insert_note(conn, _row(note_id="nt_1", page=1, offset=None, created=100, pdf_id="pdf_x", content="原文", title="标题"))
+    update_note(conn, "pdf_x", "nt_1", content="改后", title=None, updated_at=200)
+    got = list_notes(conn, "pdf_x")
+    assert got[0].content == "改后"
+    assert got[0].title == "标题"  # 未传 title 不改
