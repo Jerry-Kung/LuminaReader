@@ -12,6 +12,7 @@ export interface NoteDraft {
   offset_ratio?: number;
   anchor_text?: string;
   anchor_rects_json?: string;
+  title?: string;
   source: NoteSource;
 }
 
@@ -28,8 +29,8 @@ interface ReaderFloatPanelProps {
   onClose: () => void;
   onJumpToPage: (page: number) => void;
   onJumpToNote: (note: NoteItem) => void;
-  onSubmitNewNote: (draft: NoteDraft, content: string) => Promise<void>;
-  onUpdateNote: (id: string, content: string) => Promise<void>;
+  onSubmitNewNote: (draft: NoteDraft, content: string, title?: string) => Promise<void>;
+  onUpdateNote: (id: string, patch: { content?: string; title?: string }) => Promise<void>;
   onDeleteNote: (id: string) => Promise<void>;
 }
 
@@ -47,11 +48,12 @@ function NoteView({
 }: {
   note: NoteItem;
   onJumpToNote: (note: NoteItem) => void;
-  onUpdate: (id: string, content: string) => Promise<void>;
+  onUpdate: (id: string, patch: { content?: string; title?: string }) => Promise<void>;
   onDelete: (id: string) => Promise<void>;
 }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(note.content);
+  const [titleDraft, setTitleDraft] = useState(note.title ?? '');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -59,8 +61,9 @@ function NoteView({
   useEffect(() => {
     setEditing(false);
     setDraft(note.content);
+    setTitleDraft(note.title ?? '');
     setError(null);
-  }, [note.id, note.content]);
+  }, [note.id, note.content, note.title]);
 
   const save = async () => {
     const content = draft.trim();
@@ -71,7 +74,7 @@ function NoteView({
     setSaving(true);
     setError(null);
     try {
-      await onUpdate(note.id, content);
+      await onUpdate(note.id, { content, title: titleDraft.trim() || undefined });
       setEditing(false);
     } catch {
       setError('保存失败，请重试');
@@ -93,6 +96,13 @@ function NoteView({
       )}
       {editing ? (
         <div className="space-y-2">
+          <input
+            value={titleDraft}
+            onChange={(e) => setTitleDraft(e.target.value)}
+            maxLength={200}
+            className="w-full text-[13px] text-stone-700 bg-stone-50 border border-stone-200 rounded-lg px-3 py-1.5 focus:outline-none focus:border-amber-400"
+            placeholder="标题（可选）"
+          />
           <textarea
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
@@ -111,6 +121,7 @@ function NoteView({
               onClick={() => {
                 setEditing(false);
                 setDraft(note.content);
+                setTitleDraft(note.title ?? '');
                 setError(null);
               }}
               className="px-3 py-1 text-[12px] rounded-md text-stone-500 hover:bg-stone-100 cursor-pointer"
@@ -154,9 +165,10 @@ function NoteNewView({
   onSubmit,
 }: {
   draft: NoteDraft;
-  onSubmit: (draft: NoteDraft, content: string) => Promise<void>;
+  onSubmit: (draft: NoteDraft, content: string, title?: string) => Promise<void>;
 }) {
   const [content, setContent] = useState('');
+  const [title, setTitle] = useState('');
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -169,7 +181,7 @@ function NoteNewView({
     setSaving(true);
     setError(null);
     try {
-      await onSubmit(draft, trimmed);
+      await onSubmit(draft, trimmed, title.trim() || undefined);
     } catch {
       setError('保存失败，请重试');
       setSaving(false);
@@ -183,6 +195,13 @@ function NoteNewView({
           {draft.anchor_text}
         </blockquote>
       )}
+      <input
+        value={title}
+        onChange={(e) => setTitle(e.target.value)}
+        maxLength={200}
+        className="w-full text-[13px] text-stone-700 bg-stone-50 border border-stone-200 rounded-lg px-3 py-1.5 focus:outline-none focus:border-amber-400"
+        placeholder="标题（可选）"
+      />
       <textarea
         autoFocus
         value={content}
@@ -251,7 +270,7 @@ export default function ReaderFloatPanel({
     body = <MarkdownRenderer content={view.summary} className="text-[13px]" />;
   } else if (view.kind === 'note') {
     const note = notes.find((n) => n.id === view.noteId);
-    title = '笔记';
+    title = note?.title || '笔记';
     icon = 'ri-sticky-note-line';
     jumpPage = note?.page ?? null;
     jumpHandler = note ? () => onJumpToNote(note) : () => {};
