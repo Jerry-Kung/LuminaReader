@@ -194,6 +194,14 @@ const NOTE_ANCHOR_TEXT_MAX = 500;
 // 后端 anchor_rects_json max_length=20000；超限时丢弃矩形降级为页级锚点（MAY 档），避免整条笔记保存失败
 const NOTE_ANCHOR_RECTS_MAX = 20_000;
 
+const NOTE_TITLE_MAX = 60;
+// AI 回答存为笔记：取正文首个非空行、剥行首 Markdown 标记作为标题（与 NotesTab.firstLine 同规则）
+function deriveTitleFromContent(content: string): string | undefined {
+  const line = content.split('\n').find((l) => l.trim().length > 0) ?? '';
+  const t = line.replace(/^[#>\-*\s]+/, '').slice(0, NOTE_TITLE_MAX).trim();
+  return t || undefined;
+}
+
 function serializeAnchorRects(pageRects: TextSelectionPageRects[]): string | undefined {
   if (pageRects.length === 0) return undefined;
   const json = JSON.stringify(pageRects);
@@ -424,13 +432,14 @@ export default function ReaderPage() {
 
   // 面板新建视图提交：创建成功 → 切到该笔记的查看视图
   const handleSubmitNewNote = useCallback(
-    async (draft: NoteDraft, content: string) => {
+    async (draft: NoteDraft, content: string, title?: string) => {
       const created = await notesApi.add({
         content,
         page: draft.page,
         offset_ratio: draft.offset_ratio,
         anchor_text: draft.anchor_text,
         anchor_rects_json: draft.anchor_rects_json,
+        title: title ?? draft.title,
         source: draft.source,
       });
       if (created) setPanelView({ kind: 'note', noteId: created.id });
@@ -460,6 +469,7 @@ export default function ReaderPage() {
           offset_ratio: anchor.offset_ratio,
           anchor_text: anchor.anchor_text,
           anchor_rects_json: anchor.anchor_rects_json,
+          title: deriveTitleFromContent(msg.text),
           source: 'ai',
         });
         if (!created) return;
