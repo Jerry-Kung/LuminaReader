@@ -95,3 +95,36 @@ def test_patch_and_delete(client, data_root):
     # 重复删除幂等 204
     assert client.delete(f"/api/v1/pdfs/{created.pdf_id}/notes/{nid}").status_code == 204
     assert client.get(f"/api/v1/pdfs/{created.pdf_id}/notes").json()["data"]["notes"] == []
+
+
+def test_create_with_title(client, data_root):
+    created = _book(client)
+    r = client.post(
+        f"/api/v1/pdfs/{created.pdf_id}/notes",
+        json={"content": "正文", "page": 1, "title": "标题A"},
+    )
+    assert r.status_code == 201
+    assert r.json()["data"]["title"] == "标题A"
+    # 无 title 时字段为 None
+    r2 = client.post(f"/api/v1/pdfs/{created.pdf_id}/notes", json={"content": "x", "page": 1})
+    assert r2.json()["data"]["title"] is None
+
+
+def test_patch_title_only_and_readback(client, data_root):
+    created = _book(client)
+    nid = client.post(
+        f"/api/v1/pdfs/{created.pdf_id}/notes", json={"content": "原文", "page": 3}
+    ).json()["data"]["id"]
+    # 只改标题，正文不动，响应回读整行
+    patch = client.patch(
+        f"/api/v1/pdfs/{created.pdf_id}/notes/{nid}", json={"title": "只改标题"}
+    )
+    assert patch.status_code == 200
+    body = patch.json()["data"]
+    assert body["title"] == "只改标题"
+    assert body["content"] == "原文"
+    assert body["page"] == 3  # 回读整行含完整字段
+    # 全空 body → 400
+    assert client.patch(
+        f"/api/v1/pdfs/{created.pdf_id}/notes/{nid}", json={}
+    ).status_code == 400

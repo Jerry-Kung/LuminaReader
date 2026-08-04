@@ -5,7 +5,7 @@ import sqlite3
 import pytest
 
 from lumina.db.migrations import initialize_schema
-from lumina.db.models import NoteRow, delete_note, insert_note, list_notes, update_note, update_note_content
+from lumina.db.models import NoteRow, delete_note, insert_note, list_notes, update_note
 
 
 @pytest.fixture
@@ -52,12 +52,12 @@ def test_list_filters_by_pdf(conn):
 
 def test_update_content(conn):
     insert_note(conn, _row("n1", 1, None, 1))
-    assert update_note_content(conn, "pdf_1", "n1", "新内容", 999) == 1
+    assert update_note(conn, "pdf_1", "n1", content="新内容", title=None, updated_at=999) == 1
     row = list_notes(conn, "pdf_1")[0]
     assert row.content == "新内容" and row.updated_at == 999
     # pdf_id 不匹配 / note 不存在 → rowcount 0
-    assert update_note_content(conn, "pdf_x", "n1", "x", 1) == 0
-    assert update_note_content(conn, "pdf_1", "missing", "x", 1) == 0
+    assert update_note(conn, "pdf_x", "n1", content="x", title=None, updated_at=1) == 0
+    assert update_note(conn, "pdf_1", "missing", content="x", title=None, updated_at=1) == 0
 
 
 def test_delete(conn):

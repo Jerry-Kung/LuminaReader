@@ -948,10 +948,6 @@ def update_note(
     return cursor.rowcount
 
 
-def update_note_content(conn, pdf_id: str, note_id: str, content: str, updated_at: int) -> int:
-    """Deprecated: Task 4 will replace with update_note. Kept for pdfs.py compatibility."""
-    return update_note(conn, pdf_id, note_id, content=content, title=None, updated_at=updated_at)
-
 
 def delete_note(conn, pdf_id: str, note_id: str) -> int:
     cursor = conn.execute(

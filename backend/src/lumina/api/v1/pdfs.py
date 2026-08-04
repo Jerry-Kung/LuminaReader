@@ -19,7 +19,7 @@ from lumina.db.models import (
     list_bookmarks,
     list_notes,
     rename_bookmark,
-    update_note_content,
+    update_note,
     update_pdf_reading_position,
 )
 from lumina.logging import get_logger, log_with_fields
@@ -754,6 +754,7 @@ def _note_payload(row: NoteRow) -> dict:
         "source": row.source,
         "created_at": row.created_at,
         "updated_at": row.updated_at,
+        "title": row.title,
     }
 
 
@@ -806,6 +807,7 @@ async def create_note(pdf_id: str, payload: NoteCreate):
         source=payload.source,
         created_at=now,
         updated_at=now,
+        title=payload.title,
     )
     insert_note(conn, row)
     _log_pdf_call(request_id=request_id, http_status=201, pdf_id=pdf_id, project_id=entry.id)
@@ -820,7 +822,9 @@ async def patch_note(pdf_id: str, note_id: str, payload: NoteUpdate):
         return _pdf_not_found(request_id, pdf_id)
     conn = get_connection(entry.id)
     now = int(_time.time())
-    updated = update_note_content(conn, pdf_id, note_id, payload.content, now)
+    updated = update_note(
+        conn, pdf_id, note_id, content=payload.content, title=payload.title, updated_at=now
+    )
     if updated == 0:
         _log_pdf_call(
             request_id=request_id,
@@ -837,8 +841,10 @@ async def patch_note(pdf_id: str, note_id: str, payload: NoteUpdate):
                 request_id=request_id,
             ),
         )
+    # 部分更新下回显请求值会失真，改为回读整行返回完整 payload
+    row = next((r for r in list_notes(conn, pdf_id) if r.id == note_id), None)
     _log_pdf_call(request_id=request_id, http_status=200, pdf_id=pdf_id, project_id=entry.id)
-    return ok_response({"id": note_id, "content": payload.content, "updated_at": now})
+    return ok_response(_note_payload(row))
 
 
 @router.delete("/{pdf_id}/notes/{note_id}", status_code=204)
