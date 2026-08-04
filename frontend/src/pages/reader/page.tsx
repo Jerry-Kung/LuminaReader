@@ -320,6 +320,10 @@ export default function ReaderPage() {
   const pdfContainerRef = useRef<HTMLDivElement | null>(null);
   pdfContainerRef.current = pdfContainerEl;
   const [aiResults, setAiResults] = useState<AIResult[]>([]);
+  // 流式期间 aiResults 被 ~50ms 节流的 setAiResults 持续替换；handleSaveMessageAsNote 用 ref
+  // 读取最新值而非把 aiResults 放进 useCallback 依赖，避免该 prop 引用抖动打穿 MessageBubble 的 memo。
+  const aiResultsRef = useRef(aiResults);
+  aiResultsRef.current = aiResults;
   const [isAIWorking, setIsAIWorking] = useState(false);
   const [aiError, setAiError] = useState<string | null>(null);
   const [activeTaskTypes, setActiveTaskTypes] = useState<ChipPluginType[]>([]);
@@ -460,7 +464,7 @@ export default function ReaderPage() {
   const handleSaveMessageAsNote = useCallback(
     async (msg: Message) => {
       if (msg.noteSaved || !msg.text.trim()) return;
-      const card = aiResults.find((r) => r.messages.some((m) => m.id === msg.id));
+      const card = aiResultsRef.current.find((r) => r.messages.some((m) => m.id === msg.id));
       const anchor: NoteAnchor = card?.noteAnchor ?? { page: currentPage };
       try {
         const created = await notesApi.add({
@@ -485,7 +489,7 @@ export default function ReaderPage() {
         readerToastTimerRef.current = setTimeout(() => setReaderToast(null), 5000);
       }
     },
-    [aiResults, currentPage, notesApi],
+    [currentPage, notesApi],
   );
 
   // V1.2.5：通用浮动面板（要点 / 全书总结 / 笔记视图）；切书时关闭，
@@ -2157,7 +2161,7 @@ export default function ReaderPage() {
           onJumpToSource={goToPage}
           canCreateNoteFromSelection={!!textSelection}
           onCreateNoteFromSelection={handleCreateNoteFromSelection}
-          onSaveMessageAsNote={(m) => void handleSaveMessageAsNote(m)}
+          onSaveMessageAsNote={handleSaveMessageAsNote}
         />
       </div>
 
