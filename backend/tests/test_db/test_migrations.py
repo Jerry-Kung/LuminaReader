@@ -42,15 +42,15 @@ def _seed_v1_project_meta(conn) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_schema_version_constant_is_9():
-    assert SCHEMA_VERSION == 9
+def test_schema_version_constant_is_10():
+    assert SCHEMA_VERSION == 10
 
 
-def test_registry_contains_001_through_009_in_order():
+def test_registry_contains_001_through_010_in_order():
     migrations = registered_migrations()
     versions = [m.target_version for m in migrations]
     filenames = [m.filename for m in migrations]
-    assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9]
+    assert versions == [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
     assert filenames[0] == "001_initial.py"
     assert filenames[1] == "002_add_pdf_last_read_page.py"
     assert filenames[2] == "003_add_pdf_last_read_offset.py"
@@ -60,6 +60,7 @@ def test_registry_contains_001_through_009_in_order():
     assert filenames[6] == "007_memory_tables.py"
     assert filenames[7] == "008_add_message_sources.py"
     assert filenames[8] == "009_notes_table.py"
+    assert filenames[9] == "010_add_note_title.py"
 
 
 # ---------------------------------------------------------------------------
@@ -600,7 +601,7 @@ def test_apply_pending_runs_004_005_006_007_008_and_009_when_at_v3(monkeypatch, 
     monkeypatch.setattr(mig, "_REGISTRY", patched)
     try:
         apply_pending(conn)
-        assert calls == [4, 5, 6, 7, 8, 9]
+        assert calls == [4, 5, 6, 7, 8, 9, 10]
     finally:
         monkeypatch.setattr(mig, "_REGISTRY", original)
 
