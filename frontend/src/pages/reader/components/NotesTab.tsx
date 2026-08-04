@@ -25,6 +25,12 @@ function firstLine(content: string): string {
   return line.replace(/^[#>\-*\s]+/, '').slice(0, 60) || '（空）';
 }
 
+function displayLabel(n: NoteItem): string {
+  const t = n.title?.trim();
+  if (t) return t.slice(0, 60);
+  return firstLine(n.content);
+}
+
 export default function NotesTab({ notes, loading, onCreate, onOpen, onRemove, onJump }: NotesTabProps) {
   return (
     <div className="py-2 px-2 space-y-2">
@@ -59,8 +65,8 @@ export default function NotesTab({ notes, loading, onCreate, onOpen, onRemove, o
               className={`${SOURCE_ICON[n.source].icon} text-amber-400 text-xs flex-shrink-0`}
               title={SOURCE_ICON[n.source].label}
             />
-            <span className="flex-1 truncate text-[12px] text-stone-600" title={firstLine(n.content)}>
-              {firstLine(n.content)}
+            <span className="flex-1 truncate text-[12px] text-stone-600" title={displayLabel(n)}>
+              {displayLabel(n)}
             </span>
             <button
               onClick={(e) => {
