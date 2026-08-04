@@ -54,12 +54,12 @@ export function useNotes(pdfId: string | undefined) {
   );
 
   const update = useCallback(
-    async (id: string, content: string) => {
+    async (id: string, patch: { content?: string; title?: string }) => {
       if (!pdfId) return;
       const generation = generationRef.current;
-      const { updated_at } = await updateNote(pdfId, id, content);
+      const { updated_at } = await updateNote(pdfId, id, patch);
       if (generationRef.current !== generation) return;
-      setNotes((prev) => prev.map((n) => (n.id === id ? { ...n, content, updated_at } : n)));
+      setNotes((prev) => prev.map((n) => (n.id === id ? { ...n, ...patch, updated_at } : n)));
     },
     [pdfId],
   );
