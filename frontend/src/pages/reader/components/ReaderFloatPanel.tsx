@@ -74,7 +74,7 @@ function NoteView({
     setSaving(true);
     setError(null);
     try {
-      await onUpdate(note.id, { content, title: titleDraft.trim() || undefined });
+      await onUpdate(note.id, { content, title: titleDraft.trim() });
       setEditing(false);
     } catch {
       setError('保存失败，请重试');
