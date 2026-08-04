@@ -1198,6 +1198,7 @@ export interface NoteItem {
   source: NoteSource;
   created_at: number;
   updated_at: number;
+  title: string | null;
 }
 
 export interface NoteCreateInput {
@@ -1206,6 +1207,7 @@ export interface NoteCreateInput {
   offset_ratio?: number;
   anchor_text?: string;
   anchor_rects_json?: string;
+  title?: string;
   source: NoteSource;
 }
 
@@ -1236,6 +1238,7 @@ export async function createNote(pdfId: string, input: NoteCreateInput): Promise
       source: input.source,
       created_at: now,
       updated_at: now,
+      title: input.title ?? null,
     };
   }
   const url = `${API_BASE}/api/v1/pdfs/${encodeURIComponent(pdfId)}/notes`;
@@ -1256,7 +1259,7 @@ export async function createNote(pdfId: string, input: NoteCreateInput): Promise
 export async function updateNote(
   pdfId: string,
   noteId: string,
-  content: string,
+  patch: { content?: string; title?: string },
 ): Promise<{ updated_at: number }> {
   if (!API_BASE) return { updated_at: Math.floor(Date.now() / 1000) };
   const url = `${API_BASE}/api/v1/pdfs/${encodeURIComponent(pdfId)}/notes/${encodeURIComponent(noteId)}`;
@@ -1265,13 +1268,13 @@ export async function updateNote(
     response = await fetch(url, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ content }),
+      body: JSON.stringify(patch),
     });
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'Failed to reach backend.';
     throw new TranslateApiError('NETWORK_ERROR', msg);
   }
-  const data = await parseEnvelope<{ id: string; content: string; updated_at: number }>(response);
+  const data = await parseEnvelope<{ updated_at: number }>(response);
   return { updated_at: data.updated_at };
 }
 
