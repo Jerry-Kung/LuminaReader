@@ -261,6 +261,32 @@ def test_apply_pending_009_idempotent_when_table_pre_exists(conn):
     assert "anchor_rects_json" in cols
 
 
+def test_apply_pending_010_adds_title_column_from_v9(conn):
+    """notes.title 列从 v9 升级时被正确添加；使用 PRAGMA 验证列确实存在。"""
+    _seed_v9_db(conn)  # 种子库处于 v9，notes 表存在但无 title 列
+    # 升级前 title 列不存在
+    cols_before = {row[1] for row in conn.execute("PRAGMA table_info(notes)").fetchall()}
+    assert "title" not in cols_before
+
+    new_version = apply_pending(conn)
+
+    assert new_version == SCHEMA_VERSION
+    # 升级后 title 列应存在
+    cols_after = {row[1] for row in conn.execute("PRAGMA table_info(notes)").fetchall()}
+    assert "title" in cols_after
+
+
+def test_apply_pending_010_idempotent_when_column_pre_exists(conn):
+    """notes.title 列已被手工 ALTER 加入时，010 迁移应静默跳过而非报重复列。"""
+    _seed_v9_db(conn)  # 种子库处于 v9，notes 表存在但无 title 列
+    conn.execute("ALTER TABLE notes ADD COLUMN title TEXT")
+    # 不应抛 "duplicate column name: title"
+    new_version = apply_pending(conn)
+    assert new_version == SCHEMA_VERSION
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(notes)").fetchall()}
+    assert "title" in cols
+
+
 def test_apply_pending_003_idempotent_when_column_pre_exists(conn):
     """Directly verifies the PRAGMA-detection branch of 003 itself."""
     _seed_v104_schema2_db(conn)
@@ -460,6 +486,18 @@ def test_initialize_schema_at_v4_clean_db(conn):
         for row in conn.execute("PRAGMA index_list(selections)").fetchall()
     }
     assert "idx_selections_pdf" in indexes
+
+
+def _seed_v9_db(conn) -> None:
+    """Simulate a V1.2.5 schema=9 DB: has notes table WITHOUT title column (which 010 adds)."""
+    _seed_v1_project_meta(conn)
+    # Apply migrations up to 009 (but not 010 which adds title)
+    migrate(conn, 1, 9)
+    # Verify we're at v9 and title doesn't exist yet
+    assert read_schema_version(conn) == 9
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(notes)").fetchall()}
+    assert "anchor_rects_json" in cols
+    assert "title" not in cols
 
 
 def _seed_v3_db(conn, selections_rows: list[tuple] | None = None) -> None:
