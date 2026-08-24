@@ -107,6 +107,25 @@ def test_sq08_translate_mode_aligns_with_translate_plugin() -> None:
     assert "Do NOT summarize" in seg.system
 
 
+def test_sq10_translate_mode_guards_against_context_block() -> None:
+    """ISSUE-016（截图路径）：V1.2.1 跨页上下文块会追加到 user 文本末尾，
+    翻译模式必须明确指示源文本仅限截图中提取的内容，[Reference context ...]
+    参考块不得被提取进 <ocr> 或翻译进 <answer>。"""
+    plugin = _screenshot_qa_plugin()
+    ctx = PluginContext(
+        selection_type="image",
+        user_input=None,
+        target_lang="zh-CN",
+        requested_plugins=["translate"],
+    )
+    seg = plugin.build_segments(ctx)
+    # user 段：声明源文本边界 + 参考块不参与翻译
+    assert "[Reference context" in seg.user
+    assert "do NOT translate" in seg.user
+    # system 段：翻译覆盖指令同步声明参考块非源文本
+    assert "[Reference context" in seg.system
+
+
 def test_sq09_non_translate_mode_unchanged() -> None:
     plugin = _screenshot_qa_plugin()
     # requested_plugins 不含 translate → 不应注入 OVERRIDE，走原默认 user/with_input

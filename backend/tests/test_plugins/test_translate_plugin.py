@@ -110,6 +110,26 @@ def test_t08_image_field_ignored_by_build_segments() -> None:
     assert with_image == baseline
 
 
+def test_t12_plain_template_delimits_source_content() -> None:
+    """ISSUE-016：选区必须被 <source> 定界符包住，且明确指示定界符外内容不参与翻译，
+    防止 V1.2.1 跨页上下文块（追加在 user 文本末尾）被模型一并翻译。"""
+    plugin = _translate_plugin()
+    segments = plugin.build_segments(
+        PluginContext(selection_text="Hello world", user_input=None)
+    )
+    assert "<source>\nHello world\n</source>" in segments.user
+    assert "do NOT translate" in segments.user
+
+
+def test_t13_with_input_template_delimits_source_content() -> None:
+    plugin = _translate_plugin()
+    segments = plugin.build_segments(
+        PluginContext(selection_text="Hello world", user_input="explain the term")
+    )
+    assert "<source>\nHello world\n</source>" in segments.user
+    assert "do NOT translate" in segments.user
+
+
 def test_translate_text_path_build_segments() -> None:
     plugin = _translate_plugin()
     segments = plugin.build_segments(

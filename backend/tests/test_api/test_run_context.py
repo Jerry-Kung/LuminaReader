@@ -18,7 +18,9 @@ from tests.test_api.test_run import (  # noqa: F401
     text_selection_payload,
 )
 
-CONTEXT_MARKER = "[Reference context"
+# ISSUE-016 修复后，translate 模板正文会以字面量提及 "[Reference context ...]" 作为示例，
+# 故探测标记需匹配真实注入块特有的完整头部前缀（见 pdftext/context.py CONTEXT_HEADER_TEMPLATE）
+CONTEXT_MARKER = "[Reference context — full text of pages"
 
 
 def _seed_book_text(pdf_id: str, pages: list[str], status: str = "ok") -> None:
